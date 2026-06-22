@@ -4,8 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from data_agent_backend.api.common import ContextPayload, dump_result
-from data_agent_backend.mcp.tools_runs import run_append_event, run_create, run_get, run_list, run_list_events, run_summary, run_update_status
+from data_agent_backend.api.common import ContextPayload, context_from, dump_result, result_wrap
 from data_agent_backend.models.common import BackendModel
 from data_agent_backend.services.factory import BackendServices
 
@@ -58,31 +57,33 @@ class RunAppendEventRequest(BackendModel):
 @router.post("/create")
 def create_run(payload: RunCreateRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        run_create(
-            run_id=payload.run_id,
-            thread_id=payload.thread_id,
-            project_id=payload.project_id,
-            metadata=payload.metadata,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.run_service.create_run(
+                payload.run_id,
+                payload.thread_id,
+                payload.project_id,
+                payload.metadata,
+                context_from(payload.context, "run_create"),
+            )
         )
     )
 
 
 @router.post("/get")
 def get_run(payload: RunGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(run_get(run_id=payload.run_id, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.run_service.get_run(payload.run_id, context_from(payload.context, "run_get"))))
 
 
 @router.post("/list")
 def list_runs(payload: RunListRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        run_list(
-            thread_id=payload.thread_id,
-            project_id=payload.project_id,
-            status=payload.status,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.run_service.list_runs(
+                payload.thread_id,
+                payload.project_id,
+                payload.status,
+                context_from(payload.context, "run_list"),
+            )
         )
     )
 
@@ -90,12 +91,13 @@ def list_runs(payload: RunListRequest, services: BackendServices = Depends(get_b
 @router.post("/update-status")
 def update_run_status(payload: RunUpdateStatusRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        run_update_status(
-            run_id=payload.run_id,
-            status=payload.status,
-            metadata=payload.metadata,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.run_service.update_status(
+                payload.run_id,
+                payload.status,
+                payload.metadata,
+                context_from(payload.context, "run_update_status"),
+            )
         )
     )
 
@@ -103,27 +105,28 @@ def update_run_status(payload: RunUpdateStatusRequest, services: BackendServices
 @router.post("/events/append")
 def append_run_event(payload: RunAppendEventRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        run_append_event(
-            run_id=payload.run_id,
-            event_type=payload.event_type,
-            message=payload.message,
-            node_name=payload.node_name,
-            tool_name=payload.tool_name,
-            artifact_ids=payload.artifact_ids,
-            approval_id=payload.approval_id,
-            memory_ids=payload.memory_ids,
-            metadata=payload.metadata,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.run_service.append_event(
+                payload.run_id,
+                payload.event_type,
+                payload.message,
+                payload.node_name,
+                payload.tool_name,
+                payload.artifact_ids,
+                payload.approval_id,
+                payload.memory_ids,
+                payload.metadata,
+                context_from(payload.context, "run_append_event"),
+            )
         )
     )
 
 
 @router.post("/events/list")
 def list_run_events(payload: RunGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(run_list_events(run_id=payload.run_id, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.run_service.list_events(payload.run_id, context_from(payload.context, "run_list_events"))))
 
 
 @router.post("/summary")
 def summarize_run(payload: RunGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(run_summary(run_id=payload.run_id, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.run_service.get_summary(payload.run_id, context_from(payload.context, "run_summary"))))

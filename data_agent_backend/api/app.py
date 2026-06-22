@@ -4,17 +4,13 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from data_agent_backend.api.routes_approvals import router as approvals_router
 from data_agent_backend.api.routes_artifacts import router as artifacts_router
-from data_agent_backend.api.routes_catalog import router as catalog_router
+from data_agent_backend.api.routes_datasources import router as datasources_router
 from data_agent_backend.api.routes_execution import router as execution_router
-from data_agent_backend.api.routes_exports import router as exports_router
-from data_agent_backend.api.routes_memory import router as memory_router
 from data_agent_backend.api.routes_policy import router as policy_router
 from data_agent_backend.api.routes_runs import router as runs_router
-from data_agent_backend.api.routes_workspace import router as workspace_router
 from data_agent_backend.models.tool_results import ToolResult
-from data_agent_backend.services.factory import BackendServices, create_backend_services
+from data_agent_backend.services.factory import BackendServices, create_core_services
 
 
 def _json_result(result: ToolResult) -> JSONResponse:
@@ -23,11 +19,16 @@ def _json_result(result: ToolResult) -> JSONResponse:
 
 def create_app(services: BackendServices | None = None) -> FastAPI:
     app = FastAPI(title="Data Agent Backend API")
-    app.state.services = services or create_backend_services()
+    app.state.services = services or create_core_services()
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_request, exc: RequestValidationError) -> JSONResponse:
-        return _json_result(ToolResult.failure("VALIDATION_ERROR", "Request validation failed.", {"errors": exc.errors()}))
+        errors = []
+        for error in exc.errors():
+            sanitized = dict(error)
+            sanitized.pop("input", None)
+            errors.append(sanitized)
+        return _json_result(ToolResult.failure("VALIDATION_ERROR", "Request validation failed.", {"errors": errors}))
 
     @app.exception_handler(Exception)
     async def internal_exception_handler(_request, exc: Exception) -> JSONResponse:
@@ -37,15 +38,11 @@ def create_app(services: BackendServices | None = None) -> FastAPI:
     def health() -> dict:
         return ToolResult.success({"status": "ok"}).model_dump(mode="json")
 
-    app.include_router(workspace_router)
     app.include_router(runs_router)
     app.include_router(artifacts_router)
-    app.include_router(memory_router)
-    app.include_router(approvals_router)
     app.include_router(policy_router)
+    app.include_router(datasources_router)
     app.include_router(execution_router)
-    app.include_router(catalog_router)
-    app.include_router(exports_router)
     return app
 
 

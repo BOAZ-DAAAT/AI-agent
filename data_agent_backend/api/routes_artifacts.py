@@ -4,8 +4,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from data_agent_backend.api.common import ContextPayload, dump_result
-from data_agent_backend.mcp.tools_artifacts import artifact_get, artifact_lineage, artifact_list, artifact_preview, artifact_register
+from data_agent_backend.api.common import ContextPayload, context_from, dump_result, result_wrap
+from data_agent_backend.models.artifacts import ArtifactRegisterRequest
 from data_agent_backend.models.common import BackendModel
 from data_agent_backend.services.factory import BackendServices
 
@@ -31,25 +31,32 @@ class ArtifactListRequest(BackendModel):
 
 @router.post("/register")
 def register_artifact(payload: ArtifactRegisterRequestBody, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(artifact_register(payload=payload.payload, context=payload.context, services=services))
+    return dump_result(
+        result_wrap(
+            lambda: services.artifact_registry.register_artifact(
+                ArtifactRegisterRequest(**payload.payload),
+                context_from(payload.context, "artifact_register"),
+            )
+        )
+    )
 
 
 @router.post("/get")
 def get_artifact(payload: ArtifactGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(artifact_get(artifact_id=payload.artifact_id, services=services))
+    return dump_result(result_wrap(lambda: services.artifact_registry.get_artifact(payload.artifact_id)))
 
 
 @router.post("/list")
 def list_artifacts(payload: ArtifactListRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(artifact_list(run_id=payload.run_id, type=payload.type, services=services))
+    return dump_result(result_wrap(lambda: services.artifact_registry.list_artifacts(run_id=payload.run_id, type=payload.type)))
 
 
 @router.post("/preview")
 def preview_artifact(payload: ArtifactGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(artifact_preview(artifact_id=payload.artifact_id, services=services))
+    return dump_result(result_wrap(lambda: services.artifact_registry.get_preview(payload.artifact_id)))
 
 
 @router.post("/lineage")
 def lineage_artifact(payload: ArtifactGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(artifact_lineage(artifact_id=payload.artifact_id, services=services))
+    return dump_result(result_wrap(lambda: services.artifact_registry.get_lineage(payload.artifact_id)))
 

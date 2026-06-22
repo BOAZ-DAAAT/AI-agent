@@ -4,8 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from data_agent_backend.api.common import ContextPayload, dump_result
-from data_agent_backend.mcp.tools_policy import policy_evaluate
+from data_agent_backend.api.common import ContextPayload, context_from, dump_result, result_wrap
 from data_agent_backend.models.common import BackendModel
 from data_agent_backend.services.factory import BackendServices
 
@@ -25,6 +24,13 @@ class PolicyEvaluateRequest(BackendModel):
 @router.post("/evaluate")
 def evaluate_policy(payload: PolicyEvaluateRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        policy_evaluate(action=payload.action, resource=payload.resource, payload=payload.payload, context=payload.context, services=services)
+        result_wrap(
+            lambda: services.policy_engine.evaluate(
+                payload.action,
+                payload.resource,
+                payload.payload or {},
+                context_from(payload.context, "policy_evaluate"),
+            )
+        )
     )
 

@@ -4,8 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from data_agent_backend.api.common import ContextPayload, dump_result
-from data_agent_backend.mcp.tools_memory import memory_get, memory_list, memory_propose, memory_search
+from data_agent_backend.api.common import ContextPayload, context_from, dump_result, result_wrap
 from data_agent_backend.models.common import BackendModel
 from data_agent_backend.services.factory import BackendServices
 
@@ -45,29 +44,30 @@ class MemorySearchRequest(BackendModel):
 @router.post("/propose")
 def propose_memory(payload: MemoryProposeRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        memory_propose(
-            namespace=payload.namespace,
-            type=payload.type,
-            content=payload.content,
-            source=payload.source,
-            metadata=payload.metadata,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.memory_store.propose_memory(
+                payload.namespace,
+                payload.type,
+                payload.content,
+                payload.source,
+                payload.metadata,
+                context_from(payload.context, "memory_propose"),
+            )
         )
     )
 
 
 @router.post("/list")
 def list_memory(payload: MemoryListRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(memory_list(namespace=payload.namespace, type=payload.type, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.memory_store.list_memory(payload.namespace, payload.type)))
 
 
 @router.post("/get")
 def get_memory(payload: MemoryGetRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(memory_get(memory_id=payload.memory_id, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.memory_store.get_memory(payload.memory_id)))
 
 
 @router.post("/search")
 def search_memory(payload: MemorySearchRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
-    return dump_result(memory_search(namespace=payload.namespace, query=payload.query, type=payload.type, context=payload.context, services=services))
+    return dump_result(result_wrap(lambda: services.memory_store.search_memory(payload.query, payload.namespace, payload.type)))
 

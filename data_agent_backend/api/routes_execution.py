@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from data_agent_backend.api.common import ContextPayload, dump_result
-from data_agent_backend.mcp.tools_execution import sandbox_run_python, sql_run_query
+from data_agent_backend.api.common import ContextPayload, context_from, dump_result, result_wrap
+from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from data_agent_backend.models.common import BackendModel
+from data_agent_backend.models.datasource import DatasourceCredential
+from data_agent_backend.models.execution import ExecutionLimits
 from data_agent_backend.services.factory import BackendServices
 
 from .deps import get_backend_services
@@ -16,8 +18,9 @@ router = APIRouter(prefix="/execution", tags=["execution"])
 class SqlRunRequest(BackendModel):
     query: str
     run_id: str
-    connection_id: str | None = None
-    row_limit: int = 1000
+    datasource_id: str
+    credential: DatasourceCredential
+    row_limit: int | None = None
     context: ContextPayload = None
 
 
@@ -31,26 +34,25 @@ class PythonRunRequest(BackendModel):
 @router.post("/sql")
 def run_sql(payload: SqlRunRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
     return dump_result(
-        sql_run_query(
-            query=payload.query,
-            run_id=payload.run_id,
-            connection_id=payload.connection_id,
-            row_limit=payload.row_limit,
-            context=payload.context,
-            services=services,
+        result_wrap(
+            lambda: services.sql_executor.run_sql_query(
+                query=payload.query,
+                run_id=payload.run_id,
+                datasource_id=payload.datasource_id,
+                credential=payload.credential,
+                context=context_from(payload.context, "sql_run_query"),
+                row_limit=payload.row_limit,
+            )
         )
     )
 
 
 @router.post("/python")
 def run_python(payload: PythonRunRequest, services: BackendServices = Depends(get_backend_services)) -> dict:
+    context = context_from(payload.context, "sandbox_run_python")
+    context = context.model_copy(update={"run_id": context.run_id or payload.run_id})
+    inputs = [ArtifactRef(artifact_id=item, type=ArtifactType.dataset) for item in (payload.input_artifact_ids or [])]
     return dump_result(
-        sandbox_run_python(
-            code=payload.code,
-            run_id=payload.run_id,
-            input_artifact_ids=payload.input_artifact_ids,
-            context=payload.context,
-            services=services,
-        )
+        result_wrap(lambda: services.sandbox_executor.run_python(payload.code, inputs, ExecutionLimits(), context))
     )
 

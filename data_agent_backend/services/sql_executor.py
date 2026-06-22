@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-import csv
-import io
-import sqlite3
-import time
+from time import perf_counter
 
-try:
-    import duckdb
-except ModuleNotFoundError:  # pragma: no cover - optional local execution dependency
-    duckdb = None
 try:
     import sqlglot
     from sqlglot import expressions as exp
@@ -20,7 +13,9 @@ from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactRegisterRequest, ArtifactRef, ArtifactType
 from data_agent_backend.models.common import BackendError, JsonDict
 from data_agent_backend.models.contexts import PolicyContext
+from data_agent_backend.models.datasource import DatasourceCredential, DatasourceType
 from data_agent_backend.services.artifact_registry import ArtifactRegistry
+from data_agent_backend.services.datasource_service import DatasourceService
 from data_agent_backend.services.policy_engine import PolicyEngine
 
 
@@ -45,26 +40,37 @@ BLOCKED_SQL_KEYWORDS = {
 
 
 class SQLExecutor:
-    def __init__(self, config: BackendConfig, registry: ArtifactRegistry, policy_engine: PolicyEngine) -> None:
+    def __init__(
+        self,
+        config: BackendConfig,
+        registry: ArtifactRegistry,
+        policy_engine: PolicyEngine,
+        datasource_service: DatasourceService,
+    ) -> None:
         self.config = config
         self.registry = registry
         self.policy_engine = policy_engine
+        self.datasource_service = datasource_service
 
     def run_sql_query(
         self,
         query: str,
         run_id: str,
-        connection_id: str | None = None,
+        datasource_id: str | None = None,
+        credential: DatasourceCredential | None = None,
         context: PolicyContext | None = None,
         row_limit: int | None = None,
     ) -> ArtifactRef:
         context = context or PolicyContext(run_id=run_id)
-        row_limit = row_limit or self.config.default_sql_row_limit
-        validation = self.validate_sql(query, row_limit)
+        resolved_datasource_id = self.datasource_service.resolve_datasource_id(datasource_id)
+        record = self.datasource_service.get(resolved_datasource_id)
+        row_limit = self.config.default_sql_row_limit if row_limit is None else row_limit
+        validation = self.validate_sql(query, row_limit, record.type)
         decision = self.policy_engine.evaluate(
             "sql.run",
-            connection_id or "duckdb:local",
+            resolved_datasource_id,
             {
+                "datasource_id": resolved_datasource_id,
                 "row_limit": row_limit,
                 "max_row_limit": self.config.max_sql_row_limit_without_approval,
                 **validation,
@@ -83,12 +89,11 @@ class SQLExecutor:
                 created_by_tool=context.tool_name or "sql_run_query",
                 thread_id=context.thread_id,
                 project_id=context.project_id,
-                metadata={"connection_id": connection_id, "row_limit": row_limit},
+                metadata={"datasource_id": resolved_datasource_id, "row_limit": row_limit},
             ),
             context,
         )
-        rows, columns = self._execute_duckdb(query, row_limit)
-        csv_text = self._rows_to_csv(columns, rows)
+        rows, columns, csv_text = self.datasource_service.query_datasource(resolved_datasource_id, credential, query, row_limit)
         result_artifact = self.registry.register_artifact(
             ArtifactRegisterRequest(
                 run_id=run_id,
@@ -100,14 +105,106 @@ class SQLExecutor:
                 project_id=context.project_id,
                 parent_ids=[query_artifact.artifact_id],
                 lineage_edge_type="query_result_of",
-                metadata={"connection_id": connection_id, "row_limit": row_limit, "returned_rows": len(rows)},
+                metadata={"datasource_id": resolved_datasource_id, "row_limit": row_limit, "returned_rows": len(rows)},
                 preview={"row_count": len(rows), "columns": columns, "sample_rows": [dict(zip(columns, row)) for row in rows[:5]]},
             ),
             context,
         )
         return result_artifact.ref()
 
-    def validate_sql(self, query: str, row_limit: int) -> JsonDict:
+    def run_analysis_query(
+        self,
+        query: str,
+        run_id: str,
+        datasource_id: str | None = None,
+        credential: DatasourceCredential | None = None,
+        context: PolicyContext | None = None,
+        row_limit: int | None = None,
+    ) -> JsonDict:
+        context = context or PolicyContext(run_id=run_id, tool_name="db_run_analysis_query")
+        context = context.model_copy(update={"run_id": run_id, "tool_name": "db_run_analysis_query"})
+        resolved_datasource_id = self.datasource_service.resolve_datasource_id(datasource_id)
+        record = self.datasource_service.get(resolved_datasource_id)
+        row_limit = self.config.default_sql_row_limit if row_limit is None else row_limit
+        validation = self.validate_sql(query, row_limit, record.type)
+        decision = self.policy_engine.evaluate(
+            "sql.run",
+            resolved_datasource_id,
+            {
+                "datasource_id": resolved_datasource_id,
+                "row_limit": row_limit,
+                "max_row_limit": self.config.max_sql_row_limit_without_approval,
+                **validation,
+            },
+            context,
+        )
+        if decision.requires_approval:
+            raise BackendError("APPROVAL_REQUIRED", decision.reason, {"decision_id": decision.decision_id})
+        if not decision.allowed:
+            raise BackendError("POLICY_BLOCKED", decision.reason, {"decision_id": decision.decision_id})
+
+        query_artifact = self.registry.register_artifact(
+            ArtifactRegisterRequest(
+                run_id=run_id,
+                type=ArtifactType.sql_query,
+                content_text=query,
+                filename="query.sql",
+                created_by_tool="db_run_analysis_query",
+                thread_id=context.thread_id,
+                project_id=context.project_id,
+                metadata={"datasource_id": resolved_datasource_id, "row_limit": row_limit},
+            ),
+            context,
+        )
+        started = perf_counter()
+        rows, columns, csv_text = self.datasource_service.query_datasource(resolved_datasource_id, credential, query, row_limit)
+        runtime_ms = int((perf_counter() - started) * 1000)
+        preview_rows = [dict(zip(columns, row)) for row in rows[:50]]
+        preview = {
+            "columns": columns,
+            "rows": preview_rows,
+            "truncated": len(rows) > len(preview_rows),
+        }
+        result_artifact = self.registry.register_artifact(
+            ArtifactRegisterRequest(
+                run_id=run_id,
+                type=ArtifactType.sql_result,
+                content_text=csv_text,
+                filename="result.csv",
+                created_by_tool="db_run_analysis_query",
+                thread_id=context.thread_id,
+                project_id=context.project_id,
+                parent_ids=[query_artifact.artifact_id],
+                lineage_edge_type="query_result_of",
+                metadata={"datasource_id": resolved_datasource_id, "row_limit": row_limit, "returned_rows": len(rows)},
+                preview={
+                    "row_count": len(rows),
+                    "columns": columns,
+                    "sample_rows": preview_rows,
+                },
+            ),
+            context,
+        )
+        artifact_ref = result_artifact.ref().model_dump(mode="json")
+        artifact_ref["format"] = "csv"
+        return {
+            "artifact_ref": artifact_ref,
+            "preview": preview,
+            "profile": {
+                "returned_rows": len(rows),
+                "preview_rows": len(preview_rows),
+                "column_count": len(columns),
+            },
+            "execution": {
+                "datasource_id": resolved_datasource_id,
+                "tool_name": "db_run_analysis_query",
+                "row_limit": row_limit,
+                "runtime_ms": runtime_ms,
+            },
+            "warnings": [],
+        }
+
+    def validate_sql(self, query: str, row_limit: int, datasource_type: DatasourceType | str = DatasourceType.mysql) -> JsonDict:
         stripped = query.strip()
         if not stripped:
             return {"blocked": True, "reason": "SQL query is empty."}
@@ -119,7 +216,7 @@ class SQLExecutor:
             return {"blocked": True, "reason": f"Blocked SQL keyword(s): {', '.join(blocked)}."}
         if sqlglot is not None and exp is not None:
             try:
-                parsed = sqlglot.parse_one(stripped, read="duckdb")
+                parsed = sqlglot.parse_one(stripped, read=self._sqlglot_dialect(datasource_type))
             except Exception as exc:
                 return {"blocked": True, "reason": f"SQL parse failed: {exc}"}
             if not isinstance(parsed, (exp.Select, exp.Union, exp.With)):
@@ -130,40 +227,17 @@ class SQLExecutor:
             return {"blocked": True, "reason": "row_limit must be positive."}
         return {"blocked": False}
 
-    def _execute_duckdb(self, query: str, row_limit: int) -> tuple[list[tuple], list[str]]:
-        wrapped = f"SELECT * FROM ({query.rstrip(';')}) AS data_agent_subquery LIMIT {int(row_limit)}"
-        start = time.monotonic()
-        if duckdb is None:
-            return self._execute_sqlite(wrapped)
-        con = duckdb.connect(database=":memory:", read_only=False)
-        try:
-            result = con.execute(wrapped)
-            rows = result.fetchall()
-            columns = [desc[0] for desc in result.description or []]
-            return rows, columns
-        finally:
-            con.close()
-
-    def _execute_sqlite(self, wrapped_query: str) -> tuple[list[tuple], list[str]]:
-        con = sqlite3.connect(":memory:")
-        try:
-            cur = con.execute(wrapped_query)
-            rows = cur.fetchall()
-            columns = [desc[0] for desc in cur.description or []]
-            return rows, columns
-        finally:
-            con.close()
-
-    def _rows_to_csv(self, columns: list[str], rows: list[tuple]) -> str:
-        out = io.StringIO()
-        writer = csv.writer(out)
-        writer.writerow(columns)
-        writer.writerows(rows)
-        return out.getvalue()
-
     def _has_multiple_statements(self, query: str) -> bool:
         trimmed = query.strip()
         if ";" not in trimmed:
             return False
         return trimmed.rstrip().rstrip(";").find(";") != -1
+
+    def _sqlglot_dialect(self, datasource_type: DatasourceType | str) -> str:
+        value = datasource_type.value if hasattr(datasource_type, "value") else str(datasource_type)
+        if value == DatasourceType.postgresql.value:
+            return "postgres"
+        if value == DatasourceType.sqlite.value:
+            return "sqlite"
+        return "mysql"
 
