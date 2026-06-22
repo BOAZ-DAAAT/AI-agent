@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# === 프로젝트 런타임/생성물 (추가) ===
+.data_agent/
+.test_data/
+.pytest_tmp/
+demo_outputs/
+daaa_outputs/
+gx/uncommitted/
+DATA_Analyst_Assistant_Agent/agents/eda/outputs/
