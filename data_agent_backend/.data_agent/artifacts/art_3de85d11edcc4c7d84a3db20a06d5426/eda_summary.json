@@ -1,0 +1,237 @@
+{
+  "run_id": "run_6df55f6a4a88484a85ac4847500a409e",
+  "source_artifacts": [
+    "art_3c637584d5214698aafbdc482ff15092"
+  ],
+  "profile": {
+    "row_count": 72,
+    "columns": [
+      "category",
+      "total_orders",
+      "average_review_score",
+      "average_delivery_days"
+    ],
+    "dtypes": {
+      "category": "str",
+      "total_orders": "int64",
+      "average_review_score": "float64",
+      "average_delivery_days": "float64"
+    },
+    "null_counts": {
+      "category": 0,
+      "total_orders": 0,
+      "average_review_score": 0,
+      "average_delivery_days": 0
+    },
+    "unique_counts": {
+      "category": 72,
+      "total_orders": 70,
+      "average_review_score": 72,
+      "average_delivery_days": 72
+    },
+    "numeric_summary": {
+      "total_orders": {
+        "count": 72.0,
+        "mean": 1351.0416666666667,
+        "std": 2209.0761464410066,
+        "min": 2.0,
+        "25%": 87.25,
+        "50%": 244.0,
+        "75%": 1481.0,
+        "max": 9272.0
+      },
+      "average_review_score": {
+        "count": 72.0,
+        "mean": 4.099572222222222,
+        "std": 0.3073848293296766,
+        "min": 2.5,
+        "25%": 3.992375,
+        "50%": 4.1198,
+        "75%": 4.2235,
+        "max": 5.0
+      },
+      "average_delivery_days": {
+        "count": 72.0,
+        "mean": 11.991531944444445,
+        "std": 2.0353356359423893,
+        "min": 5.6667,
+        "25%": 10.776175,
+        "50%": 11.995249999999999,
+        "75%": 12.932324999999999,
+        "max": 20.8004
+      }
+    },
+    "categorical_top_values": {
+      "category": {
+        "bed_bath_table\n": 1,
+        "health_beauty\n": 1,
+        "sports_leisure\n": 1,
+        "computers_accessories\n": 1,
+        "furniture_decor\n": 1
+      }
+    },
+    "sample_available": true,
+    "quality_status": "usable",
+    "key_issues": [],
+    "recommended_next_steps": [
+      "continue_to_analysis",
+      "document_limitations"
+    ],
+    "source_artifacts": [
+      "art_3c637584d5214698aafbdc482ff15092"
+    ]
+  },
+  "user_question": "카테고리별로 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 비교해서 어떤 카테고리 성과가 좋은지 분석해줘",
+  "analysis_plan": {
+    "run_quality": true,
+    "run_distribution": true,
+    "run_comparison": true,
+    "run_relationship": true,
+    "distribution_focus": "사용자 질문과 관련된 수치형 컬럼의 분포 편향 여부 확인",
+    "comparison_focus": "key_column 기준 그룹별 주요 지표 비교",
+    "relationship_focus": "사용자 질문의 핵심 변수 간 상관관계 집중",
+    "skip_reason": "",
+    "priority_metrics": [
+      {
+        "metric": "total_orders",
+        "reason": "카테고리별 주문 수를 비교하여 성과를 분석하기 위함"
+      },
+      {
+        "metric": "average_review_score",
+        "reason": "카테고리별 평균 리뷰 점수를 비교하여 성과를 분석하기 위함"
+      },
+      {
+        "metric": "average_delivery_days",
+        "reason": "카테고리별 평균 배송 소요일을 비교하여 성과를 분석하기 위함"
+      }
+    ]
+  },
+  "insight_result": "핵심 패턴\n\n1.  주문 수의 극심한 편중 현상: total_orders의 평균은 1351.04개이나 중앙값은 244개로, 소수의 카테고리(bed_bath_table: 9272개, health_beauty: 8649개, sports_leisure: 7530개)에 주문이 압도적으로 집중되어 있음을 보여줍니다. 이는 시장이 소수의 인기 카테고리에 의해 주도되는 '롱테일'이 아닌 '헤드 집중형' 구조를 가질 가능성을 시사합니다. 다만, total_orders에 10개의 이상치가 존재하며, 특히 9개 카테고리의 주문 수가 30개 미만이므로, 이들 카테고리의 통계적 신뢰도는 낮을 수 있습니다.\n\n2.  배송 속도와 고객 만족도 간의 역상관 관계: average_review_score와 average_delivery_days 간의 상관계수가 -0.44로, 배송 소요일이 길어질수록 리뷰 점수가 낮아지는 비교적 강한 음의 상관관계를 보입니다. 이는 고객들이 빠른 배송을 중요한 서비스 요소로 인식하며, 배송 지연이 고객 만족도 하락으로 직결될 수 있음을 시사합니다. average_review_score에 6개, average_delivery_days에 2개의 이상치가 존재하므로, 이들 이상치가 상관관계에 미치는 영향을 고려해야 합니다.\n\n3.  주문 수와 고객 만족도/배송 속도 간의 낮은 연관성: total_orders와 average_review_score 간의 상관계수는 -0.026, total_orders와 average_delivery_days 간의 상관계수는 0.12로, 주문 수가 많다고 해서 반드시 리뷰 점수가 높거나 배송이 빠르지는 않음을 보여줍니다. 이는 판매량과 고객 만족도/배송 효율성이 독립적으로 관리되어야 하는 별개의 비즈니스 지표임을 시사합니다.\n\n4.  클러스터 분석을 통한 카테고리별 성과 유형 분류: 4개의 클러스터가 도출되었으며, 실루엣 점수 0.3604로 클러스터 간 구분이 어느 정도 가능합니다.\n    *   C1 (고볼륨·균형 그룹): total_orders 5295.21개, average_review_score 4.09점, average_delivery_days 12.35일. bed_bath_table, health_beauty, sports_leisure 등 주요 인기 카테고리가 포함됩니다. 높은 주문 수를 기록하며 리뷰 점수와 배송 소요일도 평균 수준을 유지하는, 시장을 주도하는 카테고리 그룹으로 해석될 수 있습니다.\n    *   C2 (저볼륨·고만족·빠른배송 그룹): total_orders 361.5개, average_review_score 4.29점, average_delivery_days 10.21일. fashion_bags_accessories, pet_shop, books_general_interest 등이 포함됩니다. 주문 수는 적지만 고객 만족도가 높고 배송이 빠른 카테고리 그룹으로, 잠재적 성장 가능성이 있거나 틈새시장을 공략하는 카테고리로 해석될 수 있습니다.\n    *   C0 (중간볼륨·평균 그룹): total_orders 416.23개, average_review_score 4.01점, average_delivery_days 12.96일. electronics, stationery, Unknown 등이 포함됩니다. 전반적으로 평균적인 성과를 보이는 다수의 카테고리 그룹으로 해석될 수 있습니다.\n    *   C3 (저볼륨·저만족·느린배송 그룹): total_orders 628.0개, average_review_score 3.01점, average_delivery_days 17.90일. office_furniture, security_and_services가 포함됩니다. 주문 수가 적고 고객 만족도가 매우 낮으며 배송도 가장 느린, 개선이 시급한 카테고리 그룹으로 해석될 수 있습니다. 특히 security_and_services는 주문 수가 2개로 매우 적어 해당 클러스터의 통계적 신뢰도가 낮을 수 있습니다.\n\n구조 해석\n\n이 데이터는 소수의 인기 카테고리에 주문이 집중되는 '헤드 집중형' 시장 구조를 시사합니다. 또한, 배송 속도와 고객 만족도 사이에 뚜렷한 트레이드오프 관계가 존재하여, 빠른 배송이 고객 만족도에 중요한 영향을 미치는 비즈니스 구조로 해석될 수 있습니다. 반면, 주문 수는 고객 만족도나 배송 속도와는 독립적으로 움직이는 경향을 보여, 각 지표가 서로 다른 비즈니스 동인에 의해 영향을 받는 분절형 성과 구조를 가질 가능성이 있습니다.\n\n해석 주의사항\n\ntotal_orders, average_review_score, average_delivery_days에 이상치가 존재하며, 특히 9개 카테고리의 total_orders가 30개 미만이므로, 이들 카테고리의 평균 리뷰 점수 및 평균 배송 소요일은 통계적으로 신뢰하기 어려울 수 있습니다.",
+  "hypotheses": "[가설 1]\n관찰: average_review_score와 average_delivery_days 간의 상관계수가 -0.44로, 배송 소요일이 길어질수록 리뷰 점수가 낮아지는 비교적 강한 음의 상관관계를 보입니다.\nH0: 카테고리별 평균 배송 소요일과 평균 리뷰 점수 사이에는 유의미한 선형 관계가 없다.\nH1: 카테고리별 평균 배송 소요일이 길어질수록 평균 리뷰 점수는 유의미하게 낮아진다.\n검증방법: 스피어만 상관분석\n필요변수: target=average_review_score, feature=average_delivery_days\n현재데이터: 현재 마트로 검증 가능\n\n[가설 2]\n관찰: C2 (저볼륨·고만족·빠른배송 그룹)의 average_review_score는 4.29점, average_delivery_days는 10.21일로, 다른 클러스터에 비해 높은 리뷰 점수와 빠른 배송 소요일을 보입니다.\nH0: 평균 배송 소요일이 특정 임계값 이하인 카테고리 그룹과 그 이상인 카테고리 그룹 간의 평균 리뷰 점수에는 유의미한 차이가 없다.\nH1: 평균 배송 소요일이 특정 임계값 이하인 카테고리 그룹의 평균 리뷰 점수는 그 이상인 카테고리 그룹보다 유의미하게 높다.\n검증방법: 독립표본 t-검정 (또는 Mann-Whitney U 검정)\n필요변수: target=average_review_score, feature=average_delivery_days (이분형 변수로 변환 필요)\n현재데이터: 현재 마트로 검증 가능\n\n[가설 3]\n관찰: total_orders의 평균은 1351.04개이나 중앙값은 244개로, 소수의 카테고리에 주문이 압도적으로 집중되어 있습니다. 또한, total_orders에 10개의 이상치가 존재하며, 9개 카테고리의 주문 수가 30개 미만입니다.\nH0: 주문 수가 적은 카테고리 그룹과 주문 수가 많은 카테고리 그룹 간의 평균 리뷰 점수에는 유의미한 차이가 없다.\nH1: 주문 수가 적은 카테고리 그룹의 평균 리뷰 점수는 주문 수가 많은 카테고리 그룹보다 유의미하게 낮다.\n검증방법: 독립표본 t-검정 (또는 Mann-Whitney U 검정)\n필요변수: target=average_review_score, feature=total_orders (이분형 변수로 변환 필요)\n현재데이터: 현재 마트로 검증 가능\n\n[다음 분석 방향]\n1. 교란변수 후보:\n   - product_price (카테고리별 평균 상품 가격): 상품 가격이 높을수록 배송 소요일에 대한 민감도나 리뷰 점수에 영향을 줄 수 있습니다.\n   - seller_reputation (판매자 평판): 판매자 평판이 좋은 카테고리는 배송 소요일이 길어도 리뷰 점수가 높게 유지될 수 있습니다. (현재 마트에 없음, 추가 확보 필요)\n   - product_complexity (상품 복잡도): 복잡한 상품일수록 배송 소요일이 길어지거나 설치/사용의 어려움으로 리뷰 점수에 영향을 줄 수 있습니다. (현재 마트에 없음, 추가 확보 필요)\n   - seasonality (계절성): 특정 시기에 주문이 몰리는 카테고리는 배송 소요일이 길어질 수 있습니다. (현재 마트에 없음, 추가 확보 필요)\n\n2. 통제 방법:\n   - 다중회귀 분석: average_review_score를 종속변수로, average_delivery_days, total_orders, product_price 등을 독립변수로 포함하여 각 변수의 순수한 영향을 파악합니다.\n   - 층화 분석: product_price 구간별로 데이터를 층화하여 각 층 내에서 average_delivery_days와 average_review_score 간의 관계를 분석합니다.\n   - 그룹별 하위분석: total_orders가 매우 적은 카테고리(예: 30개 미만)를 제외하고 분석을 수행하여 이상치 및 통계적 신뢰도가 낮은 카테고리의 영향을 줄입니다.",
+  "final_summary": "이 데이터는 total_orders의 평균이 1351.04개, 중앙값이 244개로, 소수의 카테고리에 주문이 압도적으로 집중된 '헤드 집중형' 시장 구조를 보입니다. average_review_score와 average_delivery_days 간의 -0.44 상관계수는 배송 소요일이 길어질수록 리뷰 점수가 낮아지는 강한 음의 상관관계를 시사하며, 이는 스피어만 상관분석으로 검증 가능합니다. 또한, C2 그룹의 높은 리뷰 점수와 빠른 배송 소요일은 독립표본 t-검정으로 배송 소요일 임계값에 따른 리뷰 점수 차이를 검증할 수 있습니다. 다음 에이전트는 스피어만 상관분석으로 average_review_score와 average_delivery_days 관계를 우선 검증하라.",
+  "statistical_metadata": {
+    "row_count": 72,
+    "distribution": {
+      "total_orders": {
+        "mean": 1351.0417,
+        "median": 244.0,
+        "std": 2209.0761,
+        "skewness": 2.0659,
+        "min": 2.0,
+        "max": 9272.0
+      },
+      "average_review_score": {
+        "mean": 4.0996,
+        "median": 4.1198,
+        "std": 0.3074,
+        "skewness": -1.8345,
+        "min": 2.5,
+        "max": 5.0
+      },
+      "average_delivery_days": {
+        "mean": 11.9915,
+        "median": 11.9952,
+        "std": 2.0353,
+        "skewness": 0.5975,
+        "min": 5.6667,
+        "max": 20.8004
+      }
+    },
+    "group_comparison": {
+      "total_orders": {
+        "top3_groups": {
+          "bed_bath_table\n": 9272.0,
+          "health_beauty\n": 8649.0,
+          "sports_leisure\n": 7530.0
+        },
+        "bottom3_groups": {
+          "security_and_services": 2.0,
+          "fashion_childrens_clothes\n": 7.0,
+          "cds_dvds_musicals\n": 12.0
+        },
+        "group_max": 9272.0,
+        "group_min": 2.0,
+        "group_std": 2209.0761
+      },
+      "average_review_score": {
+        "top3_groups": {
+          "fashion_childrens_clothes\n": 5.0,
+          "cds_dvds_musicals\n": 4.6429,
+          "books_general_interest\n": 4.5113
+        },
+        "bottom3_groups": {
+          "security_and_services": 2.5,
+          "diapers_and_hygiene\n": 3.3784,
+          "office_furniture\n": 3.5174
+        },
+        "group_max": 5.0,
+        "group_min": 2.5,
+        "group_std": 0.3074
+      },
+      "average_delivery_days": {
+        "top3_groups": {
+          "office_furniture\n": 20.8004,
+          "christmas_supplies\n": 15.6733,
+          "fashion_shoes\n": 15.4346
+        },
+        "bottom3_groups": {
+          "arts_and_craftmanship\n": 5.6667,
+          "la_cuisine\n": 7.6429,
+          "books_imported\n": 7.9649
+        },
+        "group_max": 20.8004,
+        "group_min": 5.6667,
+        "group_std": 2.0353
+      }
+    },
+    "correlation_pairs": {
+      "corr_total_orders_vs_average_review_score": -0.026,
+      "corr_total_orders_vs_average_delivery_days": 0.12,
+      "corr_average_review_score_vs_average_delivery_days": -0.44
+    },
+    "missing_total": 0,
+    "outliers_by_column": {
+      "total_orders": 10,
+      "average_review_score": 6,
+      "average_delivery_days": 2
+    },
+    "duplicate_count": 0,
+    "clustering": {
+      "n_clusters": 4,
+      "silhouette_score": 0.3604,
+      "cluster_centroids": {
+        "C0": {
+          "total_orders": 416.2333,
+          "average_review_score": 4.0105,
+          "average_delivery_days": 12.9686
+        },
+        "C1": {
+          "total_orders": 5295.2143,
+          "average_review_score": 4.0915,
+          "average_delivery_days": 12.3546
+        },
+        "C2": {
+          "total_orders": 361.5,
+          "average_review_score": 4.2906,
+          "average_delivery_days": 10.2142
+        },
+        "C3": {
+          "total_orders": 628.0,
+          "average_review_score": 3.0087,
+          "average_delivery_days": 17.9002
+        }
+      }
+    }
+  },
+  "key_charts": [
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\bar_bottom_average_delivery_days.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\bar_top_total_orders.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\bubble_total_orders_vs_average_review_score.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\cluster_profile.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\correlation_heatmap.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\grouped_bar_top_categories.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\radar_top_categories.png",
+    "C:\\Users\\USER\\Desktop\\대학교\\대외활동\\BOAZ\\ADV\\DATA_Analyst_Assistant_Agent\\agents\\eda\\tools\\..\\outputs\\all\\scatter_average_review_score_vs_average_delivery_days.png"
+  ],
+  "error_log": []
+}

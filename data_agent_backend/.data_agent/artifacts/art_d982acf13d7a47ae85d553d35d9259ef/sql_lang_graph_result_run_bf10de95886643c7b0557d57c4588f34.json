@@ -1,0 +1,49 @@
+{
+  "plan": {
+    "original_question": "Run an EDA data quality and distribution profile on the orders data.",
+    "question_type": "데이터 품질 및 분포 분석",
+    "task_type": "query_answer",
+    "requested_output": "sql_only",
+    "target_metric": "데이터 품질 및 분포 지표",
+    "dimensions": [],
+    "filters": [],
+    "time_condition": null,
+    "relevant_tables": [
+      "orders"
+    ],
+    "mart_name": null,
+    "grain": null,
+    "load_strategy": null,
+    "ambiguity_note": "EDA 데이터 품질 및 분포 프로파일링은 다양한 지표를 포함할 수 있습니다. 여기서는 각 컬럼의 NULL 값 비율, 고유 값 개수, 그리고 숫자형/날짜형 컬럼의 경우 최소/최대/평균 값을 포함하는 일반적인 프로파일링 쿼리를 생성합니다. 범주형 컬럼의 경우 상위 5개 값의 분포를 포함합니다."
+  },
+  "mart_design": {},
+  "sql_draft": {
+    "sql": "SELECT\n  'order_id' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_id) AS non_null_rows,\n  COUNT(DISTINCT order_id) AS distinct_values,\n  (COUNT(*) - COUNT(order_id)) / COUNT(*) * 100 AS null_percentage,\n  NULL AS min_value,\n  NULL AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'customer_id' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(customer_id) AS non_null_rows,\n  COUNT(DISTINCT customer_id) AS distinct_values,\n  (COUNT(*) - COUNT(customer_id)) / COUNT(*) * 100 AS null_percentage,\n  NULL AS min_value,\n  NULL AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_status' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_status) AS non_null_rows,\n  COUNT(DISTINCT order_status) AS distinct_values,\n  (COUNT(*) - COUNT(order_status)) / COUNT(*) * 100 AS null_percentage,\n  NULL AS min_value,\n  NULL AS max_value,\n  NULL AS avg_value,\n  (SELECT GROUP_CONCAT(CONCAT(order_status, ' (', count_status, ')') ORDER BY count_status DESC SEPARATOR '; ') FROM (SELECT order_status, COUNT(*) AS count_status FROM orders GROUP BY order_status ORDER BY count_status DESC LIMIT 5) AS top_status) AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_purchase_timestamp' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_purchase_timestamp) AS non_null_rows,\n  COUNT(DISTINCT order_purchase_timestamp) AS distinct_values,\n  (COUNT(*) - COUNT(order_purchase_timestamp)) / COUNT(*) * 100 AS null_percentage,\n  MIN(order_purchase_timestamp) AS min_value,\n  MAX(order_purchase_timestamp) AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_approved_at' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_approved_at) AS non_null_rows,\n  COUNT(DISTINCT order_approved_at) AS distinct_values,\n  (COUNT(*) - COUNT(order_approved_at)) / COUNT(*) * 100 AS null_percentage,\n  MIN(order_approved_at) AS min_value,\n  MAX(order_approved_at) AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_delivered_carrier_date' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_delivered_carrier_date) AS non_null_rows,\n  COUNT(DISTINCT order_delivered_carrier_date) AS distinct_values,\n  (COUNT(*) - COUNT(order_delivered_carrier_date)) / COUNT(*) * 100 AS null_percentage,\n  MIN(order_delivered_carrier_date) AS min_value,\n  MAX(order_delivered_carrier_date) AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_delivered_customer_date' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_delivered_customer_date) AS non_null_rows,\n  COUNT(DISTINCT order_delivered_customer_date) AS distinct_values,\n  (COUNT(*) - COUNT(order_delivered_customer_date)) / COUNT(*) * 100 AS null_percentage,\n  MIN(order_delivered_customer_date) AS min_value,\n  MAX(order_delivered_customer_date) AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders\nUNION ALL\nSELECT\n  'order_estimated_delivery_date' AS column_name,\n  COUNT(*) AS total_rows,\n  COUNT(order_estimated_delivery_date) AS non_null_rows,\n  COUNT(DISTINCT order_estimated_delivery_date) AS distinct_values,\n  (COUNT(*) - COUNT(order_estimated_delivery_date)) / COUNT(*) * 100 AS null_percentage,\n  MIN(order_estimated_delivery_date) AS min_value,\n  MAX(order_estimated_delivery_date) AS max_value,\n  NULL AS avg_value,\n  NULL AS top_5_values\nFROM orders;",
+    "sql_type": "select",
+    "target_table": null,
+    "source_tables": [
+      "orders"
+    ],
+    "columns_used": [
+      "order_id",
+      "customer_id",
+      "order_status",
+      "order_purchase_timestamp",
+      "order_approved_at",
+      "order_delivered_carrier_date",
+      "order_delivered_customer_date",
+      "order_estimated_delivery_date"
+    ],
+    "business_grain": null,
+    "precheck_sql": null,
+    "postcheck_sql": null,
+    "reasoning": "orders 테이블의 각 컬럼에 대해 데이터 품질 및 분포 프로파일링을 수행합니다. 각 컬럼에 대해 총 행 수, NULL이 아닌 행 수, 고유 값 수, NULL 값 비율을 계산합니다. 숫자형 또는 날짜/시간형 컬럼의 경우 최소값과 최대값을 포함하고, 범주형 컬럼(order_status)의 경우 상위 5개 값의 분포를 포함합니다. AVG_VALUE는 숫자형 컬럼이 없으므로 NULL로 설정합니다."
+  },
+  "validation": {
+    "result": "valid",
+    "reason": "생성된 SQL이 사용자의 요청(EDA 데이터 품질 및 분포 프로파일링)을 정확하게 반영하고 있습니다. 각 컬럼별로 NULL 값 비율, 고유 값 개수, 최소/최대 값, 그리고 범주형 컬럼의 상위 값 분포를 잘 계산하고 있습니다.",
+    "feedback": "SQL 쿼리가 각 컬럼의 데이터 유형에 맞춰 적절한 통계량을 계산하고 있습니다. 특히, 'order_status'와 같은 범주형 컬럼에 대해 상위 5개 값의 분포를 보여주는 것은 EDA 관점에서 매우 유용합니다. 다만, 숫자형 컬럼이 없어서 avg_value가 모두 NULL로 나오는 점은 아쉽지만, 이는 데이터 스키마에 따른 결과이므로 SQL 자체의 문제는 아닙니다. 향후 숫자형 컬럼이 추가될 경우 해당 컬럼에 대한 평균값 계산 로직을 추가하면 더 완벽한 프로파일링이 될 것입니다."
+  },
+  "final_answer": "주문 데이터에 대한 EDA 데이터 품질 및 분포 프로파일 분석 결과입니다.\n\n**핵심 요약:**\n\n*   총 99,441개의 주문 데이터가 존재합니다.\n*   `order_id`, `customer_id`, `order_purchase_timestamp`, `order_estimated_delivery_date` 컬럼은 결측치 없이 완전합니다.\n*   `order_status`는 8가지 고유 값을 가지며, 대부분의 주문은 'delivered' 상태입니다.\n*   `order_approved_at`, `order_delivered_carrier_date`, `order_delivered_customer_date` 컬럼에는 결측치가 존재하며, 특히 `order_delivered_customer_date`의 결측률이 가장 높습니다(2.9817%).\n\n**세부 분석:**\n\n1.  **`order_id`**:\n    *   총 99,441개의 고유한 주문 ID가 있으며, 결측치는 없습니다. 모든 주문이 고유하게 식별됩니다.\n\n2.  **`customer_id`**:\n    *   총 99,441개의 고유한 고객 ID가 있으며, 결측치는 없습니다. 모든 주문에 고객 정보가 연결되어 있습니다.\n\n3.  **`order_status`**:\n    *   총 99,441개의 값이 있으며, 결측치는 없습니다.\n    *   8가지 고유한 주문 상태가 존재합니다.\n    *   가장 흔한 상태는 'delivered' (96,478건)이며, 그 다음으로 'shipped' (1,107건), 'canceled' (625건), 'unavailable' (609건), 'invoiced' (314건) 순입니다.\n\n4.  **`order_purchase_timestamp`**:\n    *   총 99,441개의 값이 있으며, 결측치는 없습니다.\n    *   98,875개의 고유한 타임스탬프가 존재합니다.\n    *   가장 이른 구매 시점은 2016년 9월 4일 21시 15분 19초이고, 가장 늦은 구매 시점은 2018년 10월 17일 17시 30분 18초입니다.\n\n5.  **`order_approved_at`**:\n    *   총 99,441개의 값 중 99,281개의 유효한 값이 존재하며, 0.1609%의 결측치가 있습니다.\n    *   90,733개의 고유한 승인 시점 타임스탬프가 존재합니다.\n    *   가장 이른 승인 시점은 2016년 9월 15일 12시 16분 38초이고, 가장 늦은 승인 시점은 2018년 9월 3일 17시 40분 6초입니다.\n\n6.  **`order_delivered_carrier_date`**:\n    *   총 99,441개의 값 중 97,658개의 유효한 값이 존재하며, 1.7930%의 결측치가 있습니다.\n    *   81,018개의 고유한 배송사 인계 시점 타임스탬프가 존재합니다.\n    *   가장 이른 배송사 인계 시점은 2016년 10월 8일 10시 34분 1초이고, 가장 늦은 배송사 인계 시점은 2018년 9월 11일 19시 48분 28초입니다.\n\n7.  **`order_delivered_customer_date`**:\n    *   총 99,441개의 값 중 96,476개의 유효한 값이 존재하며, 2.9817%의 결측치가 있습니다.\n    *   95,664개의 고유한 고객 배송 완료 시점 타임스탬프가 존재합니다.\n    *   가장 이른 고객 배송 완료 시점은 2016년 10월 11일 13시 46분 32초이고, 가장 늦은 고객 배송 완료 시점은 2018년 10월 17일 13시 22분 46초입니다.\n\n8.  **`order_estimated_delivery_date`**:\n    *   총 99,441개의 값이 있으며, 결측치는 없습니다.\n    *   459개의 고유한 예상 배송 날짜가 존재합니다.\n    *   가장 이른 예상 배송 날짜는 2016년 9월 30일 0시 0분이고, 가장 늦은 예상 배송 날짜는 2018년 11월 12일 0시 0분입니다.",
+  "source": "main/sql_agent/lang graph"
+}

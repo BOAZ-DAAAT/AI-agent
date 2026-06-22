@@ -1,0 +1,58 @@
+{
+  "plan": {
+    "original_question": "카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일 비교 분석",
+    "question_type": "분석",
+    "task_type": "query_answer",
+    "requested_output": "sql_only",
+    "target_metric": "주문 수, 평균 리뷰 점수, 평균 배송 소요일",
+    "dimensions": [
+      "카테고리"
+    ],
+    "filters": [],
+    "time_condition": null,
+    "relevant_tables": [
+      "orders",
+      "order_items",
+      "products",
+      "product_category_name_translation",
+      "order_reviews"
+    ],
+    "mart_name": null,
+    "grain": null,
+    "load_strategy": null,
+    "ambiguity_note": "배송 소요일의 정의가 명확하지 않습니다. 'order_delivered_customer_date'와 'order_purchase_timestamp' 간의 차이로 가정합니다."
+  },
+  "mart_design": {},
+  "sql_draft": {
+    "sql": "SELECT\n  COALESCE(pct.product_category_name_english, p.product_category_name) AS category_name,\n  COUNT(DISTINCT o.order_id) AS total_orders,\n  AVG(orv.review_score) AS average_review_score,\n  AVG(DATEDIFF(o.order_delivered_customer_date, o.order_purchase_timestamp)) AS average_delivery_days\nFROM orders AS o\nJOIN order_items AS oi\n  ON o.order_id = oi.order_id\nJOIN products AS p\n  ON oi.product_id = p.product_id\nLEFT JOIN product_category_name_translation AS pct\n  ON p.product_category_name = pct.product_category_name\nLEFT JOIN order_reviews AS orv\n  ON o.order_id = orv.order_id\nWHERE\n  o.order_delivered_customer_date IS NOT NULL AND o.order_purchase_timestamp IS NOT NULL\nGROUP BY\n  category_name\nORDER BY\n  total_orders DESC;",
+    "sql_type": "select",
+    "target_table": null,
+    "source_tables": [
+      "orders",
+      "order_items",
+      "products",
+      "product_category_name_translation",
+      "order_reviews"
+    ],
+    "columns_used": [
+      "product_category_name_english",
+      "product_category_name",
+      "order_id",
+      "review_score",
+      "order_delivered_customer_date",
+      "order_purchase_timestamp",
+      "product_id"
+    ],
+    "business_grain": "category",
+    "precheck_sql": null,
+    "postcheck_sql": null,
+    "reasoning": "카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 분석하기 위해 다음 단계를 따릅니다.\n1. `orders` 테이블을 `order_items` 테이블과 `order_reviews` 테이블에 `order_id`로 조인합니다.\n2. `order_items` 테이블을 `products` 테이블에 `product_id`로 조인합니다.\n3. `products` 테이블을 `product_category_name_translation` 테이블에 `product_category_name`으로 조인하여 카테고리 이름을 영어로 변환합니다. (LEFT JOIN을 사용하여 번역이 없는 카테고리도 포함)\n4. `COALESCE` 함수를 사용하여 번역된 카테고리 이름이 없으면 원본 카테고리 이름을 사용합니다.\n5. `GROUP BY` 절을 사용하여 카테고리별로 집계합니다.\n6. `COUNT(DISTINCT o.order_id)`를 사용하여 카테고리별 고유 주문 수를 계산합니다.\n7. `AVG(orv.review_score)`를 사용하여 카테고리별 평균 리뷰 점수를 계산합니다.\n8. `DATEDIFF(o.order_delivered_customer_date, o.order_purchase_timestamp)`를 사용하여 주문 접수부터 배송 완료까지의 일수를 계산하고, 이 값의 평균을 구하여 평균 배송 소요일을 계산합니다. 배송 소요일 계산을 위해 `order_delivered_customer_date`와 `order_purchase_timestamp`가 모두 NULL이 아닌 경우만 필터링합니다.\n9. 결과를 주문 수 기준으로 내림차순 정렬합니다."
+  },
+  "validation": {
+    "result": "valid",
+    "reason": "사용자 질문의 모든 요구사항(카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일 비교 분석)을 SQL 쿼리가 정확하게 충족합니다. 필요한 테이블들을 적절히 조인하고, 각 지표를 올바르게 계산하며, 카테고리별로 그룹화하여 분석을 수행합니다. 배송 소요일에 대한 모호성을 'ambiguity_note'에 명시하고 SQL에서 해당 정의에 따라 계산한 점도 적절합니다.",
+    "feedback": "SQL 쿼리는 사용자 질문에 대한 분석을 정확하게 수행합니다. 특히, `COALESCE`를 사용하여 카테고리 이름 번역의 유연성을 확보하고, `DATEDIFF`를 사용하여 배송 소요일을 계산한 점이 좋습니다. `WHERE` 절에서 `order_delivered_customer_date`와 `order_purchase_timestamp`가 NULL이 아닌 경우만 필터링하여 정확한 평균 배송 소요일을 계산한 점도 적절합니다. 실행 결과도 질문의 의도에 부합하는 것으로 보입니다."
+  },
+  "final_answer": "## 카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일 비교 분석\n\n제공된 데이터를 기반으로 카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 비교 분석한 결과는 다음과 같습니다.\n\n**1. 핵심 요약**\n\n*   **주문 수:** 'bed_bath_table' 카테고리가 9,272건으로 가장 많은 주문 수를 기록했습니다. 반면, 'office_furniture'는 1,254건으로 가장 적은 주문 수를 보였습니다.\n*   **평균 리뷰 점수:** 'stationery' 카테고리가 4.2440점으로 가장 높은 평균 리뷰 점수를 받았으며, 'office_furniture'는 3.5174점으로 가장 낮은 점수를 기록했습니다.\n*   **평균 배송 소요일:** 'housewares' 카테고리가 10.8695일로 가장 빠른 평균 배송 소요일을 보였고, 'office_furniture'는 20.8004일로 가장 오래 걸렸습니다.\n\n**2. 상세 분석**\n\n**2.1. 주문 수 기준**\n\n*   **상위 카테고리:**\n    *   bed_bath_table: 9,272건\n    *   health_beauty: 8,649건\n    *   sports_leisure: 7,530건\n*   **하위 카테고리:**\n    *   office_furniture: 1,254건\n    *   (None): 1,392건 (카테고리 정보가 없는 주문)\n    *   pet_shop: 1,688건\n\n**2.2. 평균 리뷰 점수 기준**\n\n*   **상위 카테고리:**\n    *   stationery: 4.2440점\n    *   pet_shop: 4.2175점\n    *   perfumery: 4.2149점\n*   **하위 카테고리:**\n    *   office_furniture: 3.5174점\n    *   bed_bath_table: 3.9210점\n    *   (None): 3.9400점\n\n**2.3. 평균 배송 소요일 기준**\n\n*   **가장 빠른 배송:**\n    *   housewares: 10.8695일\n    *   fashion_bags_accessories: 11.0653일\n    *   pet_shop: 11.1641일\n*   **가장 느린 배송:**\n    *   office_furniture: 20.8004일\n    *   garden_tools: 13.6562일\n    *   computers_accessories: 13.1691일\n\n**3. 특이 사항**\n\n*   'office_furniture' 카테고리는 주문 수가 가장 적고, 평균 리뷰 점수도 가장 낮으며, 평균 배송 소요일은 가장 긴 것으로 나타나 전반적으로 개선이 필요한 것으로 보입니다.\n*   카테고리 정보가 없는 주문(None)도 1,392건 존재하며, 평균 리뷰 점수는 3.9400점, 평균 배송 소요일은 12.7353일입니다.\n*   'bed_bath_table'은 주문 수가 가장 많지만, 평균 리뷰 점수는 3.9210점으로 상대적으로 낮은 편에 속합니다.",
+  "source": "main/sql_agent/lang graph"
+}

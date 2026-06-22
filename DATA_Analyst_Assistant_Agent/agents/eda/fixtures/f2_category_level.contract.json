@@ -1,0 +1,26 @@
+{
+  "name": "f2_category_level",
+  "question": "카테고리별 성과(리뷰·배송·매출)를 비교해줘",
+  "question_type": "comparison",
+  "grain": {
+    "grain_hint": "one row per product_category",
+    "level": "aggregated"
+  },
+  "columns": {
+    "numeric": [
+      "avg_review_score",
+      "avg_delivery_days",
+      "avg_order_price",
+      "total_orders"
+    ],
+    "categorical": [
+      "product_category"
+    ],
+    "datetime": [],
+    "id": [],
+    "count": "total_orders",
+    "target_candidates": [
+      "avg_review_score"
+    ]
+  }
+}

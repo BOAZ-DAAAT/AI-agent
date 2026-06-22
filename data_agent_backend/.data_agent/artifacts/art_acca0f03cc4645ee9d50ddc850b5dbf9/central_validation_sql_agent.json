@@ -1,0 +1,27 @@
+{
+  "run_id": "run_bf10de95886643c7b0557d57c4588f34",
+  "upstream_agent": "sql_agent",
+  "verdict": "fail",
+  "goal": "데이터 프로파일 및 품질 요약",
+  "findings": [
+    {
+      "category": "business_context_pass",
+      "severity": "info",
+      "retryable": false,
+      "detail": "Upstream result can continue."
+    },
+    {
+      "category": "unsafe_sql",
+      "severity": "error",
+      "retryable": true,
+      "detail": "Generated SQL did not pass SELECT/WITH safety validation."
+    }
+  ],
+  "artifact_ids": [
+    "art_42ed6b3b76864765997991756c6de401",
+    "art_d982acf13d7a47ae85d553d35d9259ef",
+    "art_5021b87d6c9441309ea05bc23e5ac345"
+  ],
+  "retryable": true,
+  "suggested_action": "retry_upstream"
+}

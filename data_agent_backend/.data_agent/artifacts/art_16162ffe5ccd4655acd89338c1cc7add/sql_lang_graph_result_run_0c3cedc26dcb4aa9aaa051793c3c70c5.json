@@ -1,0 +1,58 @@
+{
+  "plan": {
+    "original_question": "카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 비교해서 성과 좋은 카테고리 분석해줘",
+    "question_type": "분석",
+    "task_type": "query_answer",
+    "requested_output": "sql_only",
+    "target_metric": "주문 수, 평균 리뷰 점수, 평균 배송 소요일",
+    "dimensions": [
+      "카테고리"
+    ],
+    "filters": [],
+    "time_condition": null,
+    "relevant_tables": [
+      "orders",
+      "order_items",
+      "order_reviews",
+      "products",
+      "product_category_name_translation"
+    ],
+    "mart_name": null,
+    "grain": null,
+    "load_strategy": null,
+    "ambiguity_note": "성과 좋은 카테고리의 기준이 명확하지 않아, SQL 쿼리에서는 단순히 요청된 지표들을 카테고리별로 집계하여 제공합니다. '성과 좋은'에 대한 판단은 사용자의 추가적인 기준에 따라 달라질 수 있습니다."
+  },
+  "mart_design": {},
+  "sql_draft": {
+    "sql": "SELECT\n  COALESCE(pcnt.product_category_name_english, p.product_category_name, 'Unknown') AS category_name,\n  COUNT(DISTINCT o.order_id) AS total_orders,\n  AVG(CASE WHEN orv.review_score IS NOT NULL THEN orv.review_score ELSE NULL END) AS avg_review_score,\n  AVG(CASE WHEN o.order_delivered_customer_date IS NOT NULL AND o.order_purchase_timestamp IS NOT NULL THEN DATEDIFF(o.order_delivered_customer_date, o.order_purchase_timestamp) ELSE NULL END) AS avg_delivery_days\nFROM orders AS o\nJOIN order_items AS oi\n  ON o.order_id = oi.order_id\nJOIN products AS p\n  ON oi.product_id = p.product_id\nLEFT JOIN product_category_name_translation AS pcnt\n  ON p.product_category_name = pcnt.product_category_name\nLEFT JOIN order_reviews AS orv\n  ON o.order_id = orv.order_id\nGROUP BY\n  category_name\nORDER BY\n  total_orders DESC;",
+    "sql_type": "select",
+    "target_table": null,
+    "source_tables": [
+      "orders",
+      "order_items",
+      "products",
+      "product_category_name_translation",
+      "order_reviews"
+    ],
+    "columns_used": [
+      "product_category_name_english",
+      "product_category_name",
+      "order_id",
+      "review_score",
+      "order_delivered_customer_date",
+      "order_purchase_timestamp",
+      "product_id"
+    ],
+    "business_grain": "category",
+    "precheck_sql": null,
+    "postcheck_sql": null,
+    "reasoning": "카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 분석하기 위해 orders, order_items, products, product_category_name_translation, order_reviews 테이블을 조인합니다. 각 카테고리별로 주문 수를 세고, 리뷰 점수의 평균을 계산하며, 주문 접수부터 고객에게 배송 완료까지의 평균 일수를 계산합니다. 카테고리 이름은 영문 번역이 있으면 영문으로, 없으면 원문으로 표시하고, 둘 다 없으면 'Unknown'으로 처리합니다. 결과는 주문 수가 많은 순서대로 정렬합니다."
+  },
+  "validation": {
+    "result": "valid",
+    "reason": "사용자 질문의 모든 요구사항을 충족하며, SQL 쿼리가 정확하게 작성되었습니다. 카테고리별 주문 수, 평균 리뷰 점수, 평균 배송 소요일을 올바르게 집계하고 있습니다. '성과 좋은 카테고리'에 대한 판단은 사용자의 추가적인 기준에 따라 달라질 수 있다는 점을 'ambiguity_note'에 명시하여 적절하게 처리했습니다.",
+    "feedback": "SQL 쿼리는 요청된 지표들을 정확하게 계산하고 있습니다. 특히 `COALESCE`를 사용하여 카테고리 이름의 영문 번역을 우선하고, 없으면 원본 카테고리 이름을 사용하며, 둘 다 없을 경우 'Unknown'으로 처리하는 방식은 데이터의 가독성을 높이는 좋은 접근입니다. `AVG` 함수 내 `CASE WHEN`을 사용하여 `NULL` 값을 처리하는 방식도 적절합니다. `DATEDIFF` 함수를 사용하여 배송 소요일을 계산한 것도 정확합니다. 전반적으로 매우 잘 작성된 쿼리입니다."
+  },
+  "final_answer": "제공해주신 SQL 결과를 바탕으로 카테고리별 성과를 분석해 드리겠습니다.\n\n**핵심 결과 요약:**\n\n*   **주문 수 상위 카테고리:** 'bed_bath_table', 'health_beauty', 'sports_leisure'\n*   **평균 리뷰 점수 상위 카테고리:** 'perfumery', 'stationery', 'toys', 'pet_shop' (모두 4.15점 이상)\n*   **평균 배송 소요일 하위 카테고리 (빠른 배송):** 'housewares', 'fashion_bags_accessories', 'pet_shop', 'toys' (모두 11.5일 미만)\n\n**상세 분석:**\n\n**1. 주문 수 기준:**\n\n*   'bed_bath_table' 카테고리가 9,417건으로 가장 많은 주문 수를 기록했습니다.\n*   그 다음으로는 'health_beauty' (8,836건), 'sports_leisure' (7,720건) 순으로 주문이 많았습니다.\n\n**2. 평균 리뷰 점수 기준:**\n\n*   'perfumery' 카테고리가 4.1619점으로 가장 높은 평균 리뷰 점수를 받았습니다.\n*   'stationery' (4.1939점), 'toys' (4.1586점), 'pet_shop' (4.1851점) 등도 높은 만족도를 보였습니다.\n*   반면, 'office_furniture'는 3.4932점으로 가장 낮은 평균 리뷰 점수를 기록했습니다.\n\n**3. 평균 배송 소요일 기준:**\n\n*   'housewares' 카테고리가 10.8695일로 가장 빠른 평균 배송 소요일을 보였습니다.\n*   'fashion_bags_accessories' (11.0653일), 'pet_shop' (11.1641일), 'toys' (11.6412일) 등도 비교적 빠른 배송이 이루어졌습니다.\n*   'office_furniture'는 20.8004일로 가장 긴 평균 배송 소요일을 기록했습니다.\n\n**종합적인 성과 분석:**\n\n*   **'health_beauty'와 'sports_leisure'**는 주문 수가 많으면서도 평균 리뷰 점수가 4.1점 이상으로 높은 편이며, 배송 소요일도 평균 수준으로 양호하여 전반적으로 좋은 성과를 보이고 있습니다.\n*   **'toys'와 'pet_shop'**은 주문 수는 중간 정도이지만, 평균 리뷰 점수가 매우 높고 배송 소요일도 빠른 편이어서 고객 만족도가 높은 카테고리로 볼 수 있습니다.\n*   **'housewares'**는 주문 수는 중간 정도이지만, 평균 리뷰 점수가 4점 이상이고 배송 소요일이 가장 빨라 효율적인 운영이 이루어지고 있을 가능성이 있습니다.\n*   **'office_furniture'**는 주문 수가 적고 평균 리뷰 점수가 가장 낮으며 배송 소요일도 가장 길어 개선이 필요한 카테고리로 보입니다.",
+  "source": "main/sql_agent/lang graph"
+}

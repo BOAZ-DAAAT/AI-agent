@@ -1,0 +1,31 @@
+{
+  "name": "f1_order_level",
+  "question": "배송일이 리뷰점수에 영향을 주는지 분석해줘",
+  "question_type": "relationship",
+  "grain": {
+    "grain_hint": "one row per order",
+    "level": "raw"
+  },
+  "columns": {
+    "numeric": [
+      "order_price",
+      "order_freight",
+      "delivery_days",
+      "review_score"
+    ],
+    "categorical": [
+      "product_category",
+      "customer_state"
+    ],
+    "datetime": [
+      "order_purchase_timestamp"
+    ],
+    "id": [
+      "order_id"
+    ],
+    "count": null,
+    "target_candidates": [
+      "review_score"
+    ]
+  }
+}

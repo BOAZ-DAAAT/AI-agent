@@ -1,0 +1,19 @@
+{
+  "run_id": "run_837c5f894fce4eabb19328ea2b5771bf",
+  "upstream_agent": "report_agent",
+  "verdict": "pass",
+  "goal": "SQL 기반 질의 응답",
+  "findings": [
+    {
+      "category": "business_context_pass",
+      "severity": "info",
+      "retryable": false,
+      "detail": "Upstream result can continue."
+    }
+  ],
+  "artifact_ids": [
+    "art_a75849c5cd9840f3b1599bcdfbd2cc28"
+  ],
+  "retryable": false,
+  "suggested_action": "continue"
+}

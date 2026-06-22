@@ -1,0 +1,9 @@
+column_name,total_rows,non_null_rows,distinct_values,null_percentage,min_value,max_value,avg_value,top_5_values
+order_id,99441,99441,99441,0.0,,,,
+customer_id,99441,99441,99441,0.0,,,,
+order_status,99441,99441,8,0.0,,,,delivered (96478); shipped (1107); canceled (625); unavailable (609); invoiced (314)
+order_purchase_timestamp,99441,99441,98875,0.0,2016-09-04T21:15:19,2018-10-17T17:30:18,,
+order_approved_at,99441,99281,90733,0.1609,2016-09-15T12:16:38,2018-09-03T17:40:06,,
+order_delivered_carrier_date,99441,97658,81018,1.793,2016-10-08T10:34:01,2018-09-11T19:48:28,,
+order_delivered_customer_date,99441,96476,95664,2.9817,2016-10-11T13:46:32,2018-10-17T13:22:46,,
+order_estimated_delivery_date,99441,99441,459,0.0,2016-09-30T00:00:00,2018-11-12T00:00:00,,

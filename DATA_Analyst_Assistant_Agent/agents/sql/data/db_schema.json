@@ -1,0 +1,377 @@
+{
+  "customers": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "customer_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "customer_unique_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "customer_zip_code_prefix",
+        "type": "VARCHAR(10)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "customer_city",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "customer_state",
+        "type": "VARCHAR(5)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "geolocation": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "geolocation_zip_code_prefix",
+        "type": "VARCHAR(10)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "geolocation_lat",
+        "type": "DOUBLE",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "geolocation_lng",
+        "type": "DOUBLE",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "geolocation_city",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "geolocation_state",
+        "type": "VARCHAR(5)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "order_items": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "order_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_item_id",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "seller_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "shipping_limit_date",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "price",
+        "type": "DECIMAL(10, 2)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "freight_value",
+        "type": "DECIMAL(10, 2)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "order_payments": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "order_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "payment_sequential",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "payment_type",
+        "type": "VARCHAR(30)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "payment_installments",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "payment_value",
+        "type": "DECIMAL(10, 2)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "order_reviews": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "review_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "review_score",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "review_comment_title",
+        "type": "VARCHAR(255)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "review_comment_message",
+        "type": "TEXT",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "review_creation_date",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "review_answer_timestamp",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "orders": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "order_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "customer_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_status",
+        "type": "VARCHAR(20)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_purchase_timestamp",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_approved_at",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_delivered_carrier_date",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_delivered_customer_date",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "order_estimated_delivery_date",
+        "type": "DATETIME",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "product_category_name_translation": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "product_category_name",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_category_name_english",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "products": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "product_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_category_name",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_name_lenght",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_description_lenght",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_photos_qty",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_weight_g",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_length_cm",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_height_cm",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "product_width_cm",
+        "type": "INTEGER",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  },
+  "sellers": {
+    "primary_key": [],
+    "description": "",
+    "columns": [
+      {
+        "name": "seller_id",
+        "type": "VARCHAR(50)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "seller_zip_code_prefix",
+        "type": "VARCHAR(10)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "seller_city",
+        "type": "VARCHAR(100)",
+        "nullable": true,
+        "description": ""
+      },
+      {
+        "name": "seller_state",
+        "type": "VARCHAR(5)",
+        "nullable": true,
+        "description": ""
+      }
+    ],
+    "foreign_keys": []
+  }
+}

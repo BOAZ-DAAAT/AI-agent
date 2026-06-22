@@ -1,0 +1,19 @@
+{
+  "run_id": "run_6df55f6a4a88484a85ac4847500a409e",
+  "upstream_agent": "visualization_agent",
+  "verdict": "pass",
+  "goal": "종합 데이터 분석 (프로파일 + 분석 + 시각화)",
+  "findings": [
+    {
+      "category": "business_context_pass",
+      "severity": "info",
+      "retryable": false,
+      "detail": "Upstream result can continue."
+    }
+  ],
+  "artifact_ids": [
+    "art_6b513e25a3d14d1d892d9e3314cafb8c"
+  ],
+  "retryable": false,
+  "suggested_action": "continue"
+}

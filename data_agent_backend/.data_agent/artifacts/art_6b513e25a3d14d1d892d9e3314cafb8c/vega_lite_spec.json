@@ -1,0 +1,489 @@
+{
+  "chart_type": "bar",
+  "title": "Total_Orders comparison by Category",
+  "vega_lite_spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+    "data": {
+      "values": [
+        {
+          "category": "bed_bath_table\n",
+          "total_orders": 9272,
+          "average_review_score": 3.921,
+          "average_delivery_days": 12.7583
+        },
+        {
+          "category": "health_beauty\n",
+          "total_orders": 8649,
+          "average_review_score": 4.1907,
+          "average_delivery_days": 11.9225
+        },
+        {
+          "category": "sports_leisure\n",
+          "total_orders": 7530,
+          "average_review_score": 4.166,
+          "average_delivery_days": 12.0782
+        },
+        {
+          "category": "computers_accessories\n",
+          "total_orders": 6529,
+          "average_review_score": 3.9851,
+          "average_delivery_days": 13.1691
+        },
+        {
+          "category": "furniture_decor\n",
+          "total_orders": 6307,
+          "average_review_score": 3.9501,
+          "average_delivery_days": 12.8307
+        },
+        {
+          "category": "housewares\n",
+          "total_orders": 5743,
+          "average_review_score": 4.1084,
+          "average_delivery_days": 10.8695
+        },
+        {
+          "category": "watches_gifts\n",
+          "total_orders": 5493,
+          "average_review_score": 4.0716,
+          "average_delivery_days": 12.5882
+        },
+        {
+          "category": "telephony\n",
+          "total_orders": 4093,
+          "average_review_score": 3.9948,
+          "average_delivery_days": 12.7984
+        },
+        {
+          "category": "auto\n",
+          "total_orders": 3809,
+          "average_review_score": 4.1161,
+          "average_delivery_days": 12.1566
+        },
+        {
+          "category": "toys\n",
+          "total_orders": 3804,
+          "average_review_score": 4.2069,
+          "average_delivery_days": 11.6412
+        },
+        {
+          "category": "cool_stuff\n",
+          "total_orders": 3559,
+          "average_review_score": 4.1947,
+          "average_delivery_days": 12.3182
+        },
+        {
+          "category": "garden_tools\n",
+          "total_orders": 3448,
+          "average_review_score": 4.0813,
+          "average_delivery_days": 13.6562
+        },
+        {
+          "category": "perfumery\n",
+          "total_orders": 3088,
+          "average_review_score": 4.2149,
+          "average_delivery_days": 11.7197
+        },
+        {
+          "category": "baby\n",
+          "total_orders": 2809,
+          "average_review_score": 4.0792,
+          "average_delivery_days": 12.4572
+        },
+        {
+          "category": "electronics\n",
+          "total_orders": 2517,
+          "average_review_score": 4.0675,
+          "average_delivery_days": 12.8106
+        },
+        {
+          "category": "stationery\n",
+          "total_orders": 2264,
+          "average_review_score": 4.244,
+          "average_delivery_days": 12.6718
+        },
+        {
+          "category": "fashion_bags_accessories\n",
+          "total_orders": 1821,
+          "average_review_score": 4.191,
+          "average_delivery_days": 11.0653
+        },
+        {
+          "category": "pet_shop\n",
+          "total_orders": 1688,
+          "average_review_score": 4.2175,
+          "average_delivery_days": 11.1641
+        },
+        {
+          "category": "Unknown",
+          "total_orders": 1412,
+          "average_review_score": 3.9338,
+          "average_delivery_days": 12.6758
+        },
+        {
+          "category": "office_furniture\n",
+          "total_orders": 1254,
+          "average_review_score": 3.5174,
+          "average_delivery_days": 20.8004
+        },
+        {
+          "category": "luggage_accessories\n",
+          "total_orders": 1019,
+          "average_review_score": 4.3523,
+          "average_delivery_days": 10.6175
+        },
+        {
+          "category": "consoles_games\n",
+          "total_orders": 1018,
+          "average_review_score": 4.138,
+          "average_delivery_days": 13.5367
+        },
+        {
+          "category": "home_appliances\n",
+          "total_orders": 747,
+          "average_review_score": 4.2256,
+          "average_delivery_days": 11.1806
+        },
+        {
+          "category": "construction_tools_construction\n",
+          "total_orders": 736,
+          "average_review_score": 4.0909,
+          "average_delivery_days": 10.6362
+        },
+        {
+          "category": "musical_instruments\n",
+          "total_orders": 611,
+          "average_review_score": 4.2229,
+          "average_delivery_days": 12.9218
+        },
+        {
+          "category": "small_appliances\n",
+          "total_orders": 609,
+          "average_review_score": 4.2253,
+          "average_delivery_days": 10.7689
+        },
+        {
+          "category": "books_general_interest\n",
+          "total_orders": 495,
+          "average_review_score": 4.5113,
+          "average_delivery_days": 11.5485
+        },
+        {
+          "category": "home_construction\n",
+          "total_orders": 483,
+          "average_review_score": 3.9595,
+          "average_delivery_days": 13.1524
+        },
+        {
+          "category": "food\n",
+          "total_orders": 441,
+          "average_review_score": 4.2628,
+          "average_delivery_days": 9.497
+        },
+        {
+          "category": "furniture_living_room\n",
+          "total_orders": 414,
+          "average_review_score": 3.9372,
+          "average_delivery_days": 13.8737
+        },
+        {
+          "category": "home_confort\n",
+          "total_orders": 392,
+          "average_review_score": 3.8512,
+          "average_delivery_days": 13.4514
+        },
+        {
+          "category": "audio\n",
+          "total_orders": 348,
+          "average_review_score": 3.8301,
+          "average_delivery_days": 13.2755
+        },
+        {
+          "category": "drinks\n",
+          "total_orders": 287,
+          "average_review_score": 4.1288,
+          "average_delivery_days": 10.3507
+        },
+        {
+          "category": "market_place\n",
+          "total_orders": 274,
+          "average_review_score": 4.0726,
+          "average_delivery_days": 12.1246
+        },
+        {
+          "category": "books_technical\n",
+          "total_orders": 256,
+          "average_review_score": 4.3939,
+          "average_delivery_days": 10.5774
+        },
+        {
+          "category": "air_conditioning\n",
+          "total_orders": 246,
+          "average_review_score": 4.0528,
+          "average_delivery_days": 12.1938
+        },
+        {
+          "category": "construction_tools_lights\n",
+          "total_orders": 242,
+          "average_review_score": 4.0853,
+          "average_delivery_days": 9.649
+        },
+        {
+          "category": "kitchen_dining_laundry_garden_furniture\n",
+          "total_orders": 241,
+          "average_review_score": 4.0331,
+          "average_delivery_days": 11.7956
+        },
+        {
+          "category": "fashion_shoes\n",
+          "total_orders": 235,
+          "average_review_score": 4.2852,
+          "average_delivery_days": 15.4346
+        },
+        {
+          "category": "industry_commerce_and_business\n",
+          "total_orders": 231,
+          "average_review_score": 4.126,
+          "average_delivery_days": 10.6981
+        },
+        {
+          "category": "home_appliances_2\n",
+          "total_orders": 227,
+          "average_review_score": 4.1595,
+          "average_delivery_days": 13.8069
+        },
+        {
+          "category": "food_drink\n",
+          "total_orders": 221,
+          "average_review_score": 4.369,
+          "average_delivery_days": 10.7786
+        },
+        {
+          "category": "fixed_telephony\n",
+          "total_orders": 212,
+          "average_review_score": 3.7589,
+          "average_delivery_days": 12.7109
+        },
+        {
+          "category": "art\n",
+          "total_orders": 195,
+          "average_review_score": 4.0821,
+          "average_delivery_days": 11.3046
+        },
+        {
+          "category": "costruction_tools_garden\n",
+          "total_orders": 190,
+          "average_review_score": 4.1239,
+          "average_delivery_days": 11.8376
+        },
+        {
+          "category": "computers\n",
+          "total_orders": 177,
+          "average_review_score": 4.2194,
+          "average_delivery_days": 13.4372
+        },
+        {
+          "category": "agro_industry_and_commerce\n",
+          "total_orders": 177,
+          "average_review_score": 4.0874,
+          "average_delivery_days": 11.5825
+        },
+        {
+          "category": "construction_tools_safety\n",
+          "total_orders": 159,
+          "average_review_score": 3.967,
+          "average_delivery_days": 11.8579
+        },
+        {
+          "category": "signaling_and_security\n",
+          "total_orders": 138,
+          "average_review_score": 4.0918,
+          "average_delivery_days": 10.4315
+        },
+        {
+          "category": "christmas_supplies\n",
+          "total_orders": 125,
+          "average_review_score": 4.0699,
+          "average_delivery_days": 15.6733
+        },
+        {
+          "category": "fashion_underwear_beach\n",
+          "total_orders": 117,
+          "average_review_score": 4.0476,
+          "average_delivery_days": 13.6063
+        },
+        {
+          "category": "fashion_male_clothing\n",
+          "total_orders": 106,
+          "average_review_score": 3.7581,
+          "average_delivery_days": 12.896
+        },
+        {
+          "category": "costruction_tools_tools\n",
+          "total_orders": 97,
+          "average_review_score": 4.4444,
+          "average_delivery_days": 12.068
+        },
+        {
+          "category": "furniture_bedroom\n",
+          "total_orders": 90,
+          "average_review_score": 4.2524,
+          "average_delivery_days": 13.1748
+        },
+        {
+          "category": "tablets_printing_image\n",
+          "total_orders": 79,
+          "average_review_score": 4.1235,
+          "average_delivery_days": 12.9639
+        },
+        {
+          "category": "small_appliances_home_oven_and_coffee\n",
+          "total_orders": 72,
+          "average_review_score": 4.4384,
+          "average_delivery_days": 9.7945
+        },
+        {
+          "category": "cine_photo\n",
+          "total_orders": 63,
+          "average_review_score": 4.2958,
+          "average_delivery_days": 10.4225
+        },
+        {
+          "category": "dvds_blu_ray\n",
+          "total_orders": 56,
+          "average_review_score": 4.1803,
+          "average_delivery_days": 12.8525
+        },
+        {
+          "category": "books_imported\n",
+          "total_orders": 50,
+          "average_review_score": 4.5088,
+          "average_delivery_days": 7.9649
+        },
+        {
+          "category": "music\n",
+          "total_orders": 38,
+          "average_review_score": 4.2105,
+          "average_delivery_days": 11.5526
+        },
+        {
+          "category": "party_supplies\n",
+          "total_orders": 38,
+          "average_review_score": 3.8333,
+          "average_delivery_days": 9.1429
+        },
+        {
+          "category": "furniture_mattress_and_upholstery\n",
+          "total_orders": 37,
+          "average_review_score": 3.8919,
+          "average_delivery_days": 14.4054
+        },
+        {
+          "category": "fashio_female_clothing\n",
+          "total_orders": 36,
+          "average_review_score": 3.9565,
+          "average_delivery_days": 11.8478
+        },
+        {
+          "category": "flowers\n",
+          "total_orders": 29,
+          "average_review_score": 4.4194,
+          "average_delivery_days": 11.1212
+        },
+        {
+          "category": "fashion_sport\n",
+          "total_orders": 26,
+          "average_review_score": 4.3667,
+          "average_delivery_days": 11.8
+        },
+        {
+          "category": "diapers_and_hygiene\n",
+          "total_orders": 25,
+          "average_review_score": 3.3784,
+          "average_delivery_days": 10.6486
+        },
+        {
+          "category": "home_comfort_2\n",
+          "total_orders": 24,
+          "average_review_score": 3.6296,
+          "average_delivery_days": 14.5333
+        },
+        {
+          "category": "arts_and_craftmanship\n",
+          "total_orders": 23,
+          "average_review_score": 4.125,
+          "average_delivery_days": 5.6667
+        },
+        {
+          "category": "la_cuisine\n",
+          "total_orders": 13,
+          "average_review_score": 4.0,
+          "average_delivery_days": 7.6429
+        },
+        {
+          "category": "cds_dvds_musicals\n",
+          "total_orders": 12,
+          "average_review_score": 4.6429,
+          "average_delivery_days": 10.5714
+        },
+        {
+          "category": "fashion_childrens_clothes\n",
+          "total_orders": 7,
+          "average_review_score": 5.0,
+          "average_delivery_days": 8.8571
+        },
+        {
+          "category": "security_and_services",
+          "total_orders": 2,
+          "average_review_score": 2.5,
+          "average_delivery_days": 15.0
+        }
+      ]
+    },
+    "mark": "bar",
+    "encoding": {
+      "x": {
+        "field": "category",
+        "type": "nominal"
+      },
+      "y": {
+        "field": "total_orders",
+        "type": "quantitative"
+      }
+    }
+  },
+  "encoding": {
+    "x": {
+      "field": "category",
+      "type": "nominal",
+      "label": "Category",
+      "unit": "unknown"
+    },
+    "y": {
+      "field": "total_orders",
+      "type": "quantitative",
+      "label": "Total Orders",
+      "unit": "unknown"
+    }
+  },
+  "data_reference": [
+    "art_3c637584d5214698aafbdc482ff15092",
+    "art_c970c32f1e8544f1b411c7e1dd16f815",
+    "art_aab4e6bb52b1439da02d41d3291dcda1"
+  ],
+  "analysis_reference": [
+    "art_23f9890748254cf4afeb20fbc457730c"
+  ],
+  "analysis_findings": [
+    "요청한 SQL 결과를 SQL 실행 결과 산출물을 기준으로 분석했습니다.",
+    "분석 요약을 만들기 전에 EDA 프로파일의 데이터 품질 신호를 함께 검토했습니다.",
+    "SQL 결과는 72개 행과 4개 컬럼으로 구성되어 있습니다.",
+    "total_orders 값은 최소 2, 최대 9272, 평균 1351.04입니다.",
+    "total_orders 기준 가장 높은 category 값은 bed_bath_table\n이며, 값은 9272입니다.",
+    "LLM 종합 해석: 핵심 패턴\n\n1.  주문량의 높은 편차와 소수 상위 판매자의 존재: total_orders의 평균은 1351.0417이지만, 중앙값은 244.0으로 훨씬 낮고, 표준편차는 2209.0761로 평균보다 크며, 최대값은 9272.0에 달한다. 이는 전체 주문의 상당 부분이 소수의 판매자 또는 제품에 집중되어 있음을 시사한다. 다만, 이 데이터는 판매자 또는 제품별 주문량을 직접적으로 구분하지 않으므로, 특정 소수가 전체 시장을 지배하는 '헤드 집중형' 구조인지, 아니면 단순히 일부 품목의 인기가 높은 것인지는 추가 분석이 필요하다.\n\n2.  리뷰 점수와 배송 기간 간의 유의미한 음의 상관관계: average_review_score와 average_delivery_days 간의 상관계수는 -0.44로, 배송 기간이 길어질수록 고객 만족도(리뷰 점수)가 낮아지는 경향이 있음을 강하게 시사한다. 이는 고객 경험에서 배송 속도가 중요한 요소임을 나타내며, 배송 지연이 직접적으로 부정적인 피드백으로 이어질 수 있음을 의미한다. 그러나 이 상관관계가 인과관계를 의미하는 것은 아니며, 다른 요인(예: 제품 품질, 고객 서비스)이 복합적으로 작용할 가능성도 배제할 수 없다.\n\n3.  주문량과 고객 만족도, 배송 기간 간의 약한 관계: total_orders와 average_review_score 간의 상관계수는 -0.026, total_orders와 average_delivery_days 간의 상관계수는 0.12로, 주문량과 고객 만족도 또는 배송 기간 사이에는 뚜렷한 선형 관계가 나타나지 않는다. 이는 주문량이 많다고 해서 반드시 고객 만족도가 높거나 낮아지는 것은 아니며, 배송 기간 또한 주문량에 크게 영향을 받지 않음을 시사한다. 즉, 시장에서 '많이 팔리는 것'과 '고객이 만족하는 것', '빠르게 배송되는 것'이 직접적으로 연동되지 않는 복합적인 비즈니스 환경일 가능성이 있다.\n\n4.  리뷰 점수의 전반적인 높은 수준과 일부 낮은 점수: average_review_score의 평균은 4.0996, 중앙값은 4.1198로 전반적으로 높은 만족도를 보이지만, 최소값은 2.5로 일부 낮은 점수도 존재한다. 또한, 왜도(skewness)가 -1.8345로 왼쪽으로 치우쳐 있어 대부분의 리뷰 점수가 높은 쪽에 분포하고 있음을 나타낸다. 이는 대부분의 고객이 서비스에 만족하고 있지만, 특정 경우에 불만족하는 고객도 존재하며, 이들의 경험이 평균을 낮추는 요인으로 작용할 수 있음을 시사한다.\n\n구조 해석\n\n이 데이터는 소수의 인기 품목이나 판매자에게 주문이 집중되는 헤드 집중형 시장 구조를 시사하며, 고객 만족도에 배송 속도가 중요한 영향을 미치는 트레이드오프 구조가 존재할 가능성이 있다. 또한, 주문량과 고객 만족도, 배송 기간 간의 직접적인 연관성이 약하다는 점에서, 시장 내에서 다양한 비즈니스 모델과 고객 경험 요소들이 복합적으로 작용하는 분절형 구조를 보일 수 있음을 시사한다.\n\n해석 주의사항\n총 72개의 행으로 데이터 표본 수가 적어 분석 결과의 일반화에 주의가 필요하다. total_orders에서 10개, average_review_score에서 6개, average_delivery_days에서 2개의 이상치가 발견되었으며, 이들이 분석 결과에 미치는 영향에 대한 추가 검토가 필요하다."
+  ],
+  "axis": {
+    "x_label": "Category",
+    "y_label": "Total Orders",
+    "unit_note": "Units are inferred from artifact columns until source metadata is available."
+  }
+}

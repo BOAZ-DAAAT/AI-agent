@@ -1,0 +1,27 @@
+{
+  "name": "f3_category_month",
+  "question": "카테고리별 월매출 추세를 비교해줘",
+  "question_type": "time",
+  "grain": {
+    "grain_hint": "one row per (product_category, month)",
+    "level": "aggregated"
+  },
+  "columns": {
+    "numeric": [
+      "monthly_revenue",
+      "monthly_orders",
+      "avg_review_score"
+    ],
+    "categorical": [
+      "product_category"
+    ],
+    "datetime": [
+      "order_month"
+    ],
+    "count": "monthly_orders",
+    "target_candidates": [
+      "monthly_revenue",
+      "avg_review_score"
+    ]
+  }
+}
