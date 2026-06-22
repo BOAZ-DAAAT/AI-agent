@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -23,6 +24,8 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     OrchestrationState,
     SupervisorTerminalState,
 )
+
+DEFAULT_SUPERVISOR_MAX_RETRY_PER_AGENT = int(os.getenv("SUPERVISOR_MAX_RETRY_PER_AGENT", "1"))
 
 AGENT_LOG_LABELS = {
     "sql_agent": "SQL agent",
@@ -84,6 +87,7 @@ class SQLAgentSupervisor:
             thread_id=thread_id,
             user_query=user_query,
             datasource_id=resolved_datasource_id,
+            max_retry_per_agent=DEFAULT_SUPERVISOR_MAX_RETRY_PER_AGENT,
         )
         self.adapter.update_run_status(state.run_id, RunStatus.running)
         self._log("Orchestration 실행 시작")
@@ -283,6 +287,7 @@ class SQLAgentSupervisor:
             "query": state.error_state.get("query", ""),
             "datasource_id": state.error_state.get("datasource_id") or state.datasource_id,
             "step": state.error_state.get("step", state.current_step),
+            "details": state.error_state.get("details", {}),
         }
 
     # ── explicit agent nodes ──────────────────────────────────────────────
@@ -357,6 +362,9 @@ class SQLAgentSupervisor:
             raise RuntimeError("Supervisor gate requires upstream and validation results.")
 
         if validation.status == AgentStatus.failed:
+            if validation.retry_hint.retryable and upstream.agent_name == self.sql_agent.name and self._can_retry_agent(state, upstream.agent_name):
+                self._prepare_retry(state, upstream, validation)
+                return {**graph_state, "state": state, "gate_result": "retryable"}
             if validation.retry_hint.retryable:
                 state.terminal_state = SupervisorTerminalState.failed_with_recoverable_context
                 self.adapter.update_run_status(
@@ -420,8 +428,42 @@ class SQLAgentSupervisor:
             return "finalize"
         if gate_result == "needs_approval":
             return "approval_gate"
+        if gate_result == "retryable":
+            return "recovery_retry"
         # failed_with_recoverable_context / failed_terminal
         return "end"
+
+    def recovery_retry(self, graph_state: dict[str, Any]) -> dict[str, Any]:
+        state = graph_state["state"]
+        last_agent_result = graph_state.get("last_agent_result")
+        agent_name = last_agent_result.agent_name if last_agent_result is not None else self.sql_agent.name
+        retry_count = state.retry_counts.get(agent_name, 0) + 1
+        state.retry_counts[agent_name] = retry_count
+        state.current_step = "recovery_retry"
+        state.terminal_state = None
+        self._log(f"재시도 준비: agent={agent_name}, attempt={retry_count}")
+        self.adapter.append_run_event(
+            state.run_id,
+            "supervisor.retry_scheduled",
+            f"Retry scheduled for {agent_name} (attempt {retry_count}).",
+            node_name="recovery_retry",
+            metadata={
+                "agent_name": agent_name,
+                "retry_count": retry_count,
+                "error_state": state.error_state,
+            },
+        )
+        self.adapter.update_run_status(
+            state.run_id,
+            RunStatus.running,
+            metadata={"retry_agent": agent_name, "retry_count": retry_count},
+        )
+        return {**graph_state, "state": state, "gate_result": "retry_ready"}
+
+    def route_after_recovery(self, graph_state: dict[str, Any]) -> str:
+        upstream = graph_state.get("last_agent_result")
+        agent_name = upstream.agent_name if upstream is not None else self.sql_agent.name
+        return self._agent_node_name(agent_name)
 
     def finalize(self, graph_state: dict[str, Any]) -> dict[str, Any]:
         state = graph_state["state"]
@@ -431,6 +473,24 @@ class SQLAgentSupervisor:
         self.adapter.append_run_event(state.run_id, "supervisor.completed", "Supervisor completed.", node_name="finalize")
         self.adapter.update_run_status(state.run_id, RunStatus.succeeded, metadata={"terminal_state": state.terminal_state.value})
         return {**graph_state, "state": state}
+
+    def _can_retry_agent(self, state: OrchestrationState, agent_name: str) -> bool:
+        return state.retry_counts.get(agent_name, 0) < state.max_retry_per_agent
+
+    def _prepare_retry(self, state: OrchestrationState, upstream: AgentEnvelope, validation: AgentEnvelope) -> None:
+        current_message = state.error_state.get("message") or upstream.summary or validation.summary
+        current_query = state.error_state.get("query") or state.generated_sql
+        state.error_state = {
+            "code": validation.retry_hint.reason_code or upstream.retry_hint.reason_code or "retryable_failure",
+            "message": current_message,
+            "query": current_query,
+            "datasource_id": state.datasource_id,
+            "step": upstream.agent_name,
+            "hint": validation.summary,
+            "details": validation.retry_hint.details or upstream.retry_hint.details,
+        }
+        if state.plan is not None:
+            state.plan.retry_context = dict(state.error_state)
 
     def resume_after_approval(self, state: OrchestrationState, approval_id: str) -> OrchestrationState:
         approval = self.adapter.get_approval_status(approval_id)

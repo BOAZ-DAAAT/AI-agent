@@ -51,6 +51,9 @@ class FallbackCompiledGraph:
             next_node = sup.route_after_gate(graph_state)
             if next_node == "approval_gate":
                 return sup.approval_gate(graph_state)
+            if next_node == "recovery_retry":
+                graph_state = sup.recovery_retry(graph_state)
+                next_node = sup.route_after_recovery(graph_state)
             if next_node == "finalize":
                 return sup.finalize(graph_state)
             if next_node == "end":
@@ -78,6 +81,7 @@ def build_graph(adapter: BackendAdapter, *, supervisor: SQLAgentSupervisor | Non
     builder.add_node("central_validate", supervisor.central_validate)
     builder.add_node("supervisor_gate", supervisor.supervisor_gate)
     builder.add_node("approval_gate", supervisor.approval_gate)
+    builder.add_node("recovery_retry", supervisor.recovery_retry)
     builder.add_node("finalize", supervisor.finalize)
 
     builder.add_edge(START, "parse_plan")
@@ -97,8 +101,20 @@ def build_graph(adapter: BackendAdapter, *, supervisor: SQLAgentSupervisor | Non
             "run_visualization_agent": "run_visualization_agent",
             "run_report_agent": "run_report_agent",
             "approval_gate": "approval_gate",
+            "recovery_retry": "recovery_retry",
             "finalize": "finalize",
             "end": END,
+        },
+    )
+    builder.add_conditional_edges(
+        "recovery_retry",
+        supervisor.route_after_recovery,
+        {
+            "run_sql_agent": "run_sql_agent",
+            "run_eda_agent": "run_eda_agent",
+            "run_analysis_agent": "run_analysis_agent",
+            "run_visualization_agent": "run_visualization_agent",
+            "run_report_agent": "run_report_agent",
         },
     )
     builder.add_edge("approval_gate", END)

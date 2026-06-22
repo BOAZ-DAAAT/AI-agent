@@ -30,17 +30,12 @@ if hasattr(sys.stderr, "reconfigure"):
 
 def _normalize_env_aliases() -> None:
     aliases = {
-        "DB_HOST": "MYSQL_HOST",
-        "DB_USER": "MYSQL_USERNAME",
-        "DB_NAME": "MYSQL_DATABASE",
-        "DB_PORT": "MYSQL_PORT",
-        "DB_PASSWORD": "MYSQL_PASSWORD",
         "GOOGLE_API_KEY": "GEMINI_API_KEY",
     }
     for target, source in aliases.items():
         if not os.getenv(target) and os.getenv(source):
             os.environ[target] = os.getenv(source, "")
-    os.environ.setdefault("DB_PASSWORD", "")
+    os.environ.setdefault("MYSQL_PASSWORD", os.getenv("DB_PASSWORD", ""))
 
 
 def _ensure_sql_agent_metadata() -> None:
@@ -58,7 +53,7 @@ def _ensure_sql_agent_metadata() -> None:
 
     engine = get_db_engine()
     if engine is None:
-        raise RuntimeError("DB engine creation failed. Check MYSQL_* or DB_* values in .env.")
+        raise RuntimeError("DB engine creation failed. Check MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USERNAME, MYSQL_PASSWORD in .env.")
 
     inspector = inspect(engine)
     schema = {}
