@@ -1,2 +1,0 @@
-"""EDA Agent package placeholder."""
-

@@ -1,2 +1,0 @@
-"""SQL Agent package placeholder."""
-
