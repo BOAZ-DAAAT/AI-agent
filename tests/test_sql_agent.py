@@ -17,6 +17,11 @@ from DATA_Analyst_Assistant_Agent.agents.sql import planner as planner_module
 from DATA_Analyst_Assistant_Agent.agents.sql.planner import build_sql_plan, SQLPlan
 from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
+from DATA_Analyst_Assistant_Agent.agents.validation.agent import CentralValidationAgent
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.sql_agent import build_app
+from DATA_Analyst_Assistant_Agent.models import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, RetryHint, ValidationBlock
+
 
 
 # ── fixtures ──
@@ -68,6 +73,12 @@ class TestSQLSelfCheck:
 
     def test_markdown_fence_stripped(self):
         assert is_sql_safe("```sql\nSELECT 1\n```")
+
+    def test_mysql_incompatible_function_is_blocked(self):
+        checks = run_sql_self_check("SELECT JULIANDAY(created_at) FROM orders")
+        dialect_check = next(c for c in checks if c.name == "mysql_dialect_compatibility")
+        assert not dialect_check.passed
+        assert "JULIANDAY" in dialect_check.detail
 
     def test_post_execution_checks_columns(self):
         checks = run_sql_self_check("SELECT 1", columns=["x"], row_count=1)
@@ -189,6 +200,363 @@ class TestSQLPlanner:
         assert not is_sql_safe("DROP TABLE orders")
 
 
+class TestSQLLangGraphSmoke:
+    def test_build_app_simple_path_supports_future_input_fields(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, "2024-01-01")])
+        app = build_app()
+
+        result = app.invoke({
+            "user_question": "주문 데이터를 간단히 보여줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["plan"]["route_kind"] == "simple"
+        assert result["sql_draft"]["sql_type"] == "select"
+        assert result["validation"]["result"] == "valid"
+        assert "simple 경로" in result["final_answer"]
+
+    def test_build_app_simple_average_delivery_days_uses_aggregate_sql(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(4.2,)])
+
+        app = build_app()
+        result = app.invoke({
+            "user_question": "주문 완료일부터 배송 완료일까지 평균 소요일 계산",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert "AVG(DATEDIFF(order_delivered_customer_date, order_approved_at))" in result["sql_draft"]["sql"]
+        assert "WHERE order_approved_at IS NOT NULL" in result["sql_draft"]["sql"]
+        assert result["validation"]["result"] == "valid"
+        assert result["plan"]["expected_result_shape"] == "single_scalar"
+
+    def test_build_app_rejects_non_aggregate_sql_for_average_question(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
+            "integrity_text": '{}'
+        })
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner다" in prompt:
+                    return DummyResponse(
+                        '{"route_kind":"simple","selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],'
+                        '"target_metric":"평균 소요일","dimensions":[],"filters":[],"time_condition":null,"reasoning":"평균 질문"}'
+                    )
+                return DummyResponse(
+                    '{"sql":"SELECT * FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id"],"reasoning":"잘못된 초안"}'
+                )
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        app = build_app()
+        result = app.invoke({
+            "user_question": "주문 완료일부터 배송 완료일까지 평균 소요일 계산",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 0,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["validation"]["result"] == "invalid"
+        assert any(item["category"] == "intent_mismatch" for item in result["validation"]["findings"])
+        assert result["retry_hint"]["reason_code"] == "intent_mismatch"
+
+    def test_build_app_rejects_missing_table_before_execution(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}]}}',
+            "integrity_text": '{}'
+        })
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner다" in prompt:
+                    return DummyResponse(
+                        '{"route_kind":"simple","selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],'
+                        '"target_metric":"주문 수","dimensions":[],"filters":[],"time_condition":null,"reasoning":"단순 질의"}'
+                    )
+                return DummyResponse(
+                    '{"sql":"SELECT COUNT(*) AS order_count FROM category_performance_analysis;","sql_type":"select","source_tables":["category_performance_analysis"],"columns_used":["order_id"],"reasoning":"없는 테이블"}'
+                )
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        app = build_app()
+        result = app.invoke({
+            "user_question": "주문 건수 계산",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 0,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["validation"]["result"] == "invalid"
+        assert any(item["category"] == "missing_table" for item in result["validation"]["findings"])
+        assert result["retry_hint"]["reason_code"] == "missing_table"
+
+    def test_build_app_comprehensive_path_generates_datamart_sql(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+        committed = []
+        monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
+        app = build_app()
+
+        result = app.invoke({
+            "user_question": "재사용 가능한 데이터마트를 만들어줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "복잡한 분석을 위한 datamart 필요",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["plan"]["route_kind"] == "comprehensive"
+        assert result["sql_draft"]["sql_type"] == "create_table_as"
+        assert committed and committed[0].lower().startswith("create table analytics.")
+        assert result["validation"]["result"] == "valid"
+        assert "datamart" in result["final_answer"]
+
+    def test_build_app_retries_after_mysql_dialect_failure(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+
+        responses = iter([
+            '{"sql": "SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "1차 시도"}',
+            '{"sql": "SELECT DATEDIFF(order_delivered_customer_date, order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "2차 시도"}',
+        ])
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "MySQL SQL 작성기" in prompt:
+                    return DummyResponse(next(responses))
+                raise AssertionError("unexpected prompt")
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(3,)])
+
+        app = build_app()
+        result = app.invoke({
+            "user_question": "배송 소요일을 계산해줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {"route_kind": "simple", "selected_join_tables": ["orders"]},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 2,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["validation"]["result"] == "valid"
+        assert "DATEDIFF" in result["sql_draft"]["sql"]
+        assert result["retry_count"] == 1
+
+    def test_build_app_normalizes_unqualified_mart_postcheck_sql(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+        committed: list[str] = []
+        executed_queries: list[str] = []
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "MySQL SQL 작성기" in prompt:
+                    return DummyResponse(
+                        '{"sql": "CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;", '
+                        '"sql_type": "create_table_as", '
+                        '"target_table": "category_performance_analysis", '
+                        '"source_tables": ["orders"], '
+                        '"columns_used": ["order_id", "amount"], '
+                        '"postcheck_sql": "SELECT COUNT(*) FROM category_performance_analysis;", '
+                        '"reasoning": "마트 생성"}'
+                    )
+                raise AssertionError("unexpected prompt")
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
+
+        def fake_fetch(sql: str):
+            executed_queries.append(sql)
+            return [(1,)]
+
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", fake_fetch)
+
+        app = build_app()
+        result = app.invoke({
+            "user_question": "재사용 가능한 데이터마트를 만들어줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "복잡한 분석을 위한 datamart 필요",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["sql_draft"]["target_table"] == "analytics.category_performance_analysis"
+        assert result["sql_draft"]["postcheck_sql"] == "SELECT COUNT(*) FROM analytics.category_performance_analysis;"
+        assert any("FROM analytics.category_performance_analysis" in query for query in executed_queries)
+        assert committed
+
+
 # ── mart detection tests ──
 
 class TestMartDetection:
@@ -256,6 +624,68 @@ class TestRouteDetection:
 
 # ── SQLAgent integration tests ──
 
+class _FakeRetryingSQLAgent:
+    name = "sql_agent"
+
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, state, runtime):
+        self.calls += 1
+        if self.calls == 1:
+            state.generated_sql = "SELECT JULIANDAY(order_created_at) FROM orders;"
+            state.error_state = {
+                "code": "mysql_dialect_incompatible_sql",
+                "message": "비호환 표현 'JULIANDAY' 감지",
+                "query": state.generated_sql,
+                "datasource_id": state.datasource_id,
+                "step": "sql_agent",
+            }
+            return AgentEnvelope(
+                status=AgentStatus.failed,
+                agent_name=self.name,
+                summary="first sql failed",
+                validation=ValidationBlock(local_checks=[
+                    LocalCheck(name="sql", passed=False, severity="error", detail="dialect mismatch")
+                ]),
+                retry_hint=RetryHint(retryable=True, suggested_action="fix_sql", reason_code="mysql_dialect_incompatible_sql"),
+            )
+        state.generated_sql = "SELECT DATEDIFF(order_delivered_customer_date, order_approved_at) FROM orders;"
+        state.error_state = {}
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name=self.name,
+            summary="second sql ok",
+            validation=ValidationBlock(local_checks=[
+                LocalCheck(name="sql", passed=True, severity="info", detail="ok")
+            ]),
+        )
+
+
+class _PassThroughValidationAgent:
+    name = "validation_agent"
+
+    def run(self, state, runtime, upstream):
+        if upstream.status == AgentStatus.failed:
+            return AgentEnvelope(
+                status=AgentStatus.failed,
+                agent_name=self.name,
+                summary="retry upstream",
+                validation=ValidationBlock(local_checks=[
+                    LocalCheck(name="gate", passed=False, severity="error", detail="retry")
+                ]),
+                retry_hint=RetryHint(retryable=True, suggested_action="retry_upstream", reason_code="mysql_dialect_incompatible_sql"),
+            )
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name=self.name,
+            summary="validation ok",
+            validation=ValidationBlock(local_checks=[
+                LocalCheck(name="gate", passed=True, severity="info", detail="ok")
+            ]),
+        )
+
+
 class TestSQLAgentIntegration:
     def test_supervisor_parse_plan_transfers_retry_context(self, adapter):
         from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
@@ -275,6 +705,64 @@ class TestSQLAgentIntegration:
         assert reparsed.plan is not None
         assert reparsed.plan.retry_context is not None
         assert reparsed.plan.retry_context["message"] == "unknown column amountt"
+
+    def test_retry_hint_details_are_preserved(self, adapter):
+        retrying_sql_agent = _FakeRetryingSQLAgent()
+        sup = SQLAgentSupervisor(
+            adapter,
+            sql_agent=retrying_sql_agent,
+            validation_agent=_PassThroughValidationAgent(),
+        )
+        state = sup.run("간단한 매출 요약을 보여줘")
+        assert state.plan is not None
+        assert state.terminal_state == SupervisorTerminalState.completed
+
+    def test_central_validation_uses_sql_agent_plan_route_kind(self, adapter):
+        runtime = AgentRuntime(adapter)
+        state = OrchestrationState(
+            run_id=adapter.create_run().run_id,
+            user_query="주문 완료일부터 배송 완료일까지 평균 소요일 계산",
+            route_kind="comprehensive",
+        )
+        context = runtime.context(state, node_name="sql_agent", tool_name="sql_agent.lang_graph")
+        plan_ref = adapter.register_artifact(
+            state.run_id,
+            "file",
+            content_text='{"plan":{"route_kind":"simple"},"sql_draft":{"sql":"SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NOT NULL;"}}',
+            filename="sql_lang_graph_result_test.json",
+            created_by_tool="sql_agent.lang_graph",
+            context=context,
+            metadata={"kind": "sql_lang_graph_result"},
+        )
+        sql_ref = adapter.register_artifact(
+            state.run_id,
+            "sql_query",
+            content_text="SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NOT NULL;",
+            filename="generated_sql_test.sql",
+            created_by_tool="sql_agent.lang_graph",
+            context=context,
+            metadata={"kind": "generated_sql"},
+        )
+        result_ref = adapter.register_artifact(
+            state.run_id,
+            "sql_result",
+            content_text="avg_delivery_days\n4.2\n",
+            filename="sql_result_test.csv",
+            created_by_tool="sql_agent.lang_graph",
+            context=context,
+            metadata={"kind": "sql_result"},
+            preview={"row_count": 1, "columns": ["avg_delivery_days"]},
+        )
+        upstream = AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="sql_agent",
+            summary="ok",
+            artifact_refs=[result_ref, plan_ref, sql_ref],
+        )
+        state.add_artifacts("sql_agent", upstream.artifact_ids())
+        envelope = CentralValidationAgent().run(state, runtime, upstream)
+        assert envelope.status != AgentStatus.failed
+        assert not any(flag.code == "unsafe_sql" for flag in envelope.validation.business_flags)
 
     def test_creates_preview_artifact(self, adapter):
         sup = SQLAgentSupervisor(adapter)
@@ -359,6 +847,20 @@ class TestSQLAgentIntegration:
         assert "SELECT" in state.error_state["query"]
         assert state.plan is not None
         assert state.plan.retry_context is not None
+
+    def test_supervisor_retries_sql_agent_after_retryable_failure(self, adapter):
+        retrying_sql_agent = _FakeRetryingSQLAgent()
+        sup = SQLAgentSupervisor(
+            adapter,
+            sql_agent=retrying_sql_agent,
+            validation_agent=_PassThroughValidationAgent(),
+        )
+        state = sup.run("간단한 매출 요약을 보여줘")
+
+        assert state.terminal_state == SupervisorTerminalState.completed
+        assert retrying_sql_agent.calls == 2
+        assert state.retry_counts["sql_agent"] == 1
+        assert any(e.event_type == "supervisor.retry_scheduled" for e in adapter.services.run_service.list_events(state.run_id))
 
     def test_backend_not_modified(self):
         changed = [

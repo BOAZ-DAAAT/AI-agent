@@ -1,11 +1,9 @@
-"""SQL safety validation for the SQL-Agent.
-
-Returns LocalCheck results compatible with AgentEnvelope.validation.local_checks.
-"""
+"""SQL safety and MySQL dialect validation for the SQL-Agent."""
 
 from __future__ import annotations
 
 import re
+from typing import Iterable
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import LocalCheck
 
@@ -22,9 +20,26 @@ _BLOCKED_PATTERN = re.compile(
 
 _MULTI_STATEMENT_PATTERN = re.compile(r";\s*\S")
 
+_MYSQL_BANNED_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bjulianday\s*\(", "SQLite JULIANDAY() 함수는 MySQL에서 지원되지 않습니다. DATEDIFF()/TIMESTAMPDIFF()를 사용하세요."),
+    (r"\bstrftime\s*\(", "SQLite STRFTIME() 함수는 MySQL에서 지원되지 않습니다. DATE_FORMAT()을 사용하세요."),
+    (r"\bdate_trunc\s*\(", "PostgreSQL DATE_TRUNC() 함수는 MySQL에서 지원되지 않습니다. DATE_FORMAT() 또는 TIMESTAMP() 조합을 사용하세요."),
+    (r"\bilike\b", "PostgreSQL ILIKE 연산자는 MySQL에서 지원되지 않습니다. LOWER(col) LIKE LOWER(pattern) 형태를 사용하세요."),
+    (r"::[a-z_]+", "PostgreSQL 타입 캐스팅(::type)은 MySQL에서 지원되지 않습니다. CAST(... AS ...)를 사용하세요."),
+)
+
 
 def _normalize(sql: str) -> str:
     return sql.replace("```sql", "").replace("```", "").strip()
+
+
+def _first_match(sql: str, patterns: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+    normalized = _normalize(sql)
+    for pattern, message in patterns:
+        matched = re.search(pattern, normalized, re.IGNORECASE)
+        if matched:
+            return matched.group(0), message
+    return None
 
 
 def check_read_only(sql: str) -> LocalCheck:
@@ -63,6 +78,26 @@ def check_single_statement(sql: str) -> LocalCheck:
     )
 
 
+def check_mysql_dialect_compatibility(sql: str) -> LocalCheck:
+    matched = _first_match(sql, _MYSQL_BANNED_PATTERNS)
+    passed = matched is None
+    detail = "MySQL 호환 함수/문법만 사용했습니다."
+    if matched:
+        token, message = matched
+        detail = f"비호환 표현 '{token}' 감지: {message}"
+    return LocalCheck(
+        name="mysql_dialect_compatibility",
+        passed=passed,
+        severity="error" if not passed else "info",
+        detail=detail,
+    )
+
+
+def mysql_dialect_error(sql: str) -> str:
+    check = check_mysql_dialect_compatibility(sql)
+    return "" if check.passed else check.detail
+
+
 def check_preview_has_columns(columns: list[str] | None) -> LocalCheck:
     passed = bool(columns)
     return LocalCheck(
@@ -94,6 +129,7 @@ def run_sql_self_check(
         check_read_only(sql),
         check_blocked_keywords(sql),
         check_single_statement(sql),
+        check_mysql_dialect_compatibility(sql),
     ]
     if columns is not None:
         checks.append(check_preview_has_columns(columns))

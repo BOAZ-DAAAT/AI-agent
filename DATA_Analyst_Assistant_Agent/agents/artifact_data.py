@@ -46,6 +46,18 @@ def sql_plan_artifacts(state: OrchestrationState, runtime: AgentRuntime) -> list
     return artifacts
 
 
+def sql_validation_artifacts(state: OrchestrationState, runtime: AgentRuntime) -> list[ArtifactRecord]:
+    artifacts: list[ArtifactRecord] = []
+    for artifact_id in state.artifact_ids.get("sql_agent", []):
+        try:
+            artifact = runtime.adapter.get_artifact(artifact_id)
+        except Exception:
+            continue
+        if artifact.metadata.get("kind") in {"ge_table_validation_json", "sql_validation_summary"}:
+            artifacts.append(artifact)
+    return artifacts
+
+
 def read_sql_result_csvs(state: OrchestrationState, runtime: AgentRuntime) -> list[CsvArtifactData]:
     csvs: list[CsvArtifactData] = []
     for artifact_id in sql_result_artifact_ids(state, runtime):
@@ -87,3 +99,14 @@ def generated_sql_from_artifacts(state: OrchestrationState, runtime: AgentRuntim
     if state.plan and state.plan.source_sql:
         return state.plan.source_sql
     return ""
+
+
+def latest_sql_validation_summary(state: OrchestrationState, runtime: AgentRuntime) -> dict[str, Any]:
+    for artifact in reversed(sql_validation_artifacts(state, runtime)):
+        try:
+            payload = json.loads(runtime.adapter.read_artifact_text(artifact.artifact_id))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}

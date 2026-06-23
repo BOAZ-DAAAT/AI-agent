@@ -5,12 +5,15 @@ import datetime
 import decimal
 import io
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
+<<<<<<< HEAD
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
+=======
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.validation_artifact import build_validation_summary_payload
+from DATA_Analyst_Assistant_Agent.models import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
+>>>>>>> 524637d (Align SQL orchestration around validation-first execution)
 
 
 class SQLAgent:
@@ -24,10 +27,25 @@ class SQLAgent:
         from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
 
         app = build_app()
+        catalog_summary = state.catalog_summary or {}
+        retry_context = state.plan.retry_context if state.plan else None
+        clarification_request = ""
+        if retry_context:
+            retry_message = retry_context.get("message") or ""
+            retry_query = retry_context.get("query") or ""
+            retry_step = retry_context.get("step") or state.current_step
+            clarification_request = (
+                f"이전 {retry_step} 실패 원인: {retry_message}. "
+                f"문제가 된 SQL: {retry_query}"
+            ).strip()
+
         return app.invoke(
             {
                 "user_question": state.user_query,
-                "schema_text": "",
+                "required_db_schema": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
+                "clarification_request": clarification_request,
+                "planner_selection_reason": state.goal or "",
+                "schema_text": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "integrity_text": "",
                 "plan": {},
                 "mart_design": {},
@@ -38,6 +56,9 @@ class SQLAgent:
                 "postcheck_result": None,
                 "mart_quality_result": {},
                 "validation": {},
+                "validation_findings": [],
+                "retry_hint": {},
+                "validation_summary": {},
                 "retry_count": 0,
                 "max_retries": 2,
                 "feedback": "",
@@ -89,6 +110,17 @@ class SQLAgent:
                 "final_answer": result.get("final_answer") or "",
             },
         )
+        sql_plan_ref = runtime.adapter.register_artifact(
+            state.run_id,
+            "file",
+            content_text=json.dumps(plan_payload, ensure_ascii=False, indent=2, default=str),
+            filename=f"sql_plan_{state.run_id}.json",
+            created_by_tool="sql_agent.lang_graph",
+            context=context,
+            parent_ids=[plan_ref.artifact_id],
+            metadata={"kind": "sql_plan", "source": "main/sql_agent/lang graph"},
+            preview={"route_kind": (result.get("plan") or {}).get("route_kind")},
+        )
         sql_ref = runtime.adapter.register_artifact(
             state.run_id,
             "sql_query",
@@ -118,8 +150,46 @@ class SQLAgent:
                 "sample_rows": self._sample_rows_for_preview(result.get("sql_result")),
             },
         )
+        validation_payload = build_validation_summary_payload(result)
+        validation_ref = runtime.adapter.register_artifact(
+            state.run_id,
+            "file",
+            content_text=json.dumps(validation_payload, ensure_ascii=False, indent=2, default=str),
+            filename=f"sql_validation_summary_{state.run_id}.json",
+            created_by_tool="sql_agent.lang_graph",
+            context=context,
+            parent_ids=[plan_ref.artifact_id, sql_ref.artifact_id],
+            metadata={"kind": "ge_table_validation_json", "source": "main/sql_agent/lang graph"},
+            preview={
+                "validation_result": (result.get("validation") or {}).get("result"),
+                "reason_code": ((result.get("retry_hint") or {}).get("reason_code")),
+            },
+        )
 
         validation = result.get("validation") or {}
+        retry_hint = result.get("retry_hint") or {}
+        if validation.get("result") == "invalid":
+            state.error_state = {
+                "code": retry_hint.get("reason_code") or "SQL_GENERATION_OR_EXECUTION_FAILED",
+                "message": validation.get("reason", "SQL LangGraph validation failed."),
+                "query": generated_sql,
+                "datasource_id": state.datasource_id,
+                "step": self.name,
+                "hint": validation.get("feedback", ""),
+            }
+            if state.plan is not None:
+                state.plan.retry_context = {
+                    "code": state.error_state["code"],
+                    "message": state.error_state["message"],
+                    "query": state.error_state["query"],
+                    "datasource_id": state.datasource_id,
+                    "step": self.name,
+                    "hint": state.error_state.get("hint", ""),
+                    "details": retry_hint.get("details", {}),
+                }
+        else:
+            state.error_state = {}
+
         checks = [
             LocalCheck(
                 name="main_sql_agent_generated_sql",
@@ -149,12 +219,13 @@ class SQLAgent:
             status=AgentStatus.failed if has_error else AgentStatus.success,
             agent_name=self.name,
             summary=result.get("final_answer") or "SQL LangGraph agent completed.",
-            artifact_refs=[result_ref, plan_ref, sql_ref],
+            artifact_refs=[result_ref, plan_ref, sql_plan_ref, sql_ref, validation_ref],
             validation=ValidationBlock(local_checks=checks),
             retry_hint={
                 "retryable": has_error,
-                "suggested_action": "fix_sql",
-                "reason_code": "main_sql_agent_validation" if has_error else "none",
+                "suggested_action": retry_hint.get("suggested_action", "fix_sql"),
+                "reason_code": retry_hint.get("reason_code", "main_sql_agent_validation" if has_error else "none"),
+                "details": retry_hint.get("details", {}),
             },
             next_handoff="validation_agent",
         )
