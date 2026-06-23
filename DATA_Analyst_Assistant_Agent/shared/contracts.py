@@ -58,6 +58,7 @@ class RetryHint(BaseModel):
     retryable: bool = False
     suggested_action: str = "continue"
     reason_code: str = "none"
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ApprovalRequirement(BaseModel):
@@ -125,6 +126,8 @@ class OrchestrationState(BaseModel):
     route_kind: str = "simple"
     planner_mode: Literal["llm", "deterministic"] = "deterministic"
     generated_sql: str = ""
+    retry_counts: dict[str, int] = Field(default_factory=dict)
+    max_retry_per_agent: int = 1
 
     def add_artifacts(self, key: str, artifact_ids: list[str]) -> None:
         if not artifact_ids:

@@ -5,10 +5,21 @@ from typing import Any
 
 from data_agent_backend.models.artifacts import ArtifactType
 
-from DATA_Analyst_Assistant_Agent.agents.artifact_data import generated_sql_from_artifacts, read_json_artifact, sql_result_artifact_ids
+from DATA_Analyst_Assistant_Agent.agents.artifact_data import (
+    generated_sql_from_artifacts,
+    latest_sql_validation_summary,
+    read_json_artifact,
+    sql_result_artifact_ids,
+)
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
+<<<<<<< HEAD
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
+=======
+from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, mysql_dialect_error
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.sql_agent import ALLOWED_MART_SCHEMA, is_safe_mart_sql
+from DATA_Analyst_Assistant_Agent.models import (
+>>>>>>> 524637d (Align SQL orchestration around validation-first execution)
     AgentEnvelope,
     AgentStatus,
     BusinessFlag,
@@ -146,13 +157,50 @@ class CentralValidationAgent:
         if not state.artifact_ids.get("sql_agent"):
             return findings
         generated_sql = generated_sql_from_artifacts(state, runtime)
-        if generated_sql and not is_sql_safe(generated_sql):
+        route_kind = self._resolved_sql_route_kind(state, runtime)
+        validation_summary = latest_sql_validation_summary(state, runtime)
+        if generated_sql:
+            dialect_issue = mysql_dialect_error(generated_sql)
+            if dialect_issue:
+                findings.append(
+                    {
+                        "category": "mysql_dialect_incompatible_sql",
+                        "severity": "error",
+                        "retryable": True,
+                        "detail": dialect_issue,
+                    }
+                )
+            elif route_kind in {"comprehensive", "mart"}:
+                ok, reason = is_safe_mart_sql(generated_sql, f"{ALLOWED_MART_SCHEMA}.validation_target")
+                if not ok:
+                    findings.append(
+                        {
+                            "category": "unsafe_sql",
+                            "severity": "error",
+                            "retryable": True,
+                            "detail": f"Generated mart SQL failed safety validation: {reason}",
+                        }
+                    )
+            elif not is_sql_safe(generated_sql):
+                findings.append(
+                    {
+                        "category": "unsafe_sql",
+                        "severity": "error",
+                        "retryable": True,
+                        "detail": "Generated SQL did not pass SELECT/WITH safety validation.",
+                    }
+                )
+        validation_findings = validation_summary.get("validation_findings") or validation_summary.get("validation", {}).get("findings") or []
+        for item in validation_findings:
+            category = item.get("category")
+            if category not in {"intent_mismatch", "result_shape_mismatch", "missing_table", "missing_column", "invalid_join_plan", "postcheck_failed"}:
+                continue
             findings.append(
                 {
-                    "category": "unsafe_sql",
-                    "severity": "error",
-                    "retryable": True,
-                    "detail": "Generated SQL did not pass SELECT/WITH safety validation.",
+                    "category": category,
+                    "severity": item.get("severity", "warning"),
+                    "retryable": item.get("retryable", True),
+                    "detail": item.get("detail", ""),
                 }
             )
         for artifact_id in sql_result_artifact_ids(state, runtime):
@@ -168,6 +216,24 @@ class CentralValidationAgent:
                     }
                 )
         return findings
+
+    def _resolved_sql_route_kind(self, state: OrchestrationState, runtime: AgentRuntime) -> str:
+        for artifact_id in reversed(state.artifact_ids.get("sql_agent", [])):
+            try:
+                artifact = runtime.adapter.get_artifact(artifact_id)
+            except Exception:
+                continue
+            if artifact.metadata.get("kind") != "sql_lang_graph_result":
+                continue
+            try:
+                payload = read_json_artifact(runtime, artifact_id)
+            except Exception:
+                continue
+            plan = payload.get("plan", {})
+            route_kind = plan.get("route_kind")
+            if isinstance(route_kind, str) and route_kind.strip():
+                return route_kind
+        return state.route_kind or ""
 
     def _eda_findings(self, state: OrchestrationState, runtime: AgentRuntime) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
