@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.catalog import tool_catalog_text
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.catalog import tool_catalog_text
 
 
 ANALYSIS_PLANNER_SYSTEM_PROMPT = """You are a senior data scientist planning one evidence-based analysis.

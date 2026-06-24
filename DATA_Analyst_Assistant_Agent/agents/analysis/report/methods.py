@@ -4,8 +4,8 @@ from typing import Any
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.context import build_analysis_context
-from DATA_Analyst_Assistant_Agent.agents.analysis.insight import build_hypotheses, evidence_from_payload
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
+from DATA_Analyst_Assistant_Agent.agents.analysis.report.insight import build_hypotheses, evidence_from_payload
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisExecutionPlan,
     AnalysisKind,
