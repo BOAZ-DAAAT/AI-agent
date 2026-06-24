@@ -4,11 +4,11 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.context import build_analysis_context
-from DATA_Analyst_Assistant_Agent.agents.analysis.methods import build_analysis_result
-from DATA_Analyst_Assistant_Agent.agents.analysis.planner import build_analysis_plan
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.planner import build_analysis_plan
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.self_check import run_analysis_self_check
+from DATA_Analyst_Assistant_Agent.agents.analysis.report.methods import build_analysis_result
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisExecutionPlan
-from DATA_Analyst_Assistant_Agent.agents.analysis.self_check import run_analysis_self_check
 from DATA_Analyst_Assistant_Agent.shared.contracts import LocalCheck, OrchestrationState
 
 from langgraph.graph import END, START, StateGraph

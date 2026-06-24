@@ -840,7 +840,7 @@ def _top_coefficients(model: Pipeline, limit: int = 10) -> list[dict[str, Any]]:
     return [{"feature": name, "absolute_coefficient": float(value)} for name, value in ranked]
 
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.advanced_tools import (
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.advanced import (
     analyze_geospatial_hotspots,
     estimate_probabilistic_clv,
     optimize_business_allocation,

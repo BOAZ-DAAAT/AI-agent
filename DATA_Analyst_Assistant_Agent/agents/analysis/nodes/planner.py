@@ -4,7 +4,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.catalog import CAPABILITIES
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.catalog import CAPABILITIES
 from DATA_Analyst_Assistant_Agent.agents.analysis.prompts import (
     ANALYSIS_PLANNER_SYSTEM_PROMPT,
     TOOL_CATALOG,
