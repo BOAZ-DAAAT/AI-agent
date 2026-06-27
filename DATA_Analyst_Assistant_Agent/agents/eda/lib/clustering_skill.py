@@ -3,8 +3,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.chart_requests import from_clustering_skill
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.visualize import plot_cluster_profile, plot_cluster_scatter
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_clustering_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import plot_cluster_profile, plot_cluster_scatter
 
 
 def _select_k(X_scaled: np.ndarray, k_range: range) -> int:

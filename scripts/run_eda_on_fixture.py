@@ -18,9 +18,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from DATA_Analyst_Assistant_Agent.agents.eda.fixtures import load_fixture
-from DATA_Analyst_Assistant_Agent.agents.eda.tools import chart_requests as CR
-from DATA_Analyst_Assistant_Agent.agents.eda.tools import visualize
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.reliability import assess_sample_reliability, detect_data_level
+from DATA_Analyst_Assistant_Agent.agents.eda.lib import chart_requests as CR
+from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import assess_sample_reliability, detect_data_level
 
 FIXTURES = ["f1_order_level", "f2_category_level", "f3_category_month"]
 

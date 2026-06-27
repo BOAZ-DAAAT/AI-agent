@@ -10,9 +10,9 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from DATA_Analyst_Assistant_Agent.agents.eda import nodes
-from DATA_Analyst_Assistant_Agent.agents.eda.planner import ANALYSIS_NAMES, planner_node, route_after_planner
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import ANALYSIS_NAMES, planner_node, route_after_planner
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
-from DATA_Analyst_Assistant_Agent.agents.eda.validator import route_after_validator, validator_node
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import route_after_validator, validator_node
 
 # 분석 이름 → 노드 함수 매핑 (플래너 레지스트리와 1:1)
 _ANALYSIS_NODE_FN = {

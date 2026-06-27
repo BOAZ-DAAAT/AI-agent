@@ -1,7 +1,7 @@
 import pandas as pd
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.missing import detect_missing
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.outlier import detect_outliers_iqr
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.quality import check_duplicates_fn, check_sample_reliability_fn
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.missing import detect_missing
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.outlier import detect_outliers_iqr
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.quality import check_duplicates_fn, check_sample_reliability_fn
 
 
 def run_data_quality_skill(df: pd.DataFrame, key_col: str = None, measure_cols: list = None, count_col: str = None) -> dict:

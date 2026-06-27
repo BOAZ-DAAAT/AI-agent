@@ -1,6 +1,6 @@
 import pandas as pd
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.chart_requests import from_relationship_skill
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.visualize import (
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_relationship_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
     plot_correlation,
     plot_scatter_pairs,
     plot_distribution_by_target,
