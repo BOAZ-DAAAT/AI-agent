@@ -8,12 +8,8 @@ import json
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-<<<<<<< HEAD
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
-=======
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.validation_artifact import build_validation_summary_payload
-from DATA_Analyst_Assistant_Agent.models import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
->>>>>>> 524637d (Align SQL orchestration around validation-first execution)
 
 
 class SQLAgent:
