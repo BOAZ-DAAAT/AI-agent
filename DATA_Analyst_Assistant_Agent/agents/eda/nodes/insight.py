@@ -8,7 +8,7 @@ from typing import Any, Dict
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_context, get_llm
-from DATA_Analyst_Assistant_Agent.agents.eda.nodes.react import run_node_with_retry
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import insight_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
@@ -30,10 +30,10 @@ def insight_node(state: EDAState) -> dict:
     data_level: Dict[str, Any] = {}
     cautions: list = []
     if df is not None:
-        from DATA_Analyst_Assistant_Agent.agents.eda.tools.missing import detect_missing
-        from DATA_Analyst_Assistant_Agent.agents.eda.tools.outlier import detect_outliers_iqr
-        from DATA_Analyst_Assistant_Agent.agents.eda.tools.quality import check_duplicates_fn
-        from DATA_Analyst_Assistant_Agent.agents.eda.tools.reliability import (
+        from DATA_Analyst_Assistant_Agent.agents.eda.lib.missing import detect_missing
+        from DATA_Analyst_Assistant_Agent.agents.eda.lib.outlier import detect_outliers_iqr
+        from DATA_Analyst_Assistant_Agent.agents.eda.lib.quality import check_duplicates_fn
+        from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import (
             assess_sample_reliability, build_cautions, detect_data_level,
         )
 
@@ -170,7 +170,7 @@ def _persist_chart_requests(chart_requests: list) -> None:
     """차트 주문서를 outputs/chart_requests.json 으로 기록(Phase B/report 소비용). 실패해도 무시."""
     import os
 
-    from DATA_Analyst_Assistant_Agent.agents.eda.tools import visualize  # OUTPUT_DIR 동적 반영
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize  # OUTPUT_DIR 동적 반영
 
     try:
         out_path = os.path.join(os.path.dirname(visualize.OUTPUT_DIR), "chart_requests.json")

@@ -1,6 +1,6 @@
 import pandas as pd
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.chart_requests import from_distribution_skill
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.visualize import (
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_distribution_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
     plot_distributions,
     plot_boxplots,
     plot_violins,

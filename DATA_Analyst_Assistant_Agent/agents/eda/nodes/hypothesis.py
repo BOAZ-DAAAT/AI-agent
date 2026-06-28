@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_context, get_llm
-from DATA_Analyst_Assistant_Agent.agents.eda.nodes.react import run_node_with_retry
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import handoff_summary_prompt, hypothesis_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
@@ -45,7 +45,7 @@ def hypothesis_node(state: EDAState) -> dict:
 
     # 결정론 게이트(LLM 아님): 불가능한 검정(집계본에 ANOVA/t검정)을 사실 기준으로 교정.
     # 요약 만들기 전에 고쳐야 가설+요약이 일관됨.
-    from DATA_Analyst_Assistant_Agent.agents.eda.tools.reliability import correct_hypothesis_feasibility
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import correct_hypothesis_feasibility
     hypotheses, _feas_fixes = correct_hypothesis_feasibility(get_context().df, hypotheses, data_level=data_level)
 
     summary_prompt = handoff_summary_prompt(state.get("insight_result", ""), hypotheses)

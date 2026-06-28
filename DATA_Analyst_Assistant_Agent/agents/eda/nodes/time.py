@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors
-from DATA_Analyst_Assistant_Agent.agents.eda.nodes.react import TIME_TOOLS, run_mini_react_with_retry
+from DATA_Analyst_Assistant_Agent.agents.eda.tools import TIME_TOOLS
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_mini_react_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import time_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 

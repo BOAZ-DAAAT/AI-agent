@@ -1,6 +1,6 @@
 import pandas as pd
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.chart_requests import from_comparison_skill
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.visualize import (
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_comparison_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
     plot_top_n_barplot,
     plot_heatmap_matrix,
     plot_bubble,

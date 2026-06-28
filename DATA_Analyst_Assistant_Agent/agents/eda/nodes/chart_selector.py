@@ -7,8 +7,8 @@ import os
 import shutil
 
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
-from DATA_Analyst_Assistant_Agent.agents.eda.tools import visualize  # OUTPUT_DIR/KEY_DIR 동적 반영(set_output_dirs)
-from DATA_Analyst_Assistant_Agent.agents.eda.tools.skills.chart_selector_skill import run_chart_selector_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize  # OUTPUT_DIR/KEY_DIR 동적 반영(set_output_dirs)
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill import run_chart_selector_skill
 
 try:  # 제공자에 따라 openai 예외가 없을 수 있어 방어적으로 import
     from openai import RateLimitError
