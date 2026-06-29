@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.validation_contract import validate_datamart_reusability
+from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_datamart_reusability
 
 
 def _plan() -> dict:

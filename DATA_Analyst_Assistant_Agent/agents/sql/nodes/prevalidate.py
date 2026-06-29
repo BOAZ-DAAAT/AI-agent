@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.runtime import AgentState
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.validation_contract import (
+from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
+from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
     summarize_validation,
     validate_datamart_reusability,
     validate_sql_dialect_and_route,
@@ -13,11 +13,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.validation_contract 
 def prevalidate_sql(state: AgentState):
     plan = state.get("plan", {})
     sql_draft = state.get("sql_draft", {})
-    schema_text = state.get("schema_text", "")
     findings = []
     findings.extend(validate_sql_dialect_and_route(plan, sql_draft))
     findings.extend(validate_sql_intent(plan, sql_draft))
-    findings.extend(validate_sql_identifiers(plan, sql_draft, schema_text))
+    findings.extend(validate_sql_identifiers(plan, sql_draft, state.get("schema_text", "")))
     findings.extend(validate_datamart_reusability(plan, state.get("mart_design", {}), sql_draft))
     summary = summarize_validation(findings)
     return {

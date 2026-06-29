@@ -4,7 +4,11 @@ import os
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_openai import ChatOpenAI
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    ChatOpenAI = None  # type: ignore[assignment]
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -24,7 +28,7 @@ def get_chat_model(
     default_model: str = DEFAULT_OPENROUTER_MODEL,
     temperature: float = 0,
     **kwargs: Any,
-) -> ChatOpenAI:
+) -> Any:
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
     google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -59,4 +63,9 @@ def get_chat_model(
         params["base_url"] = base_url
     if headers:
         params["default_headers"] = headers
+    if ChatOpenAI is None:
+        raise ModuleNotFoundError(
+            "langchain_openai 패키지가 없어 OpenAI/OpenRouter 모델을 초기화할 수 없습니다. "
+            "GOOGLE_API_KEY를 사용하거나 langchain_openai를 설치하세요."
+        )
     return ChatOpenAI(**params)

@@ -19,8 +19,15 @@ from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.validation.agent import CentralValidationAgent
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.sql_agent import build_app
-from DATA_Analyst_Assistant_Agent.models import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, RetryHint, ValidationBlock
+from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    AgentStatus,
+    LocalCheck,
+    OrchestrationState,
+    RetryHint,
+    ValidationBlock,
+)
 
 
 
@@ -202,8 +209,8 @@ class TestSQLPlanner:
 
 class TestSQLLangGraphSmoke:
     def test_build_app_simple_path_supports_future_input_fields(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}',
@@ -241,9 +248,9 @@ class TestSQLLangGraphSmoke:
         assert "simple 경로" in result["final_answer"]
 
     def test_build_app_simple_average_delivery_days_uses_aggregate_sql(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
@@ -282,8 +289,8 @@ class TestSQLLangGraphSmoke:
         assert result["plan"]["expected_result_shape"] == "single_scalar"
 
     def test_build_app_rejects_non_aggregate_sql_for_average_question(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
@@ -335,8 +342,8 @@ class TestSQLLangGraphSmoke:
         assert result["retry_hint"]["reason_code"] == "intent_mismatch"
 
     def test_build_app_rejects_missing_table_before_execution(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}]}}',
@@ -388,8 +395,8 @@ class TestSQLLangGraphSmoke:
         assert result["retry_hint"]["reason_code"] == "missing_table"
 
     def test_build_app_comprehensive_path_generates_datamart_sql(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
@@ -431,9 +438,9 @@ class TestSQLLangGraphSmoke:
         assert "datamart" in result["final_answer"]
 
     def test_build_app_retries_after_mysql_dialect_failure(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
@@ -488,9 +495,9 @@ class TestSQLLangGraphSmoke:
         assert result["retry_count"] == 1
 
     def test_build_app_normalizes_unqualified_mart_postcheck_sql(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import context as context_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.node import sql_steps as sql_steps_module
-        from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',

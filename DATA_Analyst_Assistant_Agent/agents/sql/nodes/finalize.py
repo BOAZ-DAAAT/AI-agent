@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.sql import prompts
-from DATA_Analyst_Assistant_Agent.agents.sql._runtime import get_llm
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 
 
@@ -17,18 +16,22 @@ def finalize_answer(state: AgentState):
             )
         }
 
-    if state["plan"].get("task_type") == "data_mart_build":
-        answer = get_llm().invoke(prompts.finalize_mart_prompt(state)).content.strip()
-        return {"final_answer": answer}
-
-    answer = get_llm().invoke(prompts.finalize_answer_prompt(state)).content.strip()
-    if _looks_like_markdown_table(answer):
-        answer = get_llm().invoke(prompts.finalize_rewrite_prompt(state, answer)).content.strip()
-    return {"final_answer": answer}
-
-
-def _looks_like_markdown_table(text: str) -> bool:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    table_lines = [line for line in lines if line.startswith("|") and line.endswith("|")]
-    separator_lines = [line for line in table_lines if set(line.replace("|", "").strip()) <= {"-", ":"}]
-    return len(table_lines) >= 3 and bool(separator_lines)
+    route_kind = state.get("plan", {}).get("route_kind") or ("comprehensive" if state["plan"].get("task_type") == "data_mart_build" else "simple")
+    sql_text = state.get("sql_draft", {}).get("sql", "")
+    if route_kind == "comprehensive":
+        return {
+            "final_answer": (
+                "comprehensive 경로로 datamart 생성 SQL을 작성하고 실행했습니다.\n"
+                f"대상 테이블: {state.get('sql_draft', {}).get('target_table') or '미지정'}\n"
+                f"실행 결과 미리보기: {format_result_rows(state.get('sql_result'), max_rows=5)}\n"
+                f"최종 SQL:\n{sql_text}"
+            )
+        }
+    return {
+        "final_answer": (
+            "simple 경로로 조회 SQL을 작성하고 실행했습니다.\n"
+            f"행 수: {state.get('row_count', 0)}\n"
+            f"실행 결과 미리보기: {format_result_rows(state.get('sql_result'), max_rows=5)}\n"
+            f"최종 SQL:\n{sql_text}"
+        )
+    }

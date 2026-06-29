@@ -9,7 +9,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA
 
 def generate_mart_prompt(state, feedback: str) -> str:
     return f"""
-너는 MySQL 데이터마트 생성 SQL 작성기다.
+너는 MySQL SQL 작성기다. 데이터마트 생성 SQL을 작성한다.
 
 사용자 질문:
 {state['user_question']}
@@ -61,7 +61,7 @@ def generate_mart_prompt(state, feedback: str) -> str:
 
 def generate_query_prompt(state, feedback: str) -> str:
     return f"""
-너는 MySQL 조회 SQL 작성기다.
+너는 MySQL SQL 작성기다. 조회 SQL을 작성한다.
 
 사용자 질문:
 {state['user_question']}

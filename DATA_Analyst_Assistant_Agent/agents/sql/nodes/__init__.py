@@ -8,6 +8,7 @@ from .context import load_context
 from .plan import plan_question
 from .mart_design import design_mart
 from .generate import generate_sql
+from .prevalidate import prevalidate_sql, route_after_prevalidation
 from .execute import execute_sql
 from .validate import validate_sql_and_result
 from .finalize import finalize_answer
@@ -18,6 +19,8 @@ __all__ = [
     "plan_question",
     "design_mart",
     "generate_sql",
+    "prevalidate_sql",
+    "route_after_prevalidation",
     "execute_sql",
     "validate_sql_and_result",
     "finalize_answer",

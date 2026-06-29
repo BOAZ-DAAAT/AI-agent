@@ -13,7 +13,7 @@ from DATA_Analyst_Assistant_Agent.agents.artifact_data import (
 )
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, mysql_dialect_error
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool import ALLOWED_MART_SCHEMA, is_safe_mart_sql
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, is_safe_mart_sql
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     AgentStatus,

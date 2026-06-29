@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 # -----------------------------
 class QuestionPlan(BaseModel):
     original_question: str = Field(description="사용자 원문 질문")
+    route_kind: str = Field(default="simple", description="simple / comprehensive / mart")
     question_type: str = Field(description="aggregation/comparison/ranking/filter/detail/trend/identification/mart_build")
     task_type: str = Field(description="query_answer 또는 data_mart_build")
     requested_output: str = Field(description="sql_only / execute_and_answer / create_table")
@@ -22,11 +23,18 @@ class QuestionPlan(BaseModel):
     dimensions: List[str] = Field(default_factory=list, description="그룹 기준")
     filters: List[str] = Field(default_factory=list, description="필터 조건")
     time_condition: Optional[str] = Field(default=None, description="시간 조건")
+    selected_join_tables: List[str] = Field(default_factory=list, description="조인 또는 조회 대상 테이블")
     relevant_tables: List[str] = Field(default_factory=list, description="관련 테이블")
+    candidate_tables: List[str] = Field(default_factory=list, description="검토 후보 테이블")
     mart_name: Optional[str] = Field(default=None, description="생성 대상 마트명")
     grain: Optional[str] = Field(default=None, description="마트 grain")
     load_strategy: Optional[str] = Field(default=None, description="full_refresh / incremental")
     ambiguity_note: Optional[str] = Field(default=None, description="애매한 표현")
+    expected_result_shape: str = Field(default="table_preview", description="single_scalar / grouped_aggregate / table_preview / datamart_creation")
+    required_columns: List[str] = Field(default_factory=list, description="반드시 필요하다고 판단한 컬럼")
+    required_aggregations: List[str] = Field(default_factory=list, description="필수 집계 함수")
+    validation_contract: Dict[str, Any] = Field(default_factory=dict, description="validation용 구조화 계약")
+    reasoning: str = Field(default="", description="planner 근거")
 
 
 class MartDesign(BaseModel):
@@ -62,10 +70,15 @@ class ValidationResult(BaseModel):
     result: str
     reason: str
     feedback: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    retry_hint: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentState(TypedDict):
     user_question: str
+    required_db_schema: str
+    clarification_request: str
+    planner_selection_reason: str
     schema_text: str
     integrity_text: str
 
@@ -81,6 +94,9 @@ class AgentState(TypedDict):
     mart_quality_result: Dict[str, Any]
 
     validation: Dict[str, Any]
+    validation_findings: List[Dict[str, Any]]
+    retry_hint: Dict[str, Any]
+    validation_summary: Dict[str, Any]
     retry_count: int
     max_retries: int
     feedback: str
