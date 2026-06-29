@@ -12,14 +12,9 @@ from DATA_Analyst_Assistant_Agent.agents.artifact_data import (
     sql_result_artifact_ids,
 )
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-<<<<<<< HEAD
-from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe
-from DATA_Analyst_Assistant_Agent.shared.contracts import (
-=======
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, mysql_dialect_error
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.sql_agent import ALLOWED_MART_SCHEMA, is_safe_mart_sql
-from DATA_Analyst_Assistant_Agent.models import (
->>>>>>> 524637d (Align SQL orchestration around validation-first execution)
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, is_safe_mart_sql
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     AgentStatus,
     BusinessFlag,

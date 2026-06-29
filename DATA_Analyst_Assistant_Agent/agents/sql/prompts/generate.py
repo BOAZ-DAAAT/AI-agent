@@ -9,7 +9,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA
 
 def generate_mart_prompt(state, feedback: str) -> str:
     return f"""
-너는 MySQL 데이터마트 생성 SQL 작성기다.
+너는 MySQL SQL 작성기다. 데이터마트 생성 SQL을 작성한다.
 
 사용자 질문:
 {state['user_question']}
@@ -33,7 +33,11 @@ def generate_mart_prompt(state, feedback: str) -> str:
 - CREATE TABLE ... AS SELECT 또는 INSERT INTO ... SELECT 형태만 허용
 - 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
 - source는 실제 존재 테이블만 사용
-- grain이 깨지지 않게 집계
+- 데이터마트는 최종 리포트용 요약 결과보다 재사용 가능한 기반 테이블이어야 함
+- 가능한 한 원본 데이터의 행 수준 grain을 유지
+- 우선 조인, 정제, 표준화, 필수 파생 컬럼 추가로 해결
+- 집계는 꼭 필요한 경우에만 최소 수준으로 사용
+- 집계를 사용했다면 왜 row-level mart가 부적절한지 reasoning에 명시
 - 모호한 기준은 reasoning에 명시
 - precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
 - postcheck_sql에는 생성 후 row_count / 중복 / null 점검용 SELECT
@@ -57,7 +61,7 @@ def generate_mart_prompt(state, feedback: str) -> str:
 
 def generate_query_prompt(state, feedback: str) -> str:
     return f"""
-너는 MySQL 조회 SQL 작성기다.
+너는 MySQL SQL 작성기다. 조회 SQL을 작성한다.
 
 사용자 질문:
 {state['user_question']}

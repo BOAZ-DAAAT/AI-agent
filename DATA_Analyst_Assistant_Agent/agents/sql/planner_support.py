@@ -4,15 +4,8 @@ import json
 import re
 from typing import Any, Optional
 
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.runtime import (
-    ALLOWED_MART_SCHEMA,
-    AgentState,
-    MartDesign,
-    QuestionPlan,
-    SQLDraft,
-    get_llm,
-)
-from DATA_Analyst_Assistant_Agent.agents.sql.sql_agent.tool.sql_utils import clean_sql, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, clean_sql, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, MartDesign, QuestionPlan, SQLDraft
 
 
 def extract_schema_json(schema_text: str) -> dict[str, Any]:
@@ -34,7 +27,8 @@ def schema_tables(schema_json: dict[str, Any]) -> dict[str, Any]:
 
 def normalized_tokens(text_value: str) -> set[str]:
     return {
-        token for token in re.split(r"[^0-9A-Za-z가-힣_]+", (text_value or "").lower())
+        token
+        for token in re.split(r"[^0-9A-Za-z가-힣_]+", (text_value or "").lower())
         if len(token) >= 2
     }
 
@@ -64,14 +58,10 @@ def score_table(question: str, table_name: str, table_info: Any) -> int:
 
 def rank_candidate_tables(question: str, schema_json: dict[str, Any]) -> list[str]:
     tables = schema_tables(schema_json)
-    scored = []
-    for table_name, table_info in tables.items():
-        scored.append((score_table(question, str(table_name), table_info), str(table_name)))
+    scored = [(score_table(question, str(table_name), table_info), str(table_name)) for table_name, table_info in tables.items()]
     scored.sort(key=lambda item: (-item[0], item[1]))
     ranked = [name for score, name in scored if score > 0]
-    if ranked:
-        return ranked[:5]
-    return [str(name) for name in list(tables.keys())[:3]]
+    return ranked[:5] if ranked else [str(name) for name in list(tables.keys())[:3]]
 
 
 def find_join_conditions(selected_tables: list[str], schema_json: dict[str, Any]) -> list[str]:
@@ -152,7 +142,6 @@ def default_validation_contract(
     required_aggregations: list[str] = []
     required_columns: list[str] = []
     expected_aliases: list[str] = []
-
     if route_kind == "comprehensive":
         expected_result_shape = "datamart_creation"
     elif dimensions:
@@ -167,7 +156,6 @@ def default_validation_contract(
         required_aggregations = ["COUNT"]
         required_columns = ["order_id"]
         expected_aliases = ["order_count"]
-
     return {
         "expected_result_shape": expected_result_shape,
         "required_aggregations": required_aggregations,
@@ -177,17 +165,19 @@ def default_validation_contract(
         "target_metric": target_metric,
         "dimensions": dimensions,
         "target_table": f"{ALLOWED_MART_SCHEMA}.{mart_name}" if mart_name and route_kind == "comprehensive" else None,
+        "mart_policy": "prefer_row_preserving" if route_kind == "comprehensive" else None,
     }
 
 
 def retry_feedback_text(state: AgentState) -> str:
     feedback_parts: list[str] = []
-    clarification = (state.get("clarification_request") or "").strip()
-    if clarification:
-        feedback_parts.append(f"추가 메모: {clarification}")
-    raw_feedback = (state.get("feedback") or "").strip()
-    if raw_feedback:
-        feedback_parts.append(f"직전 검증 피드백: {raw_feedback}")
+    for label, value in (
+        ("추가 메모", state.get("clarification_request") or ""),
+        ("직전 검증 피드백", state.get("feedback") or ""),
+        ("직전 실행 오류", state.get("error") or ""),
+    ):
+        if str(value).strip():
+            feedback_parts.append(f"{label}: {value}")
     retry_hint = state.get("retry_hint") or {}
     if retry_hint:
         feedback_parts.append(
@@ -195,9 +185,6 @@ def retry_feedback_text(state: AgentState) -> str:
             f"suggested_action={retry_hint.get('suggested_action', 'continue')}, "
             f"details={retry_hint.get('details', {})}"
         )
-    raw_error = (state.get("error") or "").strip()
-    if raw_error:
-        feedback_parts.append(f"직전 실행 오류: {raw_error}")
     return "\n".join(feedback_parts)
 
 
@@ -212,23 +199,14 @@ def is_average_delivery_days_question(question: str) -> bool:
 
 def simple_aggregate_sql(question: str, primary_table: str | None) -> tuple[str, list[str], list[str]] | None:
     if primary_table == "orders" and is_average_delivery_days_question(question):
-        sql = (
-            "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days "
-            "FROM orders "
-            "WHERE order_approved_at IS NOT NULL "
-            "AND order_delivered_customer_date IS NOT NULL;"
-        )
         return (
-            sql,
+            "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days "
+            "FROM orders WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NOT NULL;",
             ["order_delivered_customer_date", "order_approved_at"],
-            [
-                "order_approved_at IS NOT NULL",
-                "order_delivered_customer_date IS NOT NULL",
-            ],
+            ["order_approved_at IS NOT NULL", "order_delivered_customer_date IS NOT NULL"],
         )
     if primary_table == "orders" and ("주문 수" in question or "주문 건수" in question):
-        sql = "SELECT COUNT(*) AS order_count FROM orders;"
-        return (sql, ["order_id"], [])
+        return ("SELECT COUNT(*) AS order_count FROM orders;", ["order_id"], [])
     return None
 
 
@@ -236,23 +214,10 @@ def default_plan_from_state(state: AgentState) -> dict[str, Any]:
     schema_json = extract_schema_json(state.get("schema_text", ""))
     ranked_tables = rank_candidate_tables(state["user_question"], schema_json)
     route_kind = "comprehensive" if is_comprehensive_request(
-        state["user_question"],
-        state.get("planner_selection_reason", ""),
-        state.get("clarification_request", ""),
+        state["user_question"], state.get("planner_selection_reason", ""), state.get("clarification_request", "")
     ) else "simple"
     selected_tables = ranked_tables[:2] if route_kind == "comprehensive" else ranked_tables[:1]
-    ambiguity_note = None
-    if not selected_tables:
-        ambiguity_note = "질문과 직접 연결되는 테이블을 확정하지 못해 스키마 상위 테이블 기준으로 진행합니다."
-    reasoning_parts = [
-        f"질문을 {'복잡한 분석용 데이터마트 생성' if route_kind == 'comprehensive' else '간단한 조회 SQL 작성'} 요청으로 해석했습니다.",
-        f"후보 테이블은 {', '.join(ranked_tables) if ranked_tables else '없음'} 입니다.",
-        f"우선 사용할 테이블은 {', '.join(selected_tables) if selected_tables else '없음'} 입니다.",
-    ]
-    if state.get("planner_selection_reason"):
-        reasoning_parts.append(f"플랜 에이전트 선택 이유 힌트는 '{state['planner_selection_reason']}' 입니다.")
-    if state.get("clarification_request"):
-        reasoning_parts.append(f"clarification 요청 메모는 '{state['clarification_request']}' 입니다.")
+    ambiguity_note = None if selected_tables else "질문과 직접 연결되는 테이블을 확정하지 못해 스키마 상위 테이블 기준으로 진행합니다."
     mart_name = "analytics_mart" if route_kind == "comprehensive" else None
     contract = default_validation_contract(
         question=state["user_question"],
@@ -262,9 +227,15 @@ def default_plan_from_state(state: AgentState) -> dict[str, Any]:
         selected_tables=selected_tables,
         mart_name=mart_name,
     )
+    reasoning_parts = [
+        f"질문을 {'복잡한 분석용 데이터마트 생성' if route_kind == 'comprehensive' else '간단한 조회 SQL 작성'} 요청으로 해석했습니다.",
+        f"후보 테이블은 {', '.join(ranked_tables) if ranked_tables else '없음'} 입니다.",
+        f"우선 사용할 테이블은 {', '.join(selected_tables) if selected_tables else '없음'} 입니다.",
+    ]
     return QuestionPlan(
         original_question=state["user_question"],
         route_kind=route_kind,
+        question_type="mart_build" if route_kind == "comprehensive" else "detail",
         task_type="data_mart_build" if route_kind == "comprehensive" else "query_answer",
         requested_output="create_table" if route_kind == "comprehensive" else "execute_and_answer",
         target_metric=extract_metric(state["user_question"]),
@@ -275,7 +246,7 @@ def default_plan_from_state(state: AgentState) -> dict[str, Any]:
         relevant_tables=selected_tables,
         candidate_tables=ranked_tables,
         mart_name=mart_name,
-        grain="월/고객 등 분석 grain 미정" if route_kind == "comprehensive" else None,
+        grain="가능하면 원본 entity/event 행 수준 grain 유지" if route_kind == "comprehensive" else None,
         load_strategy="full_refresh" if route_kind == "comprehensive" else None,
         ambiguity_note=ambiguity_note,
         expected_result_shape=contract["expected_result_shape"],
@@ -314,46 +285,29 @@ def deterministic_sql_draft(state: AgentState) -> dict[str, Any]:
     plan = state["plan"]
     schema_json = extract_schema_json(state.get("schema_text", ""))
     selected_tables = list(plan.get("selected_join_tables") or plan.get("relevant_tables") or [])
-    route_kind = plan.get("route_kind", "simple")
-    target_metric = plan.get("target_metric") or "핵심 지표"
+    route_kind = plan.get("route_kind") or ("comprehensive" if plan.get("task_type") == "data_mart_build" else "simple")
     dimensions = plan.get("dimensions") or []
     source_clause, joined_tables = join_sql_parts(selected_tables, schema_json)
     primary_table = selected_tables[0] if selected_tables else None
-
     if route_kind == "comprehensive":
         target_table = f"{ALLOWED_MART_SCHEMA}.{plan.get('mart_name') or 'analytics_mart'}"
         source_table = primary_table or "source_table"
-        select_columns = f"{source_table}.*"
-        if joined_tables and len(joined_tables) > 1:
-            select_columns = ", ".join(f"{table}.*" for table in joined_tables)
+        select_columns = ", ".join(f"{table}.*" for table in joined_tables) if joined_tables and len(joined_tables) > 1 else f"{source_table}.*"
         source_sql_clause = source_clause or f"FROM {source_table}"
-        sql = f"CREATE TABLE {target_table} AS SELECT {select_columns} {source_sql_clause};"
-        precheck_sql = f"SELECT COUNT(*) AS source_row_count FROM {source_table};" if primary_table else None
-        postcheck_sql = f"SELECT COUNT(*) AS mart_row_count FROM {target_table};"
-        reasoning = (
-            "planner가 comprehensive 경로를 선택했기 때문에, 재사용 가능한 datamart 생성을 위한 SQL을 작성했습니다. "
-            f"핵심 소스 테이블은 {', '.join(selected_tables) if selected_tables else '미확정'} 이며, "
-            "가능한 경우 조인 조건을 반영했습니다."
-        )
         return SQLDraft(
-            sql=sql,
+            sql=f"CREATE TABLE {target_table} AS SELECT {select_columns} {source_sql_clause};",
             sql_type="create_table_as",
             target_table=target_table,
             source_tables=joined_tables or selected_tables,
             columns_used=[],
             business_grain=state.get("mart_design", {}).get("grain") or plan.get("grain"),
-            precheck_sql=precheck_sql,
-            postcheck_sql=postcheck_sql,
-            reasoning=reasoning,
+            precheck_sql=f"SELECT COUNT(*) AS source_row_count FROM {source_table};" if primary_table else None,
+            postcheck_sql=f"SELECT COUNT(*) AS mart_row_count FROM {target_table};",
+            reasoning="재사용 가능한 datamart 생성을 위한 기본 SQL 초안입니다.",
         ).model_dump()
-
     aggregate_sql = simple_aggregate_sql(state["user_question"], primary_table)
     if aggregate_sql is not None:
-        sql, used_columns, derived_filters = aggregate_sql
-        reasoning = (
-            "planner가 simple 경로를 선택했고 질문에 집계 의도가 명확해서, "
-            "질문에 직접 대응하는 단일 집계 SQL을 작성했습니다."
-        )
+        sql, used_columns, _ = aggregate_sql
         return SQLDraft(
             sql=sql,
             sql_type="select",
@@ -363,24 +317,14 @@ def deterministic_sql_draft(state: AgentState) -> dict[str, Any]:
             business_grain=None,
             precheck_sql=None,
             postcheck_sql=None,
-            reasoning=reasoning,
+            reasoning="질문 의도가 명확한 집계 질의라 deterministic 집계 SQL을 사용했습니다.",
         ).model_dump()
-
     if primary_table and source_clause:
-        select_prefix = "SELECT *"
-        order_clause = ""
-        if dimensions:
-            select_prefix = f"SELECT {', '.join(dimensions)}"
-            order_clause = f" ORDER BY {dimensions[0]}"
-        sql = f"{select_prefix} {source_clause} LIMIT 50{order_clause};"
+        sql = f"SELECT * {source_clause} LIMIT 50;"
     elif primary_table:
         sql = f"SELECT * FROM {primary_table} LIMIT 50;"
     else:
         sql = "SELECT 1 AS sample_value;"
-    reasoning = (
-        "planner가 simple 경로를 선택했기 때문에, 간단한 분석용 조회 SQL을 작성했습니다. "
-        f"우선 대상 테이블은 {', '.join(joined_tables or selected_tables) if (joined_tables or selected_tables) else '미확정'} 입니다."
-    )
     return SQLDraft(
         sql=sql,
         sql_type="select",
@@ -390,7 +334,7 @@ def deterministic_sql_draft(state: AgentState) -> dict[str, Any]:
         business_grain=None,
         precheck_sql=None,
         postcheck_sql=None,
-        reasoning=reasoning,
+        reasoning="간단한 조회용 deterministic SQL 초안입니다.",
     ).model_dump()
 
 
@@ -398,33 +342,23 @@ def qualify_target_table(target_table: str | None) -> str | None:
     if not target_table:
         return target_table
     normalized = target_table.strip().strip("`")
-    if "." in normalized:
-        return normalized
-    return f"{ALLOWED_MART_SCHEMA}.{normalized}"
+    return normalized if "." in normalized else f"{ALLOWED_MART_SCHEMA}.{normalized}"
 
 
 def normalize_postcheck_sql(postcheck_sql: str | None, target_table: str | None) -> str | None:
     if not postcheck_sql:
         return postcheck_sql
     normalized_target = qualify_target_table(target_table)
-    if not normalized_target:
-        return clean_sql(postcheck_sql)
-
     sql = clean_sql(postcheck_sql)
-    schema_name, table_name = normalized_target.split(".", 1)
-    unqualified_patterns = [
-        rf"(?i)\bfrom\s+`?{re.escape(table_name)}`?\b",
-        rf"(?i)\bjoin\s+`?{re.escape(table_name)}`?\b",
-        rf"(?i)\binto\s+`?{re.escape(table_name)}`?\b",
-        rf"(?i)\btable\s+`?{re.escape(table_name)}`?\b",
-    ]
-    replacement_pairs = [
-        (unqualified_patterns[0], f"FROM {normalized_target}"),
-        (unqualified_patterns[1], f"JOIN {normalized_target}"),
-        (unqualified_patterns[2], f"INTO {normalized_target}"),
-        (unqualified_patterns[3], f"TABLE {normalized_target}"),
-    ]
-    for pattern, replacement in replacement_pairs:
+    if not normalized_target:
+        return sql
+    _, table_name = normalized_target.split(".", 1)
+    for pattern, replacement in [
+        (rf"(?i)\bfrom\s+`?{re.escape(table_name)}`?\b", f"FROM {normalized_target}"),
+        (rf"(?i)\bjoin\s+`?{re.escape(table_name)}`?\b", f"JOIN {normalized_target}"),
+        (rf"(?i)\binto\s+`?{re.escape(table_name)}`?\b", f"INTO {normalized_target}"),
+        (rf"(?i)\btable\s+`?{re.escape(table_name)}`?\b", f"TABLE {normalized_target}"),
+    ]:
         sql = re.sub(pattern, replacement, sql)
     return sql
 
@@ -452,12 +386,16 @@ def default_mart_design(state: AgentState) -> dict[str, Any]:
     return MartDesign(
         mart_name=state["plan"].get("mart_name") or "analytics_mart",
         target_schema=ALLOWED_MART_SCHEMA,
-        grain=state["plan"].get("grain") or "분석 grain 미정",
+        grain=state["plan"].get("grain") or "가능하면 원본 entity/event 행 수준 grain 유지",
+        base_grain=state["plan"].get("grain") or "원본 entity/event 행 수준 grain 유지",
         source_tables=state["plan"].get("selected_join_tables") or state["plan"].get("relevant_tables", []),
         key_columns=state["plan"].get("dimensions", []),
         measure_columns=[state["plan"].get("target_metric") or "핵심 지표"],
         dimension_columns=state["plan"].get("dimensions", []),
         incremental_column=None,
         load_strategy=state["plan"].get("load_strategy") or "full_refresh",
-        design_reasoning="planner가 선택한 테이블과 지표를 기준으로 재사용 가능한 datamart 초안을 구성했습니다.",
+        row_preserving_strategy="원본 행 수준을 최대한 유지하고 조인/정제/표준화 중심으로 설계",
+        aggregation_policy="prefer_row_preserving",
+        aggregation_rationale=None,
+        design_reasoning="원본 행 수준을 우선하는 기본 datamart 설계 초안입니다.",
     ).model_dump()

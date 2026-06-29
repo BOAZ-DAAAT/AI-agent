@@ -5,7 +5,7 @@ from __future__ import annotations
 
 def plan_prompt(state) -> str:
     return f"""
-너는 MySQL 기반 SQL/데이터마트 설계 질문 분석기다.
+너는 MySQL 기반 SQL/데이터마트 planner다.
 
 사용자 질문:
 {state['user_question']}

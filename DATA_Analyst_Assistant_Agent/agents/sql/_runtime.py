@@ -14,17 +14,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Optional
 
 from sqlalchemy import text
 
 from DATA_Analyst_Assistant_Agent.shared.db import get_db_engine
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
+from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 2))
 ALLOWED_MART_SCHEMA = os.getenv("ALLOWED_MART_SCHEMA", "analytics")
 ALLOW_MART_WRITE = os.getenv("ALLOW_MART_WRITE", "true").lower() == "true"
+MYSQL_DIALECT_NAME = "MySQL 8.x"
 
 
 # -----------------------------
@@ -119,3 +122,39 @@ def run_sql_fetchall(sql: str):
 def run_sql_commit(sql: str):
     with get_engine().begin() as conn:
         conn.execute(text(sql))
+
+
+def offline_select_rows(sql: str):
+    return [("offline_dry_run", sql[:120])]
+
+
+def offline_mart_rows(target_table: Optional[str]):
+    return [("offline_dry_run", target_table or "target_table")]
+
+
+def can_use_live_db() -> bool:
+    try:
+        return get_engine() is not None
+    except Exception:
+        return False
+
+
+def validate_mysql_sql(sql: str) -> str:
+    return mysql_dialect_error(sql)
+
+
+def drop_table_if_exists(target_table: Optional[str]) -> None:
+    if not target_table:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {target_table}"))
+
+
+def infer_target_table_from_sql(sql: str) -> Optional[str]:
+    match = re.search(r"(?is)create\s+(?:or\s+replace\s+)?table\s+([`\\w\\.]+)", sql or "")
+    if match:
+        return match.group(1).strip("`")
+    match = re.search(r"(?is)insert\s+into\s+([`\\w\\.]+)", sql or "")
+    if match:
+        return match.group(1).strip("`")
+    return None

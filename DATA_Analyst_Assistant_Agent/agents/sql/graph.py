@@ -27,6 +27,7 @@ def build_app():
     graph.add_node("plan_question", nodes.plan_question)
     graph.add_node("design_mart", nodes.design_mart)
     graph.add_node("generate_sql", nodes.generate_sql)
+    graph.add_node("prevalidate_sql", nodes.prevalidate_sql)
     graph.add_node("execute_sql", nodes.execute_sql)
     graph.add_node("validate_sql_and_result", nodes.validate_sql_and_result)
     graph.add_node("increase_retry", nodes.increase_retry)
@@ -36,7 +37,12 @@ def build_app():
     graph.add_edge("load_context", "plan_question")
     graph.add_edge("plan_question", "design_mart")
     graph.add_edge("design_mart", "generate_sql")
-    graph.add_edge("generate_sql", "execute_sql")
+    graph.add_edge("generate_sql", "prevalidate_sql")
+    graph.add_conditional_edges(
+        "prevalidate_sql",
+        nodes.route_after_prevalidation,
+        {"validate": "validate_sql_and_result", "execute": "execute_sql"},
+    )
     graph.add_edge("execute_sql", "validate_sql_and_result")
 
     graph.add_conditional_edges(

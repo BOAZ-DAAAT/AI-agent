@@ -3,39 +3,26 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
-from DATA_Analyst_Assistant_Agent.agents.sql._runtime import clean_sql, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
+    deterministic_sql_draft,
+    normalize_generated_sql,
+    retry_feedback_text,
+    try_llm_json,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
 
 
 def generate_sql(state: AgentState):
-    feedback = state.get("feedback", "").strip()
     task_type = state["plan"].get("task_type", "query_answer")
-
-    if task_type == "data_mart_build":
-        prompt = prompts.generate_mart_prompt(state, feedback)
-    else:
-        prompt = prompts.generate_query_prompt(state, feedback)
-
-    response = get_llm().invoke(prompt).content
-
-    fallback = SQLDraft(
-        sql="SELECT 1;",
-        sql_type="select",
-        target_table=None,
-        source_tables=[],
-        columns_used=[],
-        business_grain=None,
-        precheck_sql=None,
-        postcheck_sql=None,
-        reasoning="SQL 생성 파싱 실패"
-    ).model_dump()
-
-    parsed = safe_json_parse(response, fallback)
-    parsed["sql"] = clean_sql(parsed.get("sql", "SELECT 1;"))
-
-    if parsed.get("precheck_sql"):
-        parsed["precheck_sql"] = clean_sql(parsed["precheck_sql"])
-    if parsed.get("postcheck_sql"):
-        parsed["postcheck_sql"] = clean_sql(parsed["postcheck_sql"])
-
-    return {"sql_draft": parsed}
+    route_kind = state["plan"].get("route_kind") or ("comprehensive" if task_type == "data_mart_build" else "simple")
+    fallback = deterministic_sql_draft(state)
+    retry_hint = state.get("retry_hint") or {}
+    if state.get("retry_count", 0) > 0 and retry_hint.get("reason_code") in {"missing_table", "missing_column", "invalid_join_plan"}:
+        return {"sql_draft": fallback}
+    feedback = retry_feedback_text(state)
+    prompt = prompts.generate_mart_prompt(state, feedback) if task_type == "data_mart_build" else prompts.generate_query_prompt(state, feedback)
+    response = try_llm_json(prompt)
+    parsed = safe_json_parse(response, fallback) if response else fallback
+    normalized = normalize_generated_sql(parsed, fallback, route_kind)
+    return {"sql_draft": SQLDraft(**normalized).model_dump()}
