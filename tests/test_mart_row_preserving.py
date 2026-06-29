@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import default_validation_contract
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_datamart_reusability
 
 
@@ -71,3 +72,17 @@ def test_row_preserving_datamart_is_allowed() -> None:
     )
 
     assert findings == []
+
+
+def test_comprehensive_mart_contract_keeps_datamart_shape_even_with_dimensions() -> None:
+    contract = default_validation_contract(
+        question="월별 시간대별 분석용 데이터마트 생성",
+        route_kind="comprehensive",
+        target_metric="주문 수",
+        dimensions=["월", "시간"],
+        selected_tables=["orders"],
+        mart_name="monthly_hourly_analysis_mart",
+    )
+
+    assert contract["expected_result_shape"] == "datamart_creation"
+    assert contract["required_aggregations"] == []

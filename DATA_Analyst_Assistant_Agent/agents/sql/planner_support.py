@@ -142,7 +142,9 @@ def default_validation_contract(
     required_aggregations: list[str] = []
     required_columns: list[str] = []
     expected_aliases: list[str] = []
-    if dimensions:
+    if route_kind == "comprehensive":
+        expected_result_shape = "datamart_creation"
+    elif dimensions:
         expected_result_shape = "grouped_aggregate"
     elif is_average_delivery_days_question(question):
         expected_result_shape = "single_scalar"
