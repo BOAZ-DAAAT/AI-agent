@@ -78,6 +78,10 @@ planner 결과:
 규칙:
 - comprehensive 경로에서만 사용할 datamart 설계만 작성한다.
 - source_tables는 planner의 selected_join_tables를 우선 사용한다.
+- 가능한 한 원본 entity/event 행 수준 grain을 유지한다.
+- 조인, 정제, 표준화, 필수 파생 컬럼 추가를 우선한다.
+- 특정 질문의 최종 요약 결과 테이블처럼 과하게 집계하지 않는다.
+- 집계를 사용해야 한다면 aggregation_rationale과 reasoning에 정당화를 적는다.
 - reasoning은 한국어로 작성한다.
 - 반드시 JSON만 출력한다.
 """
@@ -119,6 +123,9 @@ clarification 요청:
 - 단일 집계 질문이면 aggregate 함수와 alias를 반드시 포함한다.
 - 그룹 집계 질문이면 dimension 컬럼과 GROUP BY를 명시한다.
 - comprehensive면 target_table과 postcheck_sql이 일관되게 연결되어야 한다.
+- comprehensive 경로의 datamart는 최종 리포트용 요약 결과보다 재사용 가능한 기반 테이블을 우선한다.
+- 가능한 한 원본 행 수준 grain을 유지하고 조인/정제/표준화/필수 파생 컬럼 추가를 우선한다.
+- 집계는 꼭 필요한 경우에만 최소 수준으로 사용하고, 사용했다면 reasoning에 정당화를 적는다.
 - 반드시 {MYSQL_DIALECT_NAME} 문법만 사용한다.
 - SQLite/PostgreSQL 문법(JULIANDAY, STRFTIME, DATE_TRUNC, ILIKE, ::type 등)은 절대 사용하지 않는다.
 - 날짜 차이는 MySQL 기준으로 DATEDIFF 또는 TIMESTAMPDIFF를 사용한다.

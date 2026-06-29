@@ -44,12 +44,16 @@ class MartDesign(BaseModel):
     mart_name: str
     target_schema: str
     grain: str
+    base_grain: str = Field(default="원본 entity/event grain 유지", description="가능하면 유지할 기본 행 수준 grain")
     source_tables: List[str] = Field(default_factory=list)
     key_columns: List[str] = Field(default_factory=list)
     measure_columns: List[str] = Field(default_factory=list)
     dimension_columns: List[str] = Field(default_factory=list)
     incremental_column: Optional[str] = None
     load_strategy: str = "full_refresh"
+    row_preserving_strategy: str = Field(default="원본 행 수준 유지 우선", description="row-preserving 설계 전략")
+    aggregation_policy: str = Field(default="prefer_row_preserving", description="prefer_row_preserving / aggregate_if_justified")
+    aggregation_rationale: Optional[str] = Field(default=None, description="집계를 사용한 경우 정당화 근거")
     design_reasoning: str
 
 

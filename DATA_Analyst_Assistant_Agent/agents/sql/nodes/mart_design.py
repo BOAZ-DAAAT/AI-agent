@@ -17,12 +17,16 @@ def design_mart(state: AgentState):
         mart_name=state["plan"].get("mart_name") or "mart_unknown",
         target_schema=ALLOWED_MART_SCHEMA,
         grain=state["plan"].get("grain") or "grain 미정",
+        base_grain=state["plan"].get("grain") or "원본 entity/event grain 유지 우선",
         source_tables=state["plan"].get("relevant_tables", []),
         key_columns=[],
         measure_columns=[],
         dimension_columns=[],
         incremental_column=None,
         load_strategy=state["plan"].get("load_strategy") or "full_refresh",
+        row_preserving_strategy="원본 행 수준을 최대한 유지하고 조인/정제/표준화 중심으로 설계",
+        aggregation_policy="prefer_row_preserving",
+        aggregation_rationale=None,
         design_reasoning="마트 설계 파싱 실패"
     ).model_dump()
 

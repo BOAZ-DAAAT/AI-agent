@@ -177,6 +177,7 @@ def default_validation_contract(
         "target_metric": target_metric,
         "dimensions": dimensions,
         "target_table": f"{ALLOWED_MART_SCHEMA}.{mart_name}" if mart_name and route_kind == "comprehensive" else None,
+        "mart_policy": "prefer_row_preserving" if route_kind == "comprehensive" else None,
     }
 
 
@@ -275,7 +276,7 @@ def default_plan_from_state(state: AgentState) -> dict[str, Any]:
         relevant_tables=selected_tables,
         candidate_tables=ranked_tables,
         mart_name=mart_name,
-        grain="월/고객 등 분석 grain 미정" if route_kind == "comprehensive" else None,
+        grain="가능하면 원본 entity/event 행 수준 grain 유지" if route_kind == "comprehensive" else None,
         load_strategy="full_refresh" if route_kind == "comprehensive" else None,
         ambiguity_note=ambiguity_note,
         expected_result_shape=contract["expected_result_shape"],
@@ -452,12 +453,16 @@ def default_mart_design(state: AgentState) -> dict[str, Any]:
     return MartDesign(
         mart_name=state["plan"].get("mart_name") or "analytics_mart",
         target_schema=ALLOWED_MART_SCHEMA,
-        grain=state["plan"].get("grain") or "분석 grain 미정",
+        grain=state["plan"].get("grain") or "가능하면 원본 entity/event 행 수준 grain 유지",
+        base_grain=state["plan"].get("grain") or "원본 entity/event 행 수준 grain 유지",
         source_tables=state["plan"].get("selected_join_tables") or state["plan"].get("relevant_tables", []),
         key_columns=state["plan"].get("dimensions", []),
         measure_columns=[state["plan"].get("target_metric") or "핵심 지표"],
         dimension_columns=state["plan"].get("dimensions", []),
         incremental_column=None,
         load_strategy=state["plan"].get("load_strategy") or "full_refresh",
-        design_reasoning="planner가 선택한 테이블과 지표를 기준으로 재사용 가능한 datamart 초안을 구성했습니다.",
+        row_preserving_strategy="원본 행 수준을 최대한 유지하고 조인/정제/표준화 중심으로 설계",
+        aggregation_policy="prefer_row_preserving",
+        aggregation_rationale=None,
+        design_reasoning="planner가 선택한 테이블과 지표를 기준으로 원본 행 수준을 최대한 유지하는 재사용 가능한 datamart 초안을 구성했습니다.",
     ).model_dump()

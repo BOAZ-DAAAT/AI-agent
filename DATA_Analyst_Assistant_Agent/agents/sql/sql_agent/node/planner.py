@@ -55,5 +55,9 @@ def design_mart(state: AgentState):
     parsed = safe_json_parse(response, fallback) if response else fallback
     parsed.setdefault("target_schema", ALLOWED_MART_SCHEMA)
     parsed.setdefault("source_tables", fallback["source_tables"])
+    parsed.setdefault("base_grain", fallback["base_grain"])
+    parsed.setdefault("row_preserving_strategy", fallback["row_preserving_strategy"])
+    parsed.setdefault("aggregation_policy", fallback["aggregation_policy"])
+    parsed.setdefault("aggregation_rationale", fallback["aggregation_rationale"])
     parsed.setdefault("design_reasoning", fallback["design_reasoning"])
     return {"mart_design": parsed}
