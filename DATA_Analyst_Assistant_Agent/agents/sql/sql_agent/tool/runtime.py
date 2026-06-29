@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.agents.sql.db.db_connect import get_db_engine
-from DATA_Analyst_Assistant_Agent.llm import get_chat_model
+from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 load_dotenv()
 
