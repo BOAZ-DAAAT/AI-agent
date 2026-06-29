@@ -4,7 +4,6 @@ import os
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
