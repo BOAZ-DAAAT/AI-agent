@@ -16,6 +16,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!DATA_Analyst_Assistant_Agent/agents/**/tools/lib/
+!DATA_Analyst_Assistant_Agent/agents/**/tools/lib/*.py
 parts/
 sdist/
 var/
