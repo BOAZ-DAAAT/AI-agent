@@ -11,11 +11,11 @@ import pytest
 from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.analysis import AnalysisAgent, AnalysisExecutionPlan, AnalysisResult
+from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
-from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.planner import build_analysis_plan
-from DATA_Analyst_Assistant_Agent.agents.analysis.report.methods import build_analysis_result
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.execute import build_analysis_result
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.plan import build_analysis_plan
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools import ANALYSIS_TOOLS
-from DATA_Analyst_Assistant_Agent.agents.analysis.workflow import run_analysis_workflow
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState

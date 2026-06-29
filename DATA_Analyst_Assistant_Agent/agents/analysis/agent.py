@@ -6,7 +6,7 @@ from typing import Any
 from data_agent_backend.models.artifacts import ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import first_dataframe, read_json_artifact, read_sql_result_csvs
-from DATA_Analyst_Assistant_Agent.agents.analysis.workflow import run_analysis_workflow
+from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
