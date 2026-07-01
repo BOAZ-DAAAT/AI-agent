@@ -171,11 +171,44 @@ def insight_node(state: EDAState) -> dict:
 
         corr_pairs = {}
         if len(numeric_cols) >= 2:
-            corr = df[numeric_cols].corr()
+            pear = df[numeric_cols].corr()
+            spear = df[numeric_cols].corr(method="spearman")
             for i in range(len(numeric_cols)):
                 for j in range(i + 1, len(numeric_cols)):
-                    key = f"corr_{numeric_cols[i]}_vs_{numeric_cols[j]}"
-                    corr_pairs[key] = round(float(corr.iloc[i, j]), 3)
+                    a, b = numeric_cols[i], numeric_cols[j]
+                    p = float(pear.iloc[i, j])
+                    sp = float(spear.iloc[i, j])
+                    gap = abs(sp) - abs(p)                    # 비선형 신호(단조인데 비선형)
+                    nonlin = ("weak" if abs(p) < 0.1 and abs(sp) < 0.1 else
+                              "monotonic_nonlinear" if gap > 0.15 else "linear")
+                    pair_df = df[[a, b]].dropna()
+                    npts = len(pair_df)
+                    entry = {
+                        "pearson_r":    _r(p, 3),
+                        "spearman_r":   _r(sp, 3),
+                        "nonlinearity": nonlin,
+                        "n":            npts,
+                    }
+                    # 관계 있는 쌍만 산점도 모양(binned_trend) 등 추가 (약한 쌍엔 bloat 방지)
+                    if npts >= 30 and (abs(p) >= 0.2 or abs(sp) >= 0.2):
+                        entry["r_squared_linear"] = _r(p * p, 3)   # 선형 fit 설명력임을 명시
+                        try:
+                            x = pair_df[a].astype(float)
+                            y = pair_df[b].astype(float)
+                            bins = pd.qcut(x, q=min(10, max(2, x.nunique())), duplicates="drop")
+                            bt = []
+                            for interval, grp in y.groupby(bins, observed=True):
+                                bt.append({
+                                    "x_range":  [_r(interval.left, 2), _r(interval.right, 2)],
+                                    "y_median": _r(grp.median(), 3),
+                                    "y_iqr":    [_r(grp.quantile(0.25), 3), _r(grp.quantile(0.75), 3)],
+                                    "n":        int(len(grp)),
+                                })
+                            entry["binned_trend"] = bt          # x구간별 y중앙값+IQR = 산점도 압축
+                            entry["binning"] = {"method": "quantile", "n_bins": len(bt)}  # 구간 생성 기준
+                        except Exception:  # noqa: BLE001
+                            pass
+                    corr_pairs[f"corr_{a}_vs_{b}"] = entry      # 키 형식 유지(소비처 호환)
 
         missing_info = detect_missing(df)
         outlier_info = detect_outliers_iqr(df, measure_cols=measure_cols)

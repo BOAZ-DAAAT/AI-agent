@@ -197,7 +197,10 @@ def build_cautions(data_level: Dict[str, Any], reliability: Dict[str, Any],
             "→ 해당 그룹의 평균·비교는 신뢰도 낮으니 통합/제외 고려."
         )
 
-    if correlation_pairs and any(abs(v) >= 0.3 for v in correlation_pairs.values()):
+    def _abs_r(v):
+        r = v.get("pearson_r") if isinstance(v, dict) else v   # 관계객체/실수 둘 다 지원
+        return abs(r) if r is not None else 0.0
+    if correlation_pairs and any(_abs_r(v) >= 0.3 for v in correlation_pairs.values()):
         cautions.append("관찰된 상관은 인과가 아니며, 교란변수(카테고리·지역·가격 등) 통제가 필요할 수 있음.")
 
     return cautions

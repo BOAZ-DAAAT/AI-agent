@@ -19,14 +19,19 @@ def _corr_of_pair(pair: str, correlation_pairs: dict):
     """'A_vs_B' 형태에서 |상관계수| 를 찾는다. 없으면 None."""
     if not correlation_pairs:
         return None
-    direct = correlation_pairs.get(f"corr_{pair}")
-    if direct is not None:
-        return abs(direct)
+
+    def _abs_r(v):
+        if v is None:
+            return None
+        r = v.get("pearson_r") if isinstance(v, dict) else v   # 관계객체/실수 둘 다 지원
+        return abs(r) if r is not None else None
+
+    r = _abs_r(correlation_pairs.get(f"corr_{pair}"))
+    if r is not None:
+        return r
     if "_vs_" in pair:
         a, b = pair.split("_vs_", 1)
-        rev = correlation_pairs.get(f"corr_{b}_vs_{a}")
-        if rev is not None:
-            return abs(rev)
+        return _abs_r(correlation_pairs.get(f"corr_{b}_vs_{a}"))
     return None
 
 
