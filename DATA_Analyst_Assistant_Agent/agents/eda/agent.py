@@ -63,7 +63,9 @@ class EDAAgent:
             summary=payload["final_summary"] or "EDA LangGraph analysis completed.",
             artifact_refs=[ref],
             validation=ValidationBlock(local_checks=run_eda_self_check(source_ids, profile)),
-            next_handoff="validation_agent",
+            # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
+            # 빈 값으로 명시(공용 기본값 "validation_agent"가 삭제된 에이전트라 폴백 방지).
+            next_handoff="",
         )
 
     def _run_eda_graph(self, csvs: list[Any], state: OrchestrationState) -> dict[str, Any]:
@@ -78,7 +80,7 @@ class EDAAgent:
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.
         set_context(EdaContext(df=df, question_type=state.route_kind or ""))
-        # 앞단이 넘긴 의미 힌트를 EDA로 전달(있으면 줍고 없으면 폴백). 현재 supervisor는
+        # 앞단이 넘긴 의미 힌트를 EDA로 전달(있으면 줍고 없으면 폴백). 앞단(오케스트레이터)은
         # "매출"/"월"/None 수준이라 대개 비어 옴 → 가설 노드가 priority_metrics로 폴백한다.
         plan = state.plan
         plan_metric = (plan.metric if plan and plan.metric else "") or ""
