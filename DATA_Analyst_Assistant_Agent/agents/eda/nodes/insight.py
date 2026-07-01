@@ -63,7 +63,9 @@ def insight_node(state: EDAState) -> dict:
             outlier_rate = float(((s < lo_fence) | (s > hi_fence)).mean()) if iqr > 0 else 0.0
             skew = float(s.skew()) if s.nunique() > 2 else 0.0
             kurt = float(s.kurt()) if s.nunique() > 3 else 0.0
-            all_positive = bool(s.min() >= 0)
+            all_positive = bool(s.min() > 0)       # 엄밀히 양수(log 직접 가능)
+            non_negative = bool(s.min() >= 0)
+            has_zero = bool((s == 0).any())
 
             # eda_notes — 수치에서 규칙으로 도출(LLM 없음)
             shape = ("left_skewed" if skew < -0.5 else
@@ -72,8 +74,11 @@ def insight_node(state: EDAState) -> dict:
                          "high_tail" if skew > 1 else
                          "both_tails" if outlier_rate > 0.05 else "none")
             handling: list = []
-            if shape == "right_skewed" and all_positive:
-                handling.append("log_transform")
+            if shape == "right_skewed":
+                if all_positive:
+                    handling.append("log_transform")
+                elif non_negative:             # 0 포함 → log(x+1)
+                    handling.append("log1p_transform")
             if outlier_rate > 0.03:
                 handling.append("avoid_naive_outlier_removal")
             if shape != "symmetric":
@@ -103,6 +108,8 @@ def insight_node(state: EDAState) -> dict:
                 "unique_count":     int(s.nunique()),
                 "outlier_rate_iqr": _r(outlier_rate),
                 "all_positive":     all_positive,
+                "non_negative":     non_negative,
+                "has_zero":         has_zero,
                 "normality":        normality,
                 "eda_notes": {
                     "shape":                shape,
@@ -110,6 +117,57 @@ def insight_node(state: EDAState) -> dict:
                     "recommended_handling": handling,
                 },
             }
+
+        # ── 범주형 컬럼 프로파일 (같은 dist_stats에, type으로 구분) ──
+        cat_cols = [c for c in df.columns
+                    if c not in numeric_cols
+                    and not pd.api.types.is_numeric_dtype(df[c])
+                    and not pd.api.types.is_datetime64_any_dtype(df[c])]
+        for col in cat_cols:
+            s = df[col].dropna()
+            if s.empty:
+                dist_stats[col] = {"type": "categorical", "unique_count": 0}
+                continue
+            vc = s.value_counts()
+            n = len(s)
+            nun = int(s.nunique())
+            top1_share = float(vc.iloc[0] / n)
+            is_id_like = nun > 0.9 * n                        # 거의 다 유니크 = id 같은 것
+            rare_count = int((vc < 30).sum())                 # 표본 적은 범주 (n<30)
+            rare_share = float(vc[vc < 30].sum() / n)         # 희소범주가 차지하는 데이터 비율
+            cardinality = "high" if nun > 50 else "medium" if nun > 10 else "low"
+            # balance: 한 범주 지배 / 긴 꼬리(희소 다수) / 균형
+            balance = ("dominated" if top1_share > 0.5 else
+                       "long_tailed" if nun and rare_count / nun > 0.3 else
+                       "balanced")
+            handling = []
+            if is_id_like:
+                handling.append("treat_as_id_or_drop")
+            elif cardinality == "high" or balance == "long_tailed":
+                handling.append("group_rare_categories")
+            if balance == "dominated":
+                handling.append("check_dominant_category")
+
+            entry = {
+                "type":                    "categorical",
+                "unique_count":            nun,
+                "missing_rate":            _r(df[col].isna().mean()),
+                "is_id_like":              is_id_like,
+                "top1_share":              _r(top1_share),
+                "top10_coverage":          _r(float(vc.head(10).sum() / n)),
+                "rare_category_count":     rare_count,
+                "rare_category_threshold": "n < 30",
+                "rare_category_share":     _r(rare_share),
+                "mode":                    str(vc.index[0]),
+                "eda_notes": {
+                    "cardinality":          cardinality,
+                    "balance":              balance,
+                    "recommended_handling": handling,
+                },
+            }
+            if not is_id_like:                                # id는 top값 무의미 → 스킵
+                entry["top_values"] = {str(k): int(v) for k, v in vc.head(10).items()}
+            dist_stats[col] = entry
 
         corr_pairs = {}
         if len(numeric_cols) >= 2:
