@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict
 
 import pandas as pd
@@ -41,16 +42,73 @@ def insight_node(state: EDAState) -> dict:
         if not numeric_cols:
             numeric_cols = list(df.select_dtypes(include=["float64", "int64"]).columns)
 
+        def _r(x, nd: int = 4):
+            """NaN/inf는 None으로(JSON 안전), 나머진 반올림."""
+            try:
+                x = float(x)
+            except (TypeError, ValueError):
+                return None
+            return round(x, nd) if math.isfinite(x) else None
+
         dist_stats = {}
         for col in numeric_cols:
             s = df[col].dropna()
+            if s.empty:
+                dist_stats[col] = {"type": "numeric", "unique_count": 0}
+                continue
+
+            q = s.quantile([0.01, 0.05, 0.25, 0.75, 0.95, 0.99])
+            iqr = float(q[0.75] - q[0.25])
+            lo_fence, hi_fence = q[0.25] - 1.5 * iqr, q[0.75] + 1.5 * iqr
+            outlier_rate = float(((s < lo_fence) | (s > hi_fence)).mean()) if iqr > 0 else 0.0
+            skew = float(s.skew()) if s.nunique() > 2 else 0.0
+            kurt = float(s.kurt()) if s.nunique() > 3 else 0.0
+            all_positive = bool(s.min() >= 0)
+
+            # eda_notes — 수치에서 규칙으로 도출(LLM 없음)
+            shape = ("left_skewed" if skew < -0.5 else
+                     "right_skewed" if skew > 0.5 else "symmetric")
+            suspected = ("low_tail" if skew < -1 else
+                         "high_tail" if skew > 1 else
+                         "both_tails" if outlier_rate > 0.05 else "none")
+            handling: list = []
+            if shape == "right_skewed" and all_positive:
+                handling.append("log_transform")
+            if outlier_rate > 0.03:
+                handling.append("avoid_naive_outlier_removal")
+            if shape != "symmetric":
+                handling.append("prefer_nonparametric_or_transform")
+
+            normality = ("approx_normal" if abs(skew) < 0.5 and abs(kurt) < 1 else
+                         "heavy_tailed" if abs(kurt) >= 3 else "skewed")
+
             dist_stats[col] = {
-                "mean":     round(float(s.mean()), 4),
-                "median":   round(float(s.median()), 4),
-                "std":      round(float(s.std()), 4),
-                "skewness": round(float(s.skew()), 4),
-                "min":      round(float(s.min()), 4),
-                "max":      round(float(s.max()), 4),
+                "type":             "numeric",
+                # semantic_type 은 후속 스텝(휴리스틱)에서 추가 예정
+                "mean":             _r(s.mean()),
+                "median":           _r(s.median()),
+                "std":              _r(s.std()),
+                "skewness":         _r(skew),
+                "kurtosis":         _r(kurt),
+                "min":              _r(s.min()),
+                "p01":              _r(q[0.01]),
+                "p05":              _r(q[0.05]),
+                "q1":               _r(q[0.25]),
+                "q3":               _r(q[0.75]),
+                "p95":              _r(q[0.95]),
+                "p99":              _r(q[0.99]),
+                "max":              _r(s.max()),
+                "missing_rate":     _r(df[col].isna().mean()),
+                "zero_rate":        _r((s == 0).mean()),
+                "unique_count":     int(s.nunique()),
+                "outlier_rate_iqr": _r(outlier_rate),
+                "all_positive":     all_positive,
+                "normality":        normality,
+                "eda_notes": {
+                    "shape":                shape,
+                    "suspected_outliers":   suspected,
+                    "recommended_handling": handling,
+                },
             }
 
         corr_pairs = {}
