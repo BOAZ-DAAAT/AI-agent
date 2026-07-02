@@ -223,14 +223,54 @@ def insight_node(state: EDAState) -> dict:
         if key_col and key_col in df.columns:
             for col in numeric_cols:
                 try:
-                    grp = df.groupby(key_col)[col].mean().dropna()
-                    group_comparison[col] = {
+                    g   = df.groupby(key_col)[col]
+                    grp = g.mean().dropna()                        # 그룹별 평균
+                    if grp.empty:
+                        continue
+                    counts = g.count().reindex(grp.index)          # 그룹별 표본 수(col 기준 non-NaN)
+                    group_mean = float(grp.mean())
+                    group_max  = float(grp.max())
+                    group_min  = float(grp.min())
+                    group_std  = float(grp.std())                  # 그룹 평균들의 표준편차(그룹 1개면 NaN)
+                    max_n      = int(counts.max())
+
+                    entry = {
                         "top3_groups":    {str(k): round(float(v), 4) for k, v in grp.nlargest(3).items()},
                         "bottom3_groups": {str(k): round(float(v), 4) for k, v in grp.nsmallest(3).items()},
-                        "group_max":      round(float(grp.max()), 4),
-                        "group_min":      round(float(grp.min()), 4),
-                        "group_std":      round(float(grp.std()), 4),
+                        "group_max":      round(group_max, 4),
+                        "group_min":      round(group_min, 4),
+                        "group_std":      _r(group_std, 4),
+                        "n_groups":       int(len(grp)),           # 이하 신규 — 효과크기 해석 맥락
+                        "min_group_n":    int(counts.min()),
+                        "max_group_n":    max_n,
                     }
+
+                    # 효과크기 eta² = 그룹이 이 변수 분산을 몇 % 설명하나(SS_between/SS_total).
+                    # 그룹당 복수 관측(raw)일 때만 의미 있음 — 집계본(그룹당 1행)이면 스킵.
+                    if max_n >= 2:
+                        grand      = float(df[col].mean())
+                        ss_total   = float(((df[col] - grand) ** 2).sum())
+                        ss_between = float((counts * (grp - grand) ** 2).sum())
+                        eta = ss_between / ss_total if ss_total > 0 else None
+                        entry["eta_squared"] = _r(eta, 4)
+                        if eta is None:
+                            entry["eta_interpretation"] = "undefined"
+                        elif eta < 0.06:
+                            entry["eta_interpretation"] = "small"
+                        elif eta < 0.14:
+                            entry["eta_interpretation"] = "medium"
+                        else:
+                            entry["eta_interpretation"] = "large"
+                    else:
+                        entry["eta_squared"] = None
+                        entry["eta_interpretation"] = "skipped_aggregated"
+
+                    # 그룹 간 격차 배율 — 최저 그룹 평균이 양수일 때만(0/음수면 무의미)
+                    entry["spread_ratio"] = _r(group_max / group_min, 4) if group_min > 0 else None
+                    # 그룹 평균들의 변동계수 — 전체 평균이 0 근처면 폭발하므로 스킵
+                    entry["cv_across_groups"] = _r(group_std / group_mean, 4) if abs(group_mean) > 1e-9 else None
+
+                    group_comparison[col] = entry
                 except Exception:
                     pass
 
