@@ -37,6 +37,7 @@ class EDAAgent:
             "analysis_target": eda_result.get("analysis_target", ""),
             "data_level": eda_result.get("data_level", {}),
             "cautions": eda_result.get("cautions", []),
+            "analysis_constraints": eda_result.get("analysis_constraints", []),
             "statistical_metadata": eda_result.get("statistical_metadata", {}),
             "key_charts": eda_result.get("key_charts", []),
             "error_log": eda_result.get("error_log", []),
