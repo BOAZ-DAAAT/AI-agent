@@ -104,6 +104,7 @@ def _write_eda_summary(name: str, contract, df, result: dict, out_dir: str) -> s
         "analysis_target": result.get("analysis_target", ""),
         "data_level": result.get("data_level", {}),
         "cautions": result.get("cautions", []),
+        "analysis_constraints": result.get("analysis_constraints", []),
         "statistical_metadata": result.get("statistical_metadata", {}),
         "key_charts": [os.path.basename(p) for p in result.get("key_charts", [])],
         "error_log": result.get("error_log", []),
@@ -123,7 +124,11 @@ def _write_run_summary(name: str, contract, result: dict, out_dir: str) -> str:
     charts = sorted(os.path.basename(p) for p in glob.glob(os.path.join(all_dir, "*.png")))
     dl = result.get("data_level", {}) or {}
     analyses = sorted({e.get("choice") for e in result.get("controller_log", []) if e.get("choice")})
-    caution_lines = [f"- {c}" for c in (result.get("cautions") or [])] or ["- (없음)"]
+    def _fmt_caution(c):
+        if isinstance(c, dict):  # 계약형 구조체 → 사람이 읽게 요약
+            return f"- [{c.get('source','?')}] {c.get('code','?')} ({c.get('severity','?')}): {c.get('message_ko','')}"
+        return f"- {c}"          # 구버전 문자열 하위호환
+    caution_lines = [_fmt_caution(c) for c in (result.get("cautions") or [])] or ["- (없음)"]
     chart_lines = [f"- all/{c}" for c in charts] or ["- (없음)"]
 
     lines = [
