@@ -7,7 +7,7 @@ import pytest
 from data_agent_backend.models.runs import RunStatus
 from langgraph.types import Command
 
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SQLAgentSupervisor, SupervisorAgent
 
 
@@ -80,6 +80,7 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
 
     state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id=None)
 
+    assert isinstance(state, OrchestrationState)
     assert state.run_id == "run_001"
     assert state.thread_id == "thread_sales_001"
     assert state.terminal_state.value == "completed"
