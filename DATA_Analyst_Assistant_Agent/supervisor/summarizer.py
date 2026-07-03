@@ -10,7 +10,7 @@ def summarize_agent_step(step: str, result: AgentCompactResult, *, next_action: 
     return StepSummary(
         step=step,
         agent=result.agent,
-        action=result.status,
+        action=f"call_{result.agent}",
         summary=result.summary[:MAX_STEP_SUMMARY_LENGTH],
         artifact_ids=list(result.artifact_ids),
         next_action=next_action,
