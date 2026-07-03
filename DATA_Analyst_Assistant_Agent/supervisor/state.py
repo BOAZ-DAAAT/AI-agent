@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
@@ -91,6 +93,14 @@ class SupervisorState(TypedDict, total=False):
     max_retry_per_agent: int
 
 
+def _ensure_json_serializable(state: SupervisorState) -> SupervisorState:
+    try:
+        json.dumps(state, ensure_ascii=False)
+    except TypeError as exc:
+        raise ValueError("SupervisorState must be JSON serializable") from exc
+    return state
+
+
 def empty_supervisor_state(
     *,
     thread_id: str,
@@ -100,7 +110,7 @@ def empty_supervisor_state(
     project_id: str | None = None,
     catalog_summary: dict[str, Any] | None = None,
 ) -> SupervisorState:
-    return {
+    state: SupervisorState = {
         "thread_id": thread_id,
         "current_run_id": run_id,
         "run_ids": [run_id],
@@ -129,6 +139,7 @@ def empty_supervisor_state(
         "retry_counts": {},
         "max_retry_per_agent": 1,
     }
+    return _ensure_json_serializable(state)
 
 
 def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> SupervisorState:
@@ -153,6 +164,12 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
         "completed_agents": completed_agents,
         "failed_agents": failed_agents,
     }
+    if result.status in {"success", "warning"}:
+        pending_approval = merged.get("pending_approval")
+        if isinstance(pending_approval, dict) and pending_approval.get("agent") == result.agent:
+            merged["pending_approval"] = None
+            if merged.get("terminal_state") == SupervisorTerminalState.needs_user_approval.value:
+                merged["terminal_state"] = "running"
     if result.status == "approval_required":
         approval = PendingApproval(
             approval_id=f"{state['current_run_id']}:{result.agent}:approval",
@@ -168,7 +185,7 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
             "message": result.error,
             "retryable": result.retryable,
         }
-    return merged
+    return _ensure_json_serializable(merged)
 
 
 def artifact_ids_by_agent(state: SupervisorState) -> dict[str, list[str]]:

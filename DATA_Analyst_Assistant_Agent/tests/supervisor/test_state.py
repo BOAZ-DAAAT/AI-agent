@@ -194,3 +194,64 @@ def test_supervisor_state_defaults_and_merged_results_are_json_serializable() ->
     )
 
     json.dumps(merged, ensure_ascii=False)
+
+
+def test_empty_supervisor_state_rejects_non_json_serializable_catalog_summary() -> None:
+    with pytest.raises(ValueError, match="SupervisorState must be JSON serializable"):
+        empty_supervisor_state(
+            thread_id="thread_sales_001",
+            run_id="run_001",
+            user_query="월별 매출 추이를 분석해줘",
+            datasource_id="ds_001",
+            catalog_summary={"bad": object()},
+        )
+
+
+def test_success_result_clears_pending_approval_for_same_agent() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="sql_agent",
+            status="approval_required",
+            summary="데이터마트 사용 승인이 필요합니다",
+        ),
+    )
+
+    merged = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="승인 후 SQL 실행 완료",
+        ),
+    )
+
+    assert merged["pending_approval"] is None
+    assert merged["terminal_state"] == "running"
+    assert merged["completed_agents"] == ["sql_agent"]
+
+
+def test_merge_agent_result_rejects_non_json_serializable_existing_state() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["catalog_summary"] = {"bad": object()}
+
+    with pytest.raises(ValueError, match="SupervisorState must be JSON serializable"):
+        merge_agent_result(
+            state,
+            AgentCompactResult(
+                agent="sql_agent",
+                status="success",
+                summary="SQL 실행 완료",
+            ),
+        )
