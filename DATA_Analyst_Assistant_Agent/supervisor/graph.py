@@ -214,7 +214,6 @@ def finalize_node(state: SupervisorState) -> SupervisorState:
 
 
 def build_graph(
-    *,
     subagent_adapter: Any,
     model: Any | None = None,
     checkpointer: Any | None = None,

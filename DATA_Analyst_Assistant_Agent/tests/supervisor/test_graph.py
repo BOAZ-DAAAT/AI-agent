@@ -103,6 +103,15 @@ def test_supervisor_graph_runs_all_subagents_and_finalizes() -> None:
     }
 
 
+def test_build_graph_accepts_positional_subagent_adapter() -> None:
+    graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel(["call_sql_agent", "finalize"]))
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["terminal_state"] == "completed"
+    assert result["completed_agents"] == ["sql_agent"]
+
+
 def test_guard_blocked_action_executes_guard_next_action_without_model_redecision() -> None:
     adapter = FakeSubAgentAdapter()
     graph = build_graph(
