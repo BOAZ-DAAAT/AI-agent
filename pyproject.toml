@@ -12,6 +12,7 @@ dependencies = [
     "langchain-google-genai>=4.2.6",
     "langchain-openai>=1.3.3",
     "langgraph>=1.2.6",
+    "langgraph-checkpoint-sqlite",
     "libpysal>=4.14.1",
     "matplotlib>=3.11.0",
     "numpy>=2.4.6",
