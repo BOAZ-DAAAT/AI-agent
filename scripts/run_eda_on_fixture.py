@@ -106,7 +106,9 @@ def _write_eda_summary(name: str, contract, df, result: dict, out_dir: str) -> s
         "cautions": result.get("cautions", []),
         "analysis_constraints": result.get("analysis_constraints", []),
         "statistical_metadata": result.get("statistical_metadata", {}),
-        "key_charts": [os.path.basename(p) for p in result.get("key_charts", [])],
+        # 프로덕션(agent.py)과 동일 모양: {filename, artifact_id}. 하네스엔 registry 없어 id=None.
+        "key_charts": [{"filename": os.path.basename(p), "artifact_id": None}
+                       for p in result.get("key_charts", [])],
         "error_log": result.get("error_log", []),
     }
     path = os.path.join(out_dir, "eda_summary.json")
