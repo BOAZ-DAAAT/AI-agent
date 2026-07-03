@@ -164,15 +164,29 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
 
 def artifact_ids_by_agent(state: SupervisorState) -> dict[str, list[str]]:
     ids: dict[str, list[str]] = {}
+
+    def append_unique(agent: str, artifact_id: Any) -> None:
+        artifact_id_value = str(artifact_id)
+        if not artifact_id_value:
+            return
+        ids.setdefault(agent, [])
+        if artifact_id_value not in ids[agent]:
+            ids[agent].append(artifact_id_value)
+
     for result in state.get("agent_results", []):
         agent = str(result.get("agent", ""))
         if not agent:
             continue
-        ids.setdefault(agent, [])
         for artifact_id in result.get("artifact_ids", []):
-            artifact_id_value = str(artifact_id)
-            if artifact_id_value not in ids[agent]:
-                ids[agent].append(artifact_id_value)
+            append_unique(agent, artifact_id)
+    for agent, artifacts in state.get("artifacts", {}).items():
+        agent_name = str(agent)
+        if not agent_name:
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            append_unique(agent_name, artifact.get("artifact_id", ""))
     return ids
 
 
