@@ -273,5 +273,40 @@ def test_resume_updates_backend_status_when_graph_returns_terminal_state(monkeyp
     )
 
 
+def test_resume_does_not_update_backend_status_without_terminal_state(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    result = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "월별 매출 추이를 분석해줘",
+    }
+    graph = CapturingGraph(result=result)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    returned = agent.resume("thread_sales_001", {"approved": True})
+
+    assert returned is result
+    assert adapter.status_updates == []
+
+
+def test_resume_does_not_update_backend_status_for_running_terminal_state(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    result = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "terminal_state": "running",
+        "latest_user_query": "월별 매출 추이를 분석해줘",
+    }
+    graph = CapturingGraph(result=result)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    returned = agent.resume("thread_sales_001", {"approved": True})
+
+    assert returned is result
+    assert adapter.status_updates == []
+
+
 def test_sql_agent_supervisor_alias_points_to_new_supervisor() -> None:
     assert SQLAgentSupervisor is SupervisorAgent

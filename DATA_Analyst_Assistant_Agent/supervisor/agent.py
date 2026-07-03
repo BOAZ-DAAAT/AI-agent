@@ -83,6 +83,10 @@ class SupervisorAgent:
         if not isinstance(run_id, str) or not run_id:
             return result
 
+        terminal_state = result.get("terminal_state")
+        if not terminal_state or terminal_state == "running":
+            return result
+
         try:
             self._update_run_from_terminal_output(run_id, result)
         except Exception as exc:
