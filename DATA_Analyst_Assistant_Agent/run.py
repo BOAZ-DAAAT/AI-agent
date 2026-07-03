@@ -15,7 +15,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
 
-from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor
+from DATA_Analyst_Assistant_Agent import BackendAdapter, SupervisorAgent
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
 
@@ -600,7 +600,7 @@ def _print_text_summary(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run DATA_Analyst_Assistant_Agent directly through SQLAgentSupervisor.",
+        description="Run DATA_Analyst_Assistant_Agent through the LangGraph Supervisor.",
     )
     parser.add_argument("query", nargs="?", help="User analysis question. If omitted, stdin prompt is used.")
     parser.add_argument("--thread-id", default="daaa-manual-run", help="Thread id for the backend run.")
@@ -631,7 +631,7 @@ def main() -> None:
         raise SystemExit("Query is empty.")
 
     adapter = BackendAdapter()
-    supervisor = SQLAgentSupervisor(adapter)
+    supervisor = SupervisorAgent(adapter)
     state = supervisor.run(query, thread_id=args.thread_id, datasource_id=args.datasource_id)
     outputs = None
     if not args.no_output:
