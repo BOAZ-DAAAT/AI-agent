@@ -12,6 +12,12 @@ import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_relationship_skill
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.clustering_skill import _select_k
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight import (
+    compute_categorical_distribution,
+    compute_correlation_pairs,
+    compute_group_comparison,
+    compute_numeric_distribution,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.missing import detect_missing
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import (
     assess_sample_reliability,
@@ -375,3 +381,103 @@ def test_from_relationship_skill_emits_scatter_and_heatmap():
     assert "scatter" in hints                   # 강한 쌍 산점도
     scatter = next(r for r in reqs if r["hint"] == "scatter")
     assert "a" in scatter["columns"] and "b" in scatter["columns"]
+
+
+# ─────────────────────────────
+# insight.compute_group_comparison (커밋4 효과크기 — 리팩터로 분리해 테스트 가능해짐)
+# ─────────────────────────────
+def test_compute_group_comparison_no_key_returns_empty():
+    df = pd.DataFrame({"value": [1, 2, 3]})
+    assert compute_group_comparison(df, None, ["value"]) == {}
+
+
+def test_compute_group_comparison_strong_effect_is_large():
+    # 그룹 안은 일정, 그룹끼리 크게 다름 → 그룹이 분산을 거의 다 설명 → eta 큼
+    df = pd.DataFrame({"cat": ["a"] * 10 + ["b"] * 10, "value": [1.0] * 10 + [100.0] * 10})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_interpretation"] == "large"
+    assert out["value"]["eta_squared"] > 0.9
+
+
+def test_compute_group_comparison_ss_total_zero_gives_none_eta():
+    # 전부 같은 값 → SS_total==0 → 분모 0 가드가 eta를 None으로 (조용히 처리)
+    df = pd.DataFrame({"cat": ["a", "a", "b", "b"], "value": [5.0, 5.0, 5.0, 5.0]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_squared"] is None
+    assert out["value"]["eta_interpretation"] == "undefined"
+
+
+def test_compute_group_comparison_aggregated_skips_eta():
+    # 그룹당 1행(집계본) → eta 무의미 → skipped_aggregated
+    df = pd.DataFrame({"cat": ["a", "b", "c"], "value": [1.0, 2.0, 3.0]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_squared"] is None
+    assert out["value"]["eta_interpretation"] == "skipped_aggregated"
+
+
+def test_compute_group_comparison_spread_ratio_none_when_min_not_positive():
+    # 최저 그룹 평균이 0 이하 → 배율 무의미 → None
+    df = pd.DataFrame({"cat": ["a", "a", "b", "b"], "value": [0.0, 0.0, 10.0, 10.0]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["spread_ratio"] is None
+
+
+# ─────────────────────────────
+# insight.compute_numeric_distribution (커밋1 수치 분포)
+# ─────────────────────────────
+def test_compute_numeric_distribution_right_skew_suggests_log():
+    df = pd.DataFrame({"x": [1, 1, 1, 1, 1, 2, 3, 10, 50, 200]})   # 양수·우측 치우침
+    out = compute_numeric_distribution(df, ["x"])
+    assert out["x"]["eda_notes"]["shape"] == "right_skewed"
+    assert "log_transform" in out["x"]["eda_notes"]["recommended_handling"]
+    assert out["x"]["all_positive"] is True
+
+
+def test_compute_numeric_distribution_has_zero_flags():
+    df = pd.DataFrame({"x": [0, 1, 2, 3]})
+    out = compute_numeric_distribution(df, ["x"])
+    assert out["x"]["has_zero"] is True
+    assert out["x"]["all_positive"] is False
+    assert out["x"]["non_negative"] is True
+
+
+def test_compute_numeric_distribution_empty_series():
+    df = pd.DataFrame({"x": [None, None]})
+    out = compute_numeric_distribution(df, ["x"])
+    assert out["x"] == {"type": "numeric", "unique_count": 0}
+
+
+# ─────────────────────────────
+# insight.compute_categorical_distribution (커밋2 범주 분포)
+# ─────────────────────────────
+def test_compute_categorical_distribution_detects_id_like():
+    # 전부 유니크 → id 같음 → top_values 스킵
+    df = pd.DataFrame({"id": ["a", "b", "c", "d"], "n": [1, 2, 3, 4]})
+    out = compute_categorical_distribution(df, ["n"])
+    assert out["id"]["is_id_like"] is True
+    assert "top_values" not in out["id"]
+
+
+def test_compute_categorical_distribution_dominated_balance():
+    df = pd.DataFrame({"cat": ["a"] * 9 + ["b"], "n": list(range(10))})
+    out = compute_categorical_distribution(df, ["n"])
+    assert out["cat"]["eda_notes"]["balance"] == "dominated"
+    assert out["cat"]["top1_share"] > 0.5
+
+
+# ─────────────────────────────
+# insight.compute_correlation_pairs (커밋3 관계)
+# ─────────────────────────────
+def test_compute_correlation_pairs_strong_pair_gets_binned_trend():
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 100, 100)
+    y = -0.8 * x + rng.normal(0, 5, 100)          # 강한 음의 상관
+    df = pd.DataFrame({"x": x, "y": y})
+    entry = compute_correlation_pairs(df, ["x", "y"])["corr_x_vs_y"]
+    assert entry["pearson_r"] < -0.5
+    assert "binned_trend" in entry                # 강한 쌍 → binned_trend 붙음
+
+
+def test_compute_correlation_pairs_needs_two_numeric():
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    assert compute_correlation_pairs(df, ["x"]) == {}
