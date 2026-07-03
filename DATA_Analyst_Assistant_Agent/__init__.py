@@ -32,6 +32,9 @@ _EXPORT_MAP = {
     "build_graph": ("DATA_Analyst_Assistant_Agent.supervisor.graph", "build_graph"),
 }
 
+for _deleted_export in ("CentralValidationAgent", "VisualizationAgent"):
+    globals().pop(_deleted_export, None)
+
 
 def __getattr__(name: str):
     if name not in _EXPORT_MAP:
