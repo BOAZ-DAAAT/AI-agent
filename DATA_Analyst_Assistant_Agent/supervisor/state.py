@@ -43,6 +43,7 @@ class AgentCompactResult(BaseModel):
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     validation_errors: list[str] = Field(default_factory=list)
     validation_warnings: list[str] = Field(default_factory=list)
+    fallback_used: bool = False
     retryable: bool = False
     error: str = ""
 

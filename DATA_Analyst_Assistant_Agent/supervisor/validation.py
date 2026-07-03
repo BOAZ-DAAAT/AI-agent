@@ -30,6 +30,7 @@ _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "report_agent": "call_report_agent",
 }
 
+_KNOWN_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent", "report_agent"}
 _EVIDENCE_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent"}
 
 
@@ -39,13 +40,17 @@ def _has_artifact(state: SupervisorState, *agents: AgentName) -> bool:
 
 
 def _has_completed_evidence(state: SupervisorState) -> bool:
-    completed_agents = set(state.get("completed_agents", []))
-    if completed_agents.intersection(_EVIDENCE_AGENTS):
-        return True
     return _has_artifact(state, *_EVIDENCE_AGENTS)
 
 
-def guard_agent_preconditions(agent: AgentName, state: SupervisorState) -> GuardDecision:
+def guard_agent_preconditions(agent: AgentName | str, state: SupervisorState) -> GuardDecision:
+    if agent not in _KNOWN_AGENTS:
+        return GuardDecision(
+            allowed=False,
+            next_action="fail",
+            reason=f"알 수 없는 unknown agent입니다: {agent}",
+        )
+
     if agent == "sql_agent":
         return GuardDecision(
             allowed=True,
@@ -83,7 +88,7 @@ def guard_agent_preconditions(agent: AgentName, state: SupervisorState) -> Guard
         return GuardDecision(
             allowed=True,
             next_action="call_report_agent",
-            reason="완료된 근거 에이전트 또는 근거 산출물이 있어 리포트를 생성할 수 있습니다.",
+            reason="SQL, EDA, 분석 중 하나 이상의 근거 산출물이 있어 리포트를 생성할 수 있습니다.",
         )
     return GuardDecision(
         allowed=False,
@@ -103,10 +108,16 @@ def validate_subagent_result(
             reason=f"{result.agent} 실행 결과에 승인 대기가 필요합니다: {result.summary}",
         )
 
+    fallback_used = result.fallback_used
     has_validation_errors = bool(result.validation_errors)
-    has_failure = result.status == "failed" or has_validation_errors
+    has_failure = result.status == "failed" or has_validation_errors or fallback_used
     if has_failure:
-        return _route_invalid_result(state, result, has_validation_errors=has_validation_errors)
+        return _route_invalid_result(
+            state,
+            result,
+            has_validation_errors=has_validation_errors,
+            fallback_used=fallback_used,
+        )
 
     if result.status in {"success", "warning"}:
         if result.agent == "report_agent":
@@ -133,10 +144,15 @@ def _route_invalid_result(
     result: AgentCompactResult,
     *,
     has_validation_errors: bool,
+    fallback_used: bool,
 ) -> ResultValidationDecision:
     retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
     max_retry = int(state.get("max_retry_per_agent", 0))
-    detail = _invalid_reason_detail(result, has_validation_errors=has_validation_errors)
+    detail = _invalid_reason_detail(
+        result,
+        has_validation_errors=has_validation_errors,
+        fallback_used=fallback_used,
+    )
 
     if result.retryable and retry_count < max_retry:
         return ResultValidationDecision(
@@ -156,7 +172,10 @@ def _invalid_reason_detail(
     result: AgentCompactResult,
     *,
     has_validation_errors: bool,
+    fallback_used: bool,
 ) -> str:
+    if fallback_used:
+        return f"{result.agent} 결과가 fallback으로 생성되어 성공처럼 처리할 수 없습니다: {result.summary}"
     if has_validation_errors:
         errors = "; ".join(result.validation_errors)
         return f"{result.agent} 결과에 validation_errors가 있습니다: {errors}"

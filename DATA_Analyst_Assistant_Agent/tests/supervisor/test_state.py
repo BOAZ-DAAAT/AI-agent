@@ -63,6 +63,18 @@ def test_merge_agent_result_adds_artifacts_and_completion() -> None:
     assert merged["artifacts"]["sql_agent"][0]["artifact_id"] == "artifact_sql_result"
 
 
+def test_agent_compact_result_preserves_fallback_contract_field() -> None:
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="fallback 분석 결과",
+        fallback_used=True,
+    )
+
+    assert result.fallback_used is True
+    assert result.model_dump(mode="json")["fallback_used"] is True
+
+
 def test_to_orchestration_state_preserves_existing_agent_artifacts() -> None:
     catalog_summary = {"tables": [{"name": "sales", "columns": ["month", "amount"]}]}
     state = empty_supervisor_state(
