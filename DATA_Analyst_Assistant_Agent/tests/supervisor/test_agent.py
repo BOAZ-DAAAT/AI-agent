@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,12 +50,30 @@ class FakeGraph:
 
 
 class CapturingGraph:
-    def __init__(self) -> None:
+    def __init__(self, result: dict[str, Any] | Callable[[Any, dict[str, Any]], dict[str, Any]] | None = None) -> None:
+        self.result = result or {"resumed": True}
         self.invocations: list[tuple[Any, dict[str, Any]]] = []
 
     def invoke(self, state, config):
         self.invocations.append((state, config))
-        return {"resumed": True}
+        if callable(self.result):
+            return self.result(state, config)
+        return self.result
+
+
+class CatalogFailingBackendAdapter(FakeBackendAdapter):
+    def get_catalog_summary(self, datasource_id):
+        raise RuntimeError("카탈로그 조회 실패")
+
+
+def _completed_graph_state(state: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
+    return {
+        **state,
+        "current_run_id": run_id or state["current_run_id"],
+        "completed_agents": ["sql_agent", "eda_agent", "analysis_agent", "report_agent"],
+        "terminal_state": "completed",
+        "final_answer": "최종 리포트 생성이 완료되었습니다.",
+    }
 
 
 def _agent_with_terminal(terminal_state: SupervisorTerminalState) -> tuple[FakeBackendAdapter, SupervisorAgent]:
@@ -116,6 +135,15 @@ def test_completed_terminal_updates_backend_status_succeeded() -> None:
     assert adapter.status_updates[-1][2] == {"terminal_state": "completed"}
 
 
+def test_needs_clarification_terminal_updates_backend_status_failed() -> None:
+    adapter, agent = _agent_with_terminal(SupervisorTerminalState.needs_clarification)
+
+    agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    assert adapter.status_updates[-1][1] == RunStatus.failed
+    assert adapter.status_updates[-1][2] == {"terminal_state": "needs_clarification"}
+
+
 def test_needs_user_approval_terminal_updates_backend_status_waiting_approval() -> None:
     adapter, agent = _agent_with_terminal(SupervisorTerminalState.needs_user_approval)
 
@@ -150,6 +178,52 @@ def test_graph_invoke_exception_updates_backend_status_failed_and_reraises(monke
     assert adapter.status_updates[-1][2] == {"error": "그래프 실패"}
 
 
+def test_catalog_summary_exception_updates_backend_status_failed_and_reraises() -> None:
+    adapter = CatalogFailingBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+
+    with pytest.raises(RuntimeError, match="카탈로그 조회 실패"):
+        agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id="datasource_001")
+
+    assert adapter.created_runs[-1]["thread_id"] == "thread_sales_001"
+    assert adapter.status_updates[-1][0] == "run_001"
+    assert adapter.status_updates[-1][1] == RunStatus.failed
+    assert adapter.status_updates[-1][2] == {"error": "카탈로그 조회 실패"}
+
+
+def test_invalid_graph_output_updates_backend_status_failed_and_reraises(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+
+    def invalid_output(initial_state, thread_id):
+        return {
+            **initial_state,
+            "terminal_state": "unknown_terminal",
+        }
+
+    monkeypatch.setattr(agent, "_invoke_graph", invalid_output)
+
+    with pytest.raises(ValueError, match="Invalid supervisor terminal_state"):
+        agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    assert adapter.status_updates[-1][0] == "run_001"
+    assert adapter.status_updates[-1][1] == RunStatus.failed
+    assert "Invalid supervisor terminal_state" in adapter.status_updates[-1][2]["error"]
+
+
+def test_run_uses_runtime_graph_with_thread_config(monkeypatch) -> None:
+    graph = CapturingGraph(result=lambda state, config: _completed_graph_state(state))
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:", use_llm_decision=False)
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    invoked_state, config = graph.invocations[-1]
+    assert state.terminal_state == SupervisorTerminalState.completed
+    assert invoked_state["thread_id"] == "thread_sales_001"
+    assert config == {"configurable": {"thread_id": "thread_sales_001"}}
+
+
 def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
     graph = CapturingGraph()
     agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:", use_llm_decision=False)
@@ -162,6 +236,41 @@ def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
     assert isinstance(invoked_state, Command)
     assert invoked_state.resume == {"approved": True}
     assert config == {"configurable": {"thread_id": "thread_sales_001"}}
+
+
+def test_resume_updates_backend_status_when_graph_returns_terminal_state(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    graph = CapturingGraph(
+        result=lambda state, config: _completed_graph_state(
+            {
+                "thread_id": "thread_sales_001",
+                "current_run_id": "run_resumed_001",
+                "latest_user_query": "월별 매출 추이를 분석해줘",
+                "analysis_plan": {},
+                "datasource_id": None,
+                "catalog_summary": None,
+                "retry_counts": {},
+                "generated_sql": "",
+                "artifacts": {},
+                "agent_results": [],
+                "completed_agents": [],
+                "error_state": {},
+                "max_retry_per_agent": 1,
+            },
+            run_id="run_resumed_001",
+        )
+    )
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    result = agent.resume("thread_sales_001", {"approved": True})
+
+    assert result["current_run_id"] == "run_resumed_001"
+    assert adapter.status_updates[-1] == (
+        "run_resumed_001",
+        RunStatus.succeeded,
+        {"terminal_state": "completed"},
+    )
 
 
 def test_sql_agent_supervisor_alias_points_to_new_supervisor() -> None:

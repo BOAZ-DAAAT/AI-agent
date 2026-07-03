@@ -43,8 +43,6 @@ class SupervisorAgent:
         project_id: str | None = None,
     ) -> OrchestrationState:
         thread_id = thread_id or f"thread_{uuid4().hex}"
-        datasource_id = self._resolve_datasource_id(datasource_id)
-        catalog_summary = self._resolve_catalog_summary(datasource_id)
         run = self.adapter.create_run(
             thread_id=thread_id,
             project_id=project_id,
@@ -54,35 +52,43 @@ class SupervisorAgent:
             },
         )
 
-        initial_state = empty_supervisor_state(
-            thread_id=thread_id,
-            run_id=run.run_id,
-            user_query=query,
-            datasource_id=datasource_id,
-            project_id=project_id,
-            catalog_summary=catalog_summary,
-        )
         try:
+            datasource_id = self._resolve_datasource_id(datasource_id)
+            catalog_summary = self._resolve_catalog_summary(datasource_id)
+            initial_state = empty_supervisor_state(
+                thread_id=thread_id,
+                run_id=run.run_id,
+                user_query=query,
+                datasource_id=datasource_id,
+                project_id=project_id,
+                catalog_summary=catalog_summary,
+            )
             output = self._invoke_graph(initial_state, thread_id)
+            return self._update_run_from_terminal_output(run.run_id, output)
         except Exception as exc:
             self.adapter.update_run_status(run.run_id, RunStatus.failed, metadata={"error": str(exc)})
             raise
 
-        orchestration_state = to_orchestration_state(output)
-        self.adapter.update_run_status(
-            run.run_id,
-            self._run_status_for_terminal(orchestration_state.terminal_state),
-            metadata={"terminal_state": output.get("terminal_state")},
-        )
-        return orchestration_state
-
-    def resume(self, thread_id: str, resume_payload: dict[str, Any]) -> dict[str, Any]:
+    def resume(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
-            return graph.invoke(
+            result = graph.invoke(
                 Command(resume=resume_payload),
                 {"configurable": {"thread_id": thread_id}},
             )
+        if not isinstance(result, dict):
+            return result
+
+        run_id = result.get("current_run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return result
+
+        try:
+            self._update_run_from_terminal_output(run_id, result)
+        except Exception as exc:
+            self.adapter.update_run_status(run_id, RunStatus.failed, metadata={"error": str(exc)})
+            raise
+        return result
 
     def _invoke_graph(self, initial_state: SupervisorState, thread_id: str) -> SupervisorState:
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
@@ -119,12 +125,22 @@ class SupervisorAgent:
             return None
         return getter(datasource_id)
 
+    def _update_run_from_terminal_output(self, run_id: str, output: SupervisorState) -> OrchestrationState:
+        orchestration_state = to_orchestration_state(output)
+        self.adapter.update_run_status(
+            run_id,
+            self._run_status_for_terminal(orchestration_state.terminal_state),
+            metadata={"terminal_state": output.get("terminal_state")},
+        )
+        return orchestration_state
+
     @staticmethod
     def _run_status_for_terminal(terminal_state: SupervisorTerminalState | None) -> RunStatus:
         if terminal_state == SupervisorTerminalState.completed:
             return RunStatus.succeeded
         if terminal_state == SupervisorTerminalState.needs_user_approval:
             return RunStatus.waiting_approval
+        # 백엔드에는 clarification 전용 상태가 없으므로 나머지 terminal 상태는 실패로 기록한다.
         return RunStatus.failed
 
 
