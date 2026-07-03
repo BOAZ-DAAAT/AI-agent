@@ -11,6 +11,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentName,
     NextAction,
     SupervisorState,
+    artifact_ids_by_agent,
     merge_agent_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
@@ -128,7 +129,17 @@ def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
             "current_step": "validate_subagent_result",
         }
 
-    result = AgentCompactResult.model_validate(payload)
+    try:
+        result = AgentCompactResult.model_validate(payload)
+    except Exception:
+        return {
+            "terminal_state": SupervisorTerminalState.failed_terminal.value,
+            "next_action": "finalize",
+            "final_answer": "에이전트 실행 결과 형식이 올바르지 않습니다.",
+            "last_agent_result": {},
+            "current_step": "validate_subagent_result",
+        }
+
     decision = validate_subagent_result(state, result)
     validation_results = list(state.get("validation_results", []))
     validation_results.append(
@@ -145,6 +156,15 @@ def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
         "next_action": decision.next_action,
         "current_step": "validate_subagent_result",
     }
+    if decision.valid:
+        updates["failed_agents"] = [
+            agent for agent in state.get("failed_agents", []) if agent != result.agent
+        ]
+    else:
+        updates["completed_agents"] = [
+            agent for agent in state.get("completed_agents", []) if agent != result.agent
+        ]
+
     if decision.next_action == "fail":
         updates["terminal_state"] = SupervisorTerminalState.failed_terminal.value
         updates["next_action"] = "finalize"
@@ -205,9 +225,17 @@ def finalize_node(state: SupervisorState) -> SupervisorState:
             "current_step": "finalize",
         }
 
+    if _has_report_evidence(state):
+        return {
+            "terminal_state": SupervisorTerminalState.completed.value,
+            "final_answer": final_answer or "최종 리포트 생성이 완료되었습니다.",
+            "next_action": "finalize",
+            "current_step": "finalize",
+        }
+
     return {
-        "terminal_state": SupervisorTerminalState.completed.value,
-        "final_answer": final_answer or "최종 리포트 생성이 완료되었습니다.",
+        "terminal_state": SupervisorTerminalState.failed_terminal.value,
+        "final_answer": final_answer or "최종 리포트 근거가 없어 완료할 수 없습니다.",
         "next_action": "finalize",
         "current_step": "finalize",
     }
@@ -270,13 +298,23 @@ def _merge_state_updates(state: SupervisorState, state_updates: dict[str, Any]) 
         updates["error_state"] = dict(state_updates["error_state"] or {})
     if "analysis_plan" in state_updates:
         plan = dict(updates.get("analysis_plan") or {})
-        plan.update(dict(state_updates["analysis_plan"] or {}))
+        incoming_plan = dict(state_updates["analysis_plan"] or {})
+        for sql_key in ("generated_sql", "source_sql"):
+            if sql_key in incoming_plan and not incoming_plan[sql_key]:
+                incoming_plan.pop(sql_key)
+        plan.update(incoming_plan)
         updates["analysis_plan"] = plan
     if "planner_mode" in state_updates and state_updates["planner_mode"]:
         plan = dict(updates.get("analysis_plan") or {})
         plan["planner_mode"] = str(state_updates["planner_mode"])
         updates["analysis_plan"] = plan
     return updates
+
+
+def _has_report_evidence(state: SupervisorState) -> bool:
+    if "report_agent" in state.get("completed_agents", []):
+        return True
+    return bool(artifact_ids_by_agent(state).get("report_agent"))
 
 
 def _route_after_clarify(state: SupervisorState) -> str:

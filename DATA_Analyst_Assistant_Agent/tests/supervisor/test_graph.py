@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
+from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph, validate_subagent_result_node
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
@@ -64,6 +64,16 @@ class FakeSubAgentAdapter:
         )
 
 
+class SequencedSubAgentAdapter:
+    def __init__(self, results: dict[str, list[AgentToolResult]]) -> None:
+        self.results = {agent: list(items) for agent, items in results.items()}
+        self.calls: list[str] = []
+
+    def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
+        self.calls.append(agent_name)
+        return self.results[agent_name].pop(0)
+
+
 def _state(user_query: str = "월별 매출 추이를 분석해줘") -> dict[str, Any]:
     return empty_supervisor_state(
         thread_id="thread_sales_001",
@@ -104,12 +114,34 @@ def test_supervisor_graph_runs_all_subagents_and_finalizes() -> None:
 
 
 def test_build_graph_accepts_positional_subagent_adapter() -> None:
-    graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel(["call_sql_agent", "finalize"]))
+    graph = build_graph(
+        FakeSubAgentAdapter(),
+        model=SequencedDecisionModel(["call_sql_agent", "call_report_agent", "finalize"]),
+    )
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["sql_agent"]
+    assert result["completed_agents"] == ["sql_agent", "report_agent"]
+
+
+def test_finalize_without_report_evidence_fails_after_only_sql_agent_completed() -> None:
+    graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel(["call_sql_agent", "finalize"]))
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["final_answer"] == "최종 리포트 근거가 없어 완료할 수 없습니다."
+
+
+def test_finalize_from_non_agent_action_without_report_evidence_fails() -> None:
+    graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel(["create_plan"]))
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["completed_agents"] == []
+    assert result["final_answer"] == "최종 리포트 근거가 없어 완료할 수 없습니다."
 
 
 def test_guard_blocked_action_executes_guard_next_action_without_model_redecision() -> None:
@@ -237,6 +269,91 @@ def test_fallback_used_non_retryable_result_fails_terminally() -> None:
 
     assert result["terminal_state"] == "failed_terminal"
     assert result["final_answer"] == "에이전트 실행 결과 검증에 실패했습니다."
+    assert "analysis_agent" not in result["completed_agents"]
+
+
+def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_success() -> None:
+    adapter = SequencedSubAgentAdapter(
+        {
+            "sql_agent": [
+                AgentToolResult(
+                    agent_result=AgentCompactResult(
+                        agent="sql_agent",
+                        status="failed",
+                        summary="SQL 일시 실패",
+                        retryable=True,
+                        error="SQL validation failed",
+                    )
+                ),
+                AgentToolResult(
+                    agent_result=AgentCompactResult(
+                        agent="sql_agent",
+                        status="success",
+                        summary="SQL 재시도 성공",
+                        artifact_ids=["artifact_sql_retry"],
+                    ),
+                    state_updates={"generated_sql": "SELECT 1 AS sample_value"},
+                ),
+            ]
+        }
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        model=SequencedDecisionModel(["call_sql_agent", "finalize"]),
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert adapter.calls == ["sql_agent", "sql_agent"]
+    assert result["retry_counts"]["sql_agent"] == 1
+    assert result["completed_agents"] == ["sql_agent"]
+    assert result["failed_agents"] == []
+
+
+def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -> None:
+    adapter = FakeSubAgentAdapter(
+        {
+            "sql_agent": AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent="sql_agent",
+                    status="success",
+                    summary="SQL 완료",
+                    artifact_ids=["artifact_sql"],
+                ),
+                state_updates={
+                    "analysis_plan": {
+                        "generated_sql": "",
+                        "source_sql": None,
+                        "route_kind": "updated",
+                    }
+                },
+            )
+        }
+    )
+    graph = build_graph(subagent_adapter=adapter, model=SequencedDecisionModel(["call_sql_agent", "finalize"]))
+    state = _state()
+    state["analysis_plan"] = {
+        "generated_sql": "SELECT * FROM sales",
+        "source_sql": "SELECT * FROM sales",
+        "route_kind": "initial",
+    }
+
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["analysis_plan"]["generated_sql"] == "SELECT * FROM sales"
+    assert result["analysis_plan"]["source_sql"] == "SELECT * FROM sales"
+    assert result["analysis_plan"]["route_kind"] == "updated"
+
+
+def test_validate_subagent_result_node_handles_corrupt_last_agent_result_as_terminal_failure() -> None:
+    state = _state()
+    state["last_agent_result"] = {"agent": "sql_agent"}
+
+    result = validate_subagent_result_node(state)
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["next_action"] == "finalize"
+    assert result["final_answer"] == "에이전트 실행 결과 형식이 올바르지 않습니다."
 
 
 def test_short_query_finalizes_with_clarification_question() -> None:
