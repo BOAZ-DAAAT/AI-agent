@@ -91,6 +91,251 @@ def _llm_infer_cautions(numeric_summary: Dict[str, Any], user_question: str, exi
     return out
 
 
+def _jround(x, nd: int = 4):
+    """NaN/inf는 None으로(JSON 안전), 나머진 반올림. (insight 계산 함수 공용)"""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(x, nd) if math.isfinite(x) else None
+
+
+def compute_group_comparison(df, key_col, numeric_cols) -> Dict[str, Any]:
+    """key_col 그룹별 수치 비교 + 효과크기. 순수 계산(LLM 없음).
+
+    각 수치 컬럼: top3/bottom3·group_std·n_groups·min/max_group_n +
+      eta_squared(그룹당 복수 관측=raw일 때만, SS_between/SS_total; 집계본이면 skipped_aggregated)
+      spread_ratio(group_min>0일 때)·cv_across_groups(group_mean≠0일 때).
+    """
+    group_comparison: Dict[str, Any] = {}
+    if not (key_col and key_col in df.columns):
+        return group_comparison
+    for col in numeric_cols:
+        try:
+            g = df.groupby(key_col)[col]
+            grp = g.mean().dropna()                        # 그룹별 평균
+            if grp.empty:
+                continue
+            counts = g.count().reindex(grp.index)          # 그룹별 표본 수(col 기준 non-NaN)
+            group_mean = float(grp.mean())
+            group_max = float(grp.max())
+            group_min = float(grp.min())
+            group_std = float(grp.std())                   # 그룹 평균들의 표준편차(그룹 1개면 NaN)
+            max_n = int(counts.max())
+
+            entry = {
+                "top3_groups":    {str(k): round(float(v), 4) for k, v in grp.nlargest(3).items()},
+                "bottom3_groups": {str(k): round(float(v), 4) for k, v in grp.nsmallest(3).items()},
+                "group_max":      round(group_max, 4),
+                "group_min":      round(group_min, 4),
+                "group_std":      _jround(group_std, 4),
+                "n_groups":       int(len(grp)),
+                "min_group_n":    int(counts.min()),
+                "max_group_n":    max_n,
+            }
+
+            # 효과크기 eta² — 그룹당 복수 관측(raw)일 때만 의미. 집계본(그룹당 1행)이면 스킵.
+            if max_n >= 2:
+                grand = float(df[col].mean())
+                ss_total = float(((df[col] - grand) ** 2).sum())
+                ss_between = float((counts * (grp - grand) ** 2).sum())
+                eta = ss_between / ss_total if ss_total > 0 else None
+                entry["eta_squared"] = _jround(eta, 4)
+                if eta is None:
+                    entry["eta_interpretation"] = "undefined"
+                elif eta < 0.06:
+                    entry["eta_interpretation"] = "small"
+                elif eta < 0.14:
+                    entry["eta_interpretation"] = "medium"
+                else:
+                    entry["eta_interpretation"] = "large"
+            else:
+                entry["eta_squared"] = None
+                entry["eta_interpretation"] = "skipped_aggregated"
+
+            entry["spread_ratio"] = _jround(group_max / group_min, 4) if group_min > 0 else None
+            entry["cv_across_groups"] = _jround(group_std / group_mean, 4) if abs(group_mean) > 1e-9 else None
+            group_comparison[col] = entry
+        except Exception:  # noqa: BLE001
+            pass
+    return group_comparison
+
+
+def compute_numeric_distribution(df, numeric_cols) -> Dict[str, Any]:
+    """수치형 컬럼 분포 통계. 순수 계산(LLM 없음).
+    percentile·skewness·kurtosis·outlier_rate·all_positive·normality + eda_notes(shape·handling).
+    """
+    dist_stats: Dict[str, Any] = {}
+    for col in numeric_cols:
+        s = df[col].dropna()
+        if s.empty:
+            dist_stats[col] = {"type": "numeric", "unique_count": 0}
+            continue
+
+        q = s.quantile([0.01, 0.05, 0.25, 0.75, 0.95, 0.99])
+        iqr = float(q[0.75] - q[0.25])
+        lo_fence, hi_fence = q[0.25] - 1.5 * iqr, q[0.75] + 1.5 * iqr
+        outlier_rate = float(((s < lo_fence) | (s > hi_fence)).mean()) if iqr > 0 else 0.0
+        skew = float(s.skew()) if s.nunique() > 2 else 0.0
+        kurt = float(s.kurt()) if s.nunique() > 3 else 0.0
+        all_positive = bool(s.min() > 0)
+        non_negative = bool(s.min() >= 0)
+        has_zero = bool((s == 0).any())
+
+        shape = ("left_skewed" if skew < -0.5 else
+                 "right_skewed" if skew > 0.5 else "symmetric")
+        suspected = ("low_tail" if skew < -1 else
+                     "high_tail" if skew > 1 else
+                     "both_tails" if outlier_rate > 0.05 else "none")
+        handling: list = []
+        if shape == "right_skewed":
+            if all_positive:
+                handling.append("log_transform")
+            elif non_negative:
+                handling.append("log1p_transform")
+        if outlier_rate > 0.03:
+            handling.append("avoid_naive_outlier_removal")
+        if shape != "symmetric":
+            handling.append("prefer_nonparametric_or_transform")
+
+        normality = ("approx_normal" if abs(skew) < 0.5 and abs(kurt) < 1 else
+                     "heavy_tailed" if abs(kurt) >= 3 else "skewed")
+
+        dist_stats[col] = {
+            "type":             "numeric",
+            "mean":             _jround(s.mean()),
+            "median":           _jround(s.median()),
+            "std":              _jround(s.std()),
+            "skewness":         _jround(skew),
+            "kurtosis":         _jround(kurt),
+            "min":              _jround(s.min()),
+            "p01":              _jround(q[0.01]),
+            "p05":              _jround(q[0.05]),
+            "q1":               _jround(q[0.25]),
+            "q3":               _jround(q[0.75]),
+            "p95":              _jround(q[0.95]),
+            "p99":              _jround(q[0.99]),
+            "max":              _jround(s.max()),
+            "missing_rate":     _jround(df[col].isna().mean()),
+            "zero_rate":        _jround((s == 0).mean()),
+            "unique_count":     int(s.nunique()),
+            "outlier_rate_iqr": _jround(outlier_rate),
+            "all_positive":     all_positive,
+            "non_negative":     non_negative,
+            "has_zero":         has_zero,
+            "normality":        normality,
+            "eda_notes": {
+                "shape":                shape,
+                "suspected_outliers":   suspected,
+                "recommended_handling": handling,
+            },
+        }
+    return dist_stats
+
+
+def compute_categorical_distribution(df, numeric_cols) -> Dict[str, Any]:
+    """범주형 컬럼 프로파일. 순수 계산(LLM 없음).
+    cardinality·top1_share·rare범주·is_id_like·balance + eda_notes(handling). id는 top_values 스킵.
+    """
+    out: Dict[str, Any] = {}
+    cat_cols = [c for c in df.columns
+                if c not in numeric_cols
+                and not pd.api.types.is_numeric_dtype(df[c])
+                and not pd.api.types.is_datetime64_any_dtype(df[c])]
+    for col in cat_cols:
+        s = df[col].dropna()
+        if s.empty:
+            out[col] = {"type": "categorical", "unique_count": 0}
+            continue
+        vc = s.value_counts()
+        n = len(s)
+        nun = int(s.nunique())
+        top1_share = float(vc.iloc[0] / n)
+        is_id_like = nun > 0.9 * n
+        rare_count = int((vc < 30).sum())
+        rare_share = float(vc[vc < 30].sum() / n)
+        cardinality = "high" if nun > 50 else "medium" if nun > 10 else "low"
+        balance = ("dominated" if top1_share > 0.5 else
+                   "long_tailed" if nun and rare_count / nun > 0.3 else
+                   "balanced")
+        handling = []
+        if is_id_like:
+            handling.append("treat_as_id_or_drop")
+        elif cardinality == "high" or balance == "long_tailed":
+            handling.append("group_rare_categories")
+        if balance == "dominated":
+            handling.append("check_dominant_category")
+
+        entry = {
+            "type":                    "categorical",
+            "unique_count":            nun,
+            "missing_rate":            _jround(df[col].isna().mean()),
+            "is_id_like":              is_id_like,
+            "top1_share":              _jround(top1_share),
+            "top10_coverage":          _jround(float(vc.head(10).sum() / n)),
+            "rare_category_count":     rare_count,
+            "rare_category_threshold": "n < 30",
+            "rare_category_share":     _jround(rare_share),
+            "mode":                    str(vc.index[0]),
+            "eda_notes": {
+                "cardinality":          cardinality,
+                "balance":              balance,
+                "recommended_handling": handling,
+            },
+        }
+        if not is_id_like:
+            entry["top_values"] = {str(k): int(v) for k, v in vc.head(10).items()}
+        out[col] = entry
+    return out
+
+
+def compute_correlation_pairs(df, numeric_cols) -> Dict[str, Any]:
+    """수치형 컬럼 쌍의 관계 객체. 순수 계산(LLM 없음).
+    pearson·spearman·nonlinearity + 강한 쌍(|r|>=0.2 & n>=30)엔 r_squared·binned_trend(산점도 압축).
+    """
+    corr_pairs: Dict[str, Any] = {}
+    if len(numeric_cols) < 2:
+        return corr_pairs
+    pear = df[numeric_cols].corr()
+    spear = df[numeric_cols].corr(method="spearman")
+    for i in range(len(numeric_cols)):
+        for j in range(i + 1, len(numeric_cols)):
+            a, b = numeric_cols[i], numeric_cols[j]
+            p = float(pear.iloc[i, j])
+            sp = float(spear.iloc[i, j])
+            gap = abs(sp) - abs(p)
+            nonlin = ("weak" if abs(p) < 0.1 and abs(sp) < 0.1 else
+                      "monotonic_nonlinear" if gap > 0.15 else "linear")
+            pair_df = df[[a, b]].dropna()
+            npts = len(pair_df)
+            entry = {
+                "pearson_r":    _jround(p, 3),
+                "spearman_r":   _jround(sp, 3),
+                "nonlinearity": nonlin,
+                "n":            npts,
+            }
+            if npts >= 30 and (abs(p) >= 0.2 or abs(sp) >= 0.2):
+                entry["r_squared_linear"] = _jround(p * p, 3)
+                try:
+                    x = pair_df[a].astype(float)
+                    y = pair_df[b].astype(float)
+                    bins = pd.qcut(x, q=min(10, max(2, x.nunique())), duplicates="drop")
+                    bt = []
+                    for interval, grp in y.groupby(bins, observed=True):
+                        bt.append({
+                            "x_range":  [_jround(interval.left, 2), _jround(interval.right, 2)],
+                            "y_median": _jround(grp.median(), 3),
+                            "y_iqr":    [_jround(grp.quantile(0.25), 3), _jround(grp.quantile(0.75), 3)],
+                            "n":        int(len(grp)),
+                        })
+                    entry["binned_trend"] = bt
+                    entry["binning"] = {"method": "quantile", "n_bins": len(bt)}
+                except Exception:  # noqa: BLE001
+                    pass
+            corr_pairs[f"corr_{a}_vs_{b}"] = entry
+    return corr_pairs
+
+
 def insight_node(state: EDAState) -> dict:
     ctx = get_context()
     df = ctx.df
@@ -114,173 +359,11 @@ def insight_node(state: EDAState) -> dict:
         if not numeric_cols:
             numeric_cols = list(df.select_dtypes(include=["float64", "int64"]).columns)
 
-        def _r(x, nd: int = 4):
-            """NaN/inf는 None으로(JSON 안전), 나머진 반올림."""
-            try:
-                x = float(x)
-            except (TypeError, ValueError):
-                return None
-            return round(x, nd) if math.isfinite(x) else None
+        dist_stats = compute_numeric_distribution(df, numeric_cols)
 
-        dist_stats = {}
-        for col in numeric_cols:
-            s = df[col].dropna()
-            if s.empty:
-                dist_stats[col] = {"type": "numeric", "unique_count": 0}
-                continue
+        dist_stats.update(compute_categorical_distribution(df, numeric_cols))
 
-            q = s.quantile([0.01, 0.05, 0.25, 0.75, 0.95, 0.99])
-            iqr = float(q[0.75] - q[0.25])
-            lo_fence, hi_fence = q[0.25] - 1.5 * iqr, q[0.75] + 1.5 * iqr
-            outlier_rate = float(((s < lo_fence) | (s > hi_fence)).mean()) if iqr > 0 else 0.0
-            skew = float(s.skew()) if s.nunique() > 2 else 0.0
-            kurt = float(s.kurt()) if s.nunique() > 3 else 0.0
-            all_positive = bool(s.min() > 0)       # 엄밀히 양수(log 직접 가능)
-            non_negative = bool(s.min() >= 0)
-            has_zero = bool((s == 0).any())
-
-            # eda_notes — 수치에서 규칙으로 도출(LLM 없음)
-            shape = ("left_skewed" if skew < -0.5 else
-                     "right_skewed" if skew > 0.5 else "symmetric")
-            suspected = ("low_tail" if skew < -1 else
-                         "high_tail" if skew > 1 else
-                         "both_tails" if outlier_rate > 0.05 else "none")
-            handling: list = []
-            if shape == "right_skewed":
-                if all_positive:
-                    handling.append("log_transform")
-                elif non_negative:             # 0 포함 → log(x+1)
-                    handling.append("log1p_transform")
-            if outlier_rate > 0.03:
-                handling.append("avoid_naive_outlier_removal")
-            if shape != "symmetric":
-                handling.append("prefer_nonparametric_or_transform")
-
-            normality = ("approx_normal" if abs(skew) < 0.5 and abs(kurt) < 1 else
-                         "heavy_tailed" if abs(kurt) >= 3 else "skewed")
-
-            dist_stats[col] = {
-                "type":             "numeric",
-                # semantic_type 은 후속 스텝(휴리스틱)에서 추가 예정
-                "mean":             _r(s.mean()),
-                "median":           _r(s.median()),
-                "std":              _r(s.std()),
-                "skewness":         _r(skew),
-                "kurtosis":         _r(kurt),
-                "min":              _r(s.min()),
-                "p01":              _r(q[0.01]),
-                "p05":              _r(q[0.05]),
-                "q1":               _r(q[0.25]),
-                "q3":               _r(q[0.75]),
-                "p95":              _r(q[0.95]),
-                "p99":              _r(q[0.99]),
-                "max":              _r(s.max()),
-                "missing_rate":     _r(df[col].isna().mean()),
-                "zero_rate":        _r((s == 0).mean()),
-                "unique_count":     int(s.nunique()),
-                "outlier_rate_iqr": _r(outlier_rate),
-                "all_positive":     all_positive,
-                "non_negative":     non_negative,
-                "has_zero":         has_zero,
-                "normality":        normality,
-                "eda_notes": {
-                    "shape":                shape,
-                    "suspected_outliers":   suspected,
-                    "recommended_handling": handling,
-                },
-            }
-
-        # ── 범주형 컬럼 프로파일 (같은 dist_stats에, type으로 구분) ──
-        cat_cols = [c for c in df.columns
-                    if c not in numeric_cols
-                    and not pd.api.types.is_numeric_dtype(df[c])
-                    and not pd.api.types.is_datetime64_any_dtype(df[c])]
-        for col in cat_cols:
-            s = df[col].dropna()
-            if s.empty:
-                dist_stats[col] = {"type": "categorical", "unique_count": 0}
-                continue
-            vc = s.value_counts()
-            n = len(s)
-            nun = int(s.nunique())
-            top1_share = float(vc.iloc[0] / n)
-            is_id_like = nun > 0.9 * n                        # 거의 다 유니크 = id 같은 것
-            rare_count = int((vc < 30).sum())                 # 표본 적은 범주 (n<30)
-            rare_share = float(vc[vc < 30].sum() / n)         # 희소범주가 차지하는 데이터 비율
-            cardinality = "high" if nun > 50 else "medium" if nun > 10 else "low"
-            # balance: 한 범주 지배 / 긴 꼬리(희소 다수) / 균형
-            balance = ("dominated" if top1_share > 0.5 else
-                       "long_tailed" if nun and rare_count / nun > 0.3 else
-                       "balanced")
-            handling = []
-            if is_id_like:
-                handling.append("treat_as_id_or_drop")
-            elif cardinality == "high" or balance == "long_tailed":
-                handling.append("group_rare_categories")
-            if balance == "dominated":
-                handling.append("check_dominant_category")
-
-            entry = {
-                "type":                    "categorical",
-                "unique_count":            nun,
-                "missing_rate":            _r(df[col].isna().mean()),
-                "is_id_like":              is_id_like,
-                "top1_share":              _r(top1_share),
-                "top10_coverage":          _r(float(vc.head(10).sum() / n)),
-                "rare_category_count":     rare_count,
-                "rare_category_threshold": "n < 30",
-                "rare_category_share":     _r(rare_share),
-                "mode":                    str(vc.index[0]),
-                "eda_notes": {
-                    "cardinality":          cardinality,
-                    "balance":              balance,
-                    "recommended_handling": handling,
-                },
-            }
-            if not is_id_like:                                # id는 top값 무의미 → 스킵
-                entry["top_values"] = {str(k): int(v) for k, v in vc.head(10).items()}
-            dist_stats[col] = entry
-
-        corr_pairs = {}
-        if len(numeric_cols) >= 2:
-            pear = df[numeric_cols].corr()
-            spear = df[numeric_cols].corr(method="spearman")
-            for i in range(len(numeric_cols)):
-                for j in range(i + 1, len(numeric_cols)):
-                    a, b = numeric_cols[i], numeric_cols[j]
-                    p = float(pear.iloc[i, j])
-                    sp = float(spear.iloc[i, j])
-                    gap = abs(sp) - abs(p)                    # 비선형 신호(단조인데 비선형)
-                    nonlin = ("weak" if abs(p) < 0.1 and abs(sp) < 0.1 else
-                              "monotonic_nonlinear" if gap > 0.15 else "linear")
-                    pair_df = df[[a, b]].dropna()
-                    npts = len(pair_df)
-                    entry = {
-                        "pearson_r":    _r(p, 3),
-                        "spearman_r":   _r(sp, 3),
-                        "nonlinearity": nonlin,
-                        "n":            npts,
-                    }
-                    # 관계 있는 쌍만 산점도 모양(binned_trend) 등 추가 (약한 쌍엔 bloat 방지)
-                    if npts >= 30 and (abs(p) >= 0.2 or abs(sp) >= 0.2):
-                        entry["r_squared_linear"] = _r(p * p, 3)   # 선형 fit 설명력임을 명시
-                        try:
-                            x = pair_df[a].astype(float)
-                            y = pair_df[b].astype(float)
-                            bins = pd.qcut(x, q=min(10, max(2, x.nunique())), duplicates="drop")
-                            bt = []
-                            for interval, grp in y.groupby(bins, observed=True):
-                                bt.append({
-                                    "x_range":  [_r(interval.left, 2), _r(interval.right, 2)],
-                                    "y_median": _r(grp.median(), 3),
-                                    "y_iqr":    [_r(grp.quantile(0.25), 3), _r(grp.quantile(0.75), 3)],
-                                    "n":        int(len(grp)),
-                                })
-                            entry["binned_trend"] = bt          # x구간별 y중앙값+IQR = 산점도 압축
-                            entry["binning"] = {"method": "quantile", "n_bins": len(bt)}  # 구간 생성 기준
-                        except Exception:  # noqa: BLE001
-                            pass
-                    corr_pairs[f"corr_{a}_vs_{b}"] = entry      # 키 형식 유지(소비처 호환)
+        corr_pairs = compute_correlation_pairs(df, numeric_cols)
 
         missing_info = detect_missing(df)
         outlier_info = detect_outliers_iqr(df, measure_cols=measure_cols)
@@ -291,60 +374,7 @@ def insight_node(state: EDAState) -> dict:
             if isinstance(v, dict)
         }
 
-        group_comparison = {}
-        if key_col and key_col in df.columns:
-            for col in numeric_cols:
-                try:
-                    g   = df.groupby(key_col)[col]
-                    grp = g.mean().dropna()                        # 그룹별 평균
-                    if grp.empty:
-                        continue
-                    counts = g.count().reindex(grp.index)          # 그룹별 표본 수(col 기준 non-NaN)
-                    group_mean = float(grp.mean())
-                    group_max  = float(grp.max())
-                    group_min  = float(grp.min())
-                    group_std  = float(grp.std())                  # 그룹 평균들의 표준편차(그룹 1개면 NaN)
-                    max_n      = int(counts.max())
-
-                    entry = {
-                        "top3_groups":    {str(k): round(float(v), 4) for k, v in grp.nlargest(3).items()},
-                        "bottom3_groups": {str(k): round(float(v), 4) for k, v in grp.nsmallest(3).items()},
-                        "group_max":      round(group_max, 4),
-                        "group_min":      round(group_min, 4),
-                        "group_std":      _r(group_std, 4),
-                        "n_groups":       int(len(grp)),           # 이하 신규 — 효과크기 해석 맥락
-                        "min_group_n":    int(counts.min()),
-                        "max_group_n":    max_n,
-                    }
-
-                    # 효과크기 eta² = 그룹이 이 변수 분산을 몇 % 설명하나(SS_between/SS_total).
-                    # 그룹당 복수 관측(raw)일 때만 의미 있음 — 집계본(그룹당 1행)이면 스킵.
-                    if max_n >= 2:
-                        grand      = float(df[col].mean())
-                        ss_total   = float(((df[col] - grand) ** 2).sum())
-                        ss_between = float((counts * (grp - grand) ** 2).sum())
-                        eta = ss_between / ss_total if ss_total > 0 else None
-                        entry["eta_squared"] = _r(eta, 4)
-                        if eta is None:
-                            entry["eta_interpretation"] = "undefined"
-                        elif eta < 0.06:
-                            entry["eta_interpretation"] = "small"
-                        elif eta < 0.14:
-                            entry["eta_interpretation"] = "medium"
-                        else:
-                            entry["eta_interpretation"] = "large"
-                    else:
-                        entry["eta_squared"] = None
-                        entry["eta_interpretation"] = "skipped_aggregated"
-
-                    # 그룹 간 격차 배율 — 최저 그룹 평균이 양수일 때만(0/음수면 무의미)
-                    entry["spread_ratio"] = _r(group_max / group_min, 4) if group_min > 0 else None
-                    # 그룹 평균들의 변동계수 — 전체 평균이 0 근처면 폭발하므로 스킵
-                    entry["cv_across_groups"] = _r(group_std / group_mean, 4) if abs(group_mean) > 1e-9 else None
-
-                    group_comparison[col] = entry
-                except Exception:
-                    pass
+        group_comparison = compute_group_comparison(df, key_col, numeric_cols)
 
         # 데이터 한계 자가점검 (코드, LLM 없음): 원본/집계 판정 + 표본 신뢰도 + 주의사항
         data_level = detect_data_level(df, key_col=key_col, numeric_cols=numeric_cols)
