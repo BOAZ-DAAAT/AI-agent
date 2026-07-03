@@ -30,6 +30,7 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["user_turns"] == [{"run_id": "run_001", "query": "월별 매출 추이를 분석해줘"}]
     assert state["agent_results"] == []
     assert state["artifacts"] == {}
+    assert state["last_agent_result"] == {}
     assert state["terminal_state"] == "running"
 
 
