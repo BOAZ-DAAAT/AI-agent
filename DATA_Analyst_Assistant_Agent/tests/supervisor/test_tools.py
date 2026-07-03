@@ -19,6 +19,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state
 from DATA_Analyst_Assistant_Agent.supervisor import tools
 from DATA_Analyst_Assistant_Agent.supervisor.tools import SubAgentAdapter
+from DATA_Analyst_Assistant_Agent.supervisor.validation import validate_subagent_result
 
 
 @dataclass
@@ -171,6 +172,31 @@ def test_subagent_adapter_preserves_failed_retry_hint_and_error() -> None:
     assert result.agent_result.retryable is True
     assert "SQL 실행 실패" in result.agent_result.error
     assert "SQL_TIMEOUT" in result.agent_result.error
+
+
+class FallbackAgent:
+    name = "analysis_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="analysis_agent",
+            summary="fallback 분석 결과",
+            fallback_used=True,
+            retry_hint=RetryHint(retryable=True),
+        )
+
+
+def test_subagent_adapter_propagates_fallback_contract_to_validation() -> None:
+    state = _state()
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"analysis_agent": FallbackAgent()})
+
+    result = adapter.call("analysis_agent", state)
+    decision = validate_subagent_result(state, result.agent_result)
+
+    assert result.agent_result.fallback_used is True
+    assert decision.valid is False
+    assert decision.next_action == "call_analysis_agent"
 
 
 class PlanMutationAgent:

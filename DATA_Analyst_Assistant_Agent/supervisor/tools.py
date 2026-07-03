@@ -92,6 +92,7 @@ class SubAgentAdapter:
             artifacts=[self._artifact_summary(artifact_id) for artifact_id in artifact_ids],
             validation_errors=validation_errors,
             validation_warnings=validation_warnings,
+            fallback_used=envelope.fallback_used,
             retryable=envelope.retry_hint.retryable,
             error=self._error_message(envelope),
         )
