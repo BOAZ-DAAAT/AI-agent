@@ -60,7 +60,7 @@ def clarify_query_node(state: SupervisorState) -> SupervisorState:
 def create_analysis_plan_node(state: SupervisorState) -> SupervisorState:
     plan = dict(state.get("analysis_plan") or {})
     plan.setdefault("goal", state.get("clarified_query") or state.get("latest_user_query") or "")
-    plan.setdefault("route_kind", "comprehensive")
+    plan.setdefault("route_kind", "simple")
     plan.setdefault("planner_mode", "deterministic")
     if state.get("datasource_id") is not None:
         plan.setdefault("datasource_id", state.get("datasource_id"))
@@ -312,8 +312,6 @@ def _merge_state_updates(state: SupervisorState, state_updates: dict[str, Any]) 
 
 
 def _has_report_evidence(state: SupervisorState) -> bool:
-    if "report_agent" in state.get("completed_agents", []):
-        return True
     return bool(artifact_ids_by_agent(state).get("report_agent"))
 
 

@@ -234,13 +234,19 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
     plan_payload = state.get("analysis_plan") or {}
     planner_mode = "llm" if plan_payload.get("planner_mode") == "llm" else "deterministic"
     generated_sql = state.get("generated_sql") or "SELECT 1 AS sample_value"
+    pending_approval = state.get("pending_approval")
+    approval_ids: list[str] = []
+    if isinstance(pending_approval, dict):
+        approval_id = str(pending_approval.get("approval_id") or "")
+        if approval_id:
+            approval_ids.append(approval_id)
     plan = AnalysisPlan(
         goal=str(plan_payload.get("goal") or state.get("latest_user_query") or ""),
         datasource_id=state.get("datasource_id"),
         catalog_summary=state.get("catalog_summary"),
         retry_context=state.get("retry_counts"),
         planner_mode=planner_mode,
-        route_kind=str(plan_payload.get("route_kind") or "comprehensive"),
+        route_kind=str(plan_payload.get("route_kind") or "simple"),
         generated_sql=generated_sql,
         source_sql=generated_sql,
     )
@@ -256,6 +262,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         retry_context=state.get("retry_counts"),
         current_step=state.get("current_step", "created"),
         artifact_ids=artifact_ids_by_agent(state),
+        approval_ids=approval_ids,
         error_state=dict(state.get("error_state", {})),
         terminal_state=terminal_state,
         remaining_agents=[],

@@ -121,6 +121,12 @@ def validate_subagent_result(
 
     if result.status in {"success", "warning"}:
         if result.agent == "report_agent":
+            if not _result_has_artifact(result):
+                return ResultValidationDecision(
+                    valid=False,
+                    next_action="fail",
+                    reason="리포트 에이전트 결과에 리포트 산출물 ID가 없어 완료할 수 없습니다.",
+                )
             return ResultValidationDecision(
                 valid=True,
                 next_action="finalize",
@@ -137,6 +143,12 @@ def validate_subagent_result(
         next_action="fail",
         reason=f"{result.agent} 결과 상태를 처리할 수 없습니다: {result.status}",
     )
+
+
+def _result_has_artifact(result: AgentCompactResult) -> bool:
+    if result.artifact_ids:
+        return True
+    return any(bool(artifact.artifact_id) for artifact in result.artifacts)
 
 
 def _route_invalid_result(

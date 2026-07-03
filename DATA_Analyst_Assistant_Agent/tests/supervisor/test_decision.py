@@ -235,6 +235,49 @@ def test_decide_next_action_fallback_finalizes_after_report_agent_completed() ->
     assert "fallback" in decision.reason
 
 
+def test_decide_next_action_fallback_does_not_finalize_completed_report_without_artifact() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    state = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="report_agent",
+            status="success",
+            summary="리포트 완료",
+        ),
+    )
+
+    decision = decide_next_action(state, model=None)
+
+    assert decision.next_action != "finalize"
+
+
+def test_decide_next_action_fallback_finalizes_with_report_artifact_evidence() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    state = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="report_agent",
+            status="warning",
+            summary="리포트 경고 포함 완료",
+            artifact_ids=["artifact_report"],
+        ),
+    )
+
+    decision = decide_next_action(state, model=None)
+
+    assert decision.next_action == "finalize"
+
+
 def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",

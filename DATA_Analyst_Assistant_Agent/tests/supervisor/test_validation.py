@@ -217,3 +217,17 @@ def test_validate_report_success_finalizes() -> None:
 
     assert decision.valid is True
     assert decision.next_action == "finalize"
+
+
+def test_validate_report_success_without_artifact_is_invalid() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="report_agent",
+        status="success",
+        summary="리포트 생성 완료",
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.valid is False
+    assert decision.next_action == "fail"

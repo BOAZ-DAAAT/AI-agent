@@ -58,14 +58,14 @@ def _compact_snapshot(state: SupervisorState) -> dict[str, Any]:
 
 
 def _fallback_decision(state: SupervisorState) -> SupervisorDecision:
-    completed_agents = set(state.get("completed_agents", []))
     artifact_ids = artifact_ids_by_agent(state)
     has_evidence = any(artifact_ids.get(agent) for agent in _EVIDENCE_AGENTS)
+    has_report_evidence = bool(artifact_ids.get("report_agent"))
 
-    if "report_agent" in completed_agents:
+    if has_report_evidence:
         return SupervisorDecision(
             next_action="finalize",
-            reason="fallback: report_agent 완료를 근거로 최종화를 진행합니다.",
+            reason="fallback: report_agent 산출물 근거로 최종화를 진행합니다.",
         )
     if not has_evidence:
         return SupervisorDecision(

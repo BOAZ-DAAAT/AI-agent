@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph, validate_subagent_result_node
+from DATA_Analyst_Assistant_Agent.supervisor.graph import (
+    build_graph,
+    create_analysis_plan_node,
+    validate_subagent_result_node,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
@@ -142,6 +146,42 @@ def test_finalize_from_non_agent_action_without_report_evidence_fails() -> None:
     assert result["terminal_state"] == "failed_terminal"
     assert result["completed_agents"] == []
     assert result["final_answer"] == "최종 리포트 근거가 없어 완료할 수 없습니다."
+
+
+def test_report_success_without_artifact_fails_terminally() -> None:
+    adapter = FakeSubAgentAdapter(
+        {
+            "report_agent": AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent="report_agent",
+                    status="success",
+                    summary="리포트 생성 완료",
+                )
+            )
+        }
+    )
+    graph = build_graph(adapter, model=SequencedDecisionModel(["call_report_agent"]))
+    state = _state()
+    state["agent_results"] = [
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["artifact_sql"],
+        ).model_dump(mode="json")
+    ]
+
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["final_answer"] == "에이전트 실행 결과 검증에 실패했습니다."
+    assert "report_agent" not in result["completed_agents"]
+
+
+def test_create_analysis_plan_node_defaults_route_kind_to_simple() -> None:
+    result = create_analysis_plan_node(_state())
+
+    assert result["analysis_plan"]["route_kind"] == "simple"
 
 
 def test_guard_blocked_action_executes_guard_next_action_without_model_redecision() -> None:

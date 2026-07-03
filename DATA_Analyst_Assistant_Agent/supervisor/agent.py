@@ -70,12 +70,57 @@ class SupervisorAgent:
             raise
 
     def resume(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
+        config = {"configurable": {"thread_id": thread_id}}
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
-            result = graph.invoke(
-                Command(resume=resume_payload),
-                {"configurable": {"thread_id": thread_id}},
-            )
+            result = self._resume_synthetic_approval(graph, config, resume_payload)
+            if result is None:
+                result = graph.invoke(Command(resume=resume_payload), config)
+        return self._update_run_status_from_resume_result(result)
+
+    def _resume_synthetic_approval(
+        self,
+        graph: Any,
+        config: dict[str, Any],
+        resume_payload: dict[str, Any],
+    ) -> Any | None:
+        if resume_payload.get("approved") is not True:
+            return None
+        if not hasattr(graph, "get_state") or not hasattr(graph, "update_state"):
+            return None
+
+        latest_state = graph.get_state(config)
+        values = getattr(latest_state, "values", None)
+        if not isinstance(values, dict):
+            return None
+
+        pending_approval = values.get("pending_approval")
+        if not isinstance(pending_approval, dict):
+            return None
+
+        next_action = self._next_action_for_pending_agent(pending_approval.get("agent"))
+        if next_action is None:
+            return None
+
+        updates = {
+            "pending_approval": None,
+            "terminal_state": "running",
+            "next_action": next_action,
+            "final_answer": "",
+        }
+        returned_config = graph.update_state(config, updates, as_node="summarize_step")
+        return graph.invoke(None, returned_config or config)
+
+    @staticmethod
+    def _next_action_for_pending_agent(agent_name: Any) -> str | None:
+        return {
+            "sql_agent": "call_sql_agent",
+            "eda_agent": "call_eda_agent",
+            "analysis_agent": "call_analysis_agent",
+            "report_agent": "call_report_agent",
+        }.get(str(agent_name))
+
+    def _update_run_status_from_resume_result(self, result: Any) -> Any:
         if not isinstance(result, dict):
             return result
 
@@ -111,7 +156,11 @@ class SupervisorAgent:
             return self.model
         if not self.use_llm_decision:
             return None
-        return get_chat_model(temperature=0)
+        try:
+            return get_chat_model(temperature=0)
+        except Exception:
+            # 모델 생성 실패 시 Supervisor fallback 결정 로직으로 계속 진행한다.
+            return None
 
     def _resolve_datasource_id(self, datasource_id: str | None) -> str | None:
         if datasource_id is not None:

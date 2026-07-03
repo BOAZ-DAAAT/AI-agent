@@ -177,6 +177,29 @@ def test_to_orchestration_state_uses_same_generated_sql_fallback_in_plan_and_sta
     assert orchestration.generated_sql == "SELECT 1 AS sample_value"
     assert orchestration.plan is not None
     assert orchestration.plan.generated_sql == orchestration.generated_sql
+    assert orchestration.route_kind == "simple"
+    assert orchestration.plan.route_kind == "simple"
+
+
+def test_to_orchestration_state_exposes_pending_approval_id() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="sql_agent",
+            status="approval_required",
+            summary="SQL 실행 승인 필요",
+        ),
+    )
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.approval_ids == ["run_001:sql_agent:approval"]
 
 
 def test_supervisor_state_defaults_and_merged_results_are_json_serializable() -> None:
