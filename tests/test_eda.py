@@ -10,7 +10,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_relationship_skill
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import (
+    from_clustering_skill,
+    from_comparison_skill,
+    from_relationship_skill,
+    from_time_skill,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.clustering_skill import _select_k
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight import (
     compute_categorical_distribution,
@@ -531,3 +536,196 @@ def test_eda_graph_compiles():
     # 전체 그래프 배선이 오류 없이 컴파일되는지 (LLM 호출 없음)
     from DATA_Analyst_Assistant_Agent.agents.eda.graph import build_app
     assert build_app() is not None
+
+
+# ─────────────────────────────
+# chart_requests 나머지 from_* (comparison/time/clustering)
+# ─────────────────────────────
+def test_from_comparison_skill_emits_bar_for_top_n():
+    result = {"top_n_barplot": {"stats": {"review_score": {"top": []}}}}
+    reqs = from_comparison_skill(result, key_col="category", measure_cols=["review_score"])
+    assert any(r["hint"] == "bar" for r in reqs)
+
+
+def test_from_time_skill_emits_line_for_timeseries():
+    result = {"timeseries": {"stats": {"revenue": {"trend": "up"}}}}
+    reqs = from_time_skill(result, time_cols=["month"])
+    assert any(r["hint"] == "line" for r in reqs)
+
+
+def test_from_clustering_skill_emits_heatmap():
+    result = {"n_clusters": 2, "silhouette_score": 0.5,
+              "cluster_centroids": {"0": {"x": 1.0}, "1": {"x": 2.0}}}
+    reqs = from_clustering_skill(result)
+    assert reqs and reqs[0]["hint"] == "heatmap"
+
+
+def test_from_clustering_skill_skip_returns_empty():
+    assert from_clustering_skill({"skip": True}) == []
+
+
+# ─────────────────────────────
+# LLM 노드 (가짜 LLM 주입 = FakeChatModel 패턴)
+#   진짜 LLM 없이 노드의 LLM 감사 흐름을 결정론적으로 검증한다.
+# ─────────────────────────────
+class _FakeResp:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeLLM:
+    """고정 응답만 돌려주는 가짜 LLM (진짜 호출 없음)."""
+    def __init__(self, content):
+        self._content = content
+
+    def invoke(self, prompt):
+        return _FakeResp(self._content)
+
+
+def test_validator_node_routes_retry_when_llm_verdict_is_retry(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator as V
+    verdict_json = '{"status": "retry", "retry_target": "insight", "reason": "근거 약함", "feedback": "보완 필요"}'
+    monkeypatch.setattr(V, "get_llm", lambda: _FakeLLM(verdict_json))
+
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"a": [1, 2]})))
+    state = {                                   # 결정론 체크는 통과 → LLM 감사로 진입
+        "insight_result": "카테고리 집중 구조가 관찰된다",
+        "hypotheses": "[가설 1] ...",
+        "final_summary": "",
+        "controller_log": [{"choice": "distribution"}],
+        "statistical_metadata": {"row_count": 2},
+        "validation_retries": 0,
+        "user_question": "q", "question_type": "",
+        "chart_requests": [],
+    }
+    try:
+        update = V.validator_node(state)
+    finally:
+        reset_context()
+
+    assert update["validation_result"]["status"] == "retry"
+    assert update["validation_result"]["retry_target"] == "insight"
+    assert update["validation_retries"] == 1    # 재시도 카운트 증가
+
+
+def test_planner_node_picks_feasible_analysis_from_llm(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    monkeypatch.setattr(P, "get_llm", lambda: _FakeLLM('{"next": "distribution", "reason": "분포부터"}'))
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"x": [1.0, 2.0, 3.0]}), measure_cols=["x"]))
+    state = {"user_question": "q", "question_type": "", "controller_log": [], "round": 0}
+    try:
+        update = P.planner_node(state)
+    finally:
+        reset_context()
+    assert update["next_analysis"] == "distribution"
+
+
+def test_planner_node_rejects_infeasible_llm_choice(monkeypatch):
+    # LLM이 실행 불가한 분석(수치 1개인데 relationship)을 고르면 done으로 방어
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    monkeypatch.setattr(P, "get_llm", lambda: _FakeLLM('{"next": "relationship", "reason": "관계"}'))
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"x": [1.0, 2.0, 3.0]}), measure_cols=["x"]))
+    state = {"user_question": "q", "question_type": "", "controller_log": [], "round": 0}
+    try:
+        update = P.planner_node(state)
+    finally:
+        reset_context()
+    assert update["next_analysis"] == "done"    # 환각/불가 선택 → 종료로 방어
+
+
+def test_hypothesis_node_generates_from_llm(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis as H
+    monkeypatch.setattr(H, "get_llm", lambda: _FakeLLM("[가설 1] 배송이 리뷰에 영향\n검증방법: 상관"))
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"review": [1.0, 2.0, 3.0]}), measure_cols=["review"]))
+    state = {
+        "user_question": "q", "question_type": "",
+        "statistical_metadata": {}, "data_level": {"level": "raw"},
+        "sample_reliability": {}, "plan_metric": "review",
+    }
+    try:
+        update = H.hypothesis_node(state)
+    finally:
+        reset_context()
+    assert update.get("hypotheses")             # 가설 생성됨
+
+
+def test_insight_node_produces_metadata_and_insight(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    monkeypatch.setattr(I, "get_llm", lambda: _FakeLLM("핵심 패턴: 카테고리 집중 구조"))
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"cat": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}),
+                           key_col="cat", measure_cols=["val"]))
+    state = {"user_question": "q", "question_type": ""}
+    try:
+        update = I.insight_node(state)
+    finally:
+        reset_context()
+    assert update["insight_result"]              # 인사이트 생성됨
+    assert update["statistical_metadata"]["group_comparison"]  # 계산부도 채워짐
+
+
+class _SeqLLM:
+    """호출 순서대로 다른 응답 (같은 인스턴스 재사용 시 카운터 유지)."""
+    def __init__(self, contents):
+        self._contents = list(contents)
+        self._i = 0
+
+    def invoke(self, prompt):
+        c = self._contents[min(self._i, len(self._contents) - 1)]
+        self._i += 1
+        return _FakeResp(c)
+
+
+class _BoomLLM:
+    def invoke(self, prompt):
+        raise RuntimeError("boom")
+
+
+def test_insight_node_merges_llm_inferred_caution(monkeypatch):
+    # 첫 콜(_llm_infer_cautions)=caution JSON, 둘째 콜(insight)=텍스트 → source=llm_inferred 병합 확인
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    caution_json = ('[{"code": "POSSIBLE_SEASONALITY", "severity": "low", '
+                    '"message_ko": "계절성 가능", "recommended_action": ["check"], '
+                    '"evidence_keys": ["time_result"]}]')
+    monkeypatch.setattr(I, "get_llm", lambda shared=_SeqLLM([caution_json, "핵심 패턴"]): shared)
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"cat": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}),
+                           key_col="cat", measure_cols=["val"]))
+    try:
+        update = I.insight_node({"user_question": "q", "question_type": ""})
+    finally:
+        reset_context()
+    cautions = update["statistical_metadata"]["cautions"]
+    assert any(c.get("source") == "llm_inferred" for c in cautions)
+
+
+def test_insight_node_falls_back_when_llm_raises(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    monkeypatch.setattr(I, "get_llm", lambda: _BoomLLM())
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"cat": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}),
+                           key_col="cat", measure_cols=["val"]))
+    try:
+        update = I.insight_node({"user_question": "q", "question_type": ""})
+    finally:
+        reset_context()
+    assert "실패" in update["insight_result"]     # run_node_with_retry 폴백
+
+
+def test_hypothesis_node_falls_back_when_llm_raises(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis as H
+    monkeypatch.setattr(H, "get_llm", lambda: _BoomLLM())
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"review": [1.0, 2.0, 3.0]}), measure_cols=["review"]))
+    state = {"user_question": "q", "question_type": "",
+             "statistical_metadata": {}, "data_level": {"level": "raw"},
+             "sample_reliability": {}, "plan_metric": "review"}
+    try:
+        update = H.hypothesis_node(state)
+    finally:
+        reset_context()
+    assert "실패" in update["hypotheses"]          # run_node_with_retry 폴백
