@@ -24,6 +24,7 @@ class SupervisorAgent:
     def __init__(
         self,
         adapter: Any | None = None,
+        *,
         checkpoint_path: str | Path | None = None,
         model: Any | None = None,
         use_llm_decision: bool = True,
@@ -48,8 +49,8 @@ class SupervisorAgent:
             thread_id=thread_id,
             project_id=project_id,
             metadata={
-                "datasource_id": datasource_id,
                 "query": query,
+                "supervisor": "langgraph",
             },
         )
 
@@ -71,7 +72,7 @@ class SupervisorAgent:
         self.adapter.update_run_status(
             run.run_id,
             self._run_status_for_terminal(orchestration_state.terminal_state),
-            metadata={"terminal_state": self._terminal_state_value(orchestration_state.terminal_state)},
+            metadata={"terminal_state": output.get("terminal_state")},
         )
         return orchestration_state
 
@@ -125,12 +126,6 @@ class SupervisorAgent:
         if terminal_state == SupervisorTerminalState.needs_user_approval:
             return RunStatus.waiting_approval
         return RunStatus.failed
-
-    @staticmethod
-    def _terminal_state_value(terminal_state: SupervisorTerminalState | None) -> str | None:
-        if terminal_state is None:
-            return None
-        return terminal_state.value
 
 
 SQLAgentSupervisor = SupervisorAgent

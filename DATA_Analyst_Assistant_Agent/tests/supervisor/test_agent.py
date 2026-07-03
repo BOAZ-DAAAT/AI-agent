@@ -20,9 +20,17 @@ class FakeBackendAdapter:
     base_data_dir = ".data_agent"
 
     def __init__(self) -> None:
+        self.created_runs: list[dict[str, Any]] = []
         self.status_updates: list[tuple[str, Any, dict[str, Any] | None]] = []
 
     def create_run(self, *, thread_id=None, project_id=None, metadata=None):
+        self.created_runs.append(
+            {
+                "thread_id": thread_id,
+                "project_id": project_id,
+                "metadata": metadata,
+            }
+        )
         return FakeRun(run_id="run_001")
 
     def update_run_status(self, run_id, status, *, metadata=None, context=None):
@@ -76,6 +84,26 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
     assert state.thread_id == "thread_sales_001"
     assert state.terminal_state.value == "completed"
     assert adapter.status_updates[-1][0] == "run_001"
+
+
+def test_run_creates_backend_run_with_supervisor_metadata(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+
+    monkeypatch.setattr(agent, "_invoke_graph", lambda initial_state, thread_id: FakeGraph().invoke(initial_state, {}))
+
+    agent.run(
+        "월별 매출 추이를 분석해줘",
+        thread_id="thread_sales_001",
+        datasource_id="datasource_001",
+        project_id="project_001",
+    )
+
+    assert adapter.created_runs[-1] == {
+        "thread_id": "thread_sales_001",
+        "project_id": "project_001",
+        "metadata": {"query": "월별 매출 추이를 분석해줘", "supervisor": "langgraph"},
+    }
 
 
 def test_completed_terminal_updates_backend_status_succeeded() -> None:
