@@ -51,7 +51,7 @@ class SubAgentAdapter:
     ) -> None:
         self.backend_adapter = backend_adapter
         self.runtime = AgentRuntime(adapter=backend_adapter)
-        self.agents = agents or default_agents()
+        self.agents = agents if agents is not None else default_agents()
 
     def call(self, agent_name: AgentName, state: SupervisorState) -> AgentToolResult:
         if agent_name not in self.agents:
@@ -61,14 +61,12 @@ class SubAgentAdapter:
         envelope = self.agents[agent_name].run(orchestration_state, self.runtime)
         return AgentToolResult(
             agent_result=self._compact_envelope(envelope),
-            state_updates={
-                "generated_sql": orchestration_state.generated_sql,
-                "error_state": orchestration_state.error_state,
-            },
+            state_updates=self._state_updates(orchestration_state),
         )
 
     def _compact_envelope(self, envelope: AgentEnvelope) -> AgentCompactResult:
         artifact_ids = envelope.artifact_ids()
+        status = self._status_value(envelope)
         validation_errors = [
             check.detail
             for check in envelope.validation.local_checks
@@ -79,10 +77,16 @@ class SubAgentAdapter:
             for check in envelope.validation.local_checks
             if check.severity == "warning" and not check.passed
         ]
+        validation_errors.extend(
+            flag.message for flag in envelope.validation.business_flags if flag.severity == "error"
+        )
+        validation_warnings.extend(
+            flag.message for flag in envelope.validation.business_flags if flag.severity == "warning"
+        )
 
         return AgentCompactResult(
             agent=envelope.agent_name,
-            status=self._status_value(envelope.status),
+            status=status,
             summary=envelope.summary,
             artifact_ids=artifact_ids,
             artifacts=[self._artifact_summary(artifact_id) for artifact_id in artifact_ids],
@@ -109,8 +113,16 @@ class SubAgentAdapter:
         )
 
     @staticmethod
-    def _status_value(status: AgentStatus | str) -> str:
-        return status.value if isinstance(status, AgentStatus) else str(status)
+    def _status_value(envelope: AgentEnvelope) -> str:
+        if envelope.approval.required:
+            return AgentStatus.approval_required.value
+        if isinstance(envelope.status, AgentStatus):
+            return envelope.status.value
+        status = str(envelope.status)
+        valid_statuses = {item.value for item in AgentStatus}
+        if status not in valid_statuses:
+            raise ValueError(f"Invalid status from {envelope.agent_name}: {status}")
+        return status
 
     @staticmethod
     def _error_message(envelope: AgentEnvelope) -> str:
@@ -124,5 +136,33 @@ class SubAgentAdapter:
     def _preview_summary(preview: Any) -> str:
         if not isinstance(preview, dict):
             return ""
-        parts = [f"{key}={value}" for key, value in list(preview.items())[:3]]
-        return ", ".join(parts)
+        parts = [
+            f"{key}={SubAgentAdapter._truncate_text(str(value), 240)}"
+            for key, value in list(preview.items())[:3]
+        ]
+        return SubAgentAdapter._truncate_text(", ".join(parts), 1000)
+
+    @staticmethod
+    def _truncate_text(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        if limit <= 1:
+            return value[:limit]
+        return value[: limit - 1] + "…"
+
+    @staticmethod
+    def _state_updates(state: OrchestrationState) -> dict[str, Any]:
+        updates: dict[str, Any] = {
+            "planner_mode": state.planner_mode,
+            "generated_sql": state.generated_sql,
+            "error_state": state.error_state,
+        }
+        if state.plan is not None:
+            updates["analysis_plan"] = {
+                "generated_sql": state.plan.generated_sql,
+                "source_sql": state.plan.source_sql,
+                "planner_mode": state.plan.planner_mode,
+                "route_kind": state.plan.route_kind,
+                "goal": state.plan.goal,
+            }
+        return updates
