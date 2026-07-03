@@ -36,6 +36,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_w
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import (
     _check_chart_requests,
     _deterministic_fail,
+    route_after_validator,
 )
 
 
@@ -481,3 +482,52 @@ def test_compute_correlation_pairs_strong_pair_gets_binned_trend():
 def test_compute_correlation_pairs_needs_two_numeric():
     df = pd.DataFrame({"x": [1, 2, 3]})
     assert compute_correlation_pairs(df, ["x"]) == {}
+
+
+# ─────────────────────────────
+# eta_interpretation 경계값 (0.06 / 0.14) 자체 검증
+#   두 그룹 [-1,1] / [d-1,d+1] → eta = d^2 / (d^2 + 4) 로 경계를 정확히 겨냥
+# ─────────────────────────────
+def test_eta_boundary_below_006_is_small():
+    # d=0.5 → eta ≈ 0.059 (< 0.06) → small
+    df = pd.DataFrame({"cat": ["a", "a", "b", "b"], "value": [-1.0, 1.0, -0.5, 1.5]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_interpretation"] == "small"
+
+
+def test_eta_boundary_between_006_and_014_is_medium():
+    # d=0.7 → eta ≈ 0.109 (0.06~0.14) → medium (small/medium 경계 뮤테이션을 잡음)
+    df = pd.DataFrame({"cat": ["a", "a", "b", "b"], "value": [-1.0, 1.0, -0.3, 1.7]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_interpretation"] == "medium"
+
+
+def test_eta_boundary_above_014_is_large():
+    # d=0.9 → eta ≈ 0.168 (> 0.14) → large (medium/large 경계를 잡음)
+    df = pd.DataFrame({"cat": ["a", "a", "b", "b"], "value": [-1.0, 1.0, -0.1, 1.9]})
+    out = compute_group_comparison(df, "cat", ["value"])
+    assert out["value"]["eta_interpretation"] == "large"
+
+
+# ─────────────────────────────
+# 그래프 구조 (라우팅 배선 + 컴파일)
+# ─────────────────────────────
+def test_route_after_validator_retry_to_valid_target():
+    state = {"validation_result": {"status": "retry", "retry_target": "insight"}}
+    assert route_after_validator(state) == "insight"
+
+
+def test_route_after_validator_invalid_target_falls_to_chart_selector():
+    # 유효하지 않은 retry_target → 되돌리지 않고 chart_selector로 (폴백)
+    state = {"validation_result": {"status": "retry", "retry_target": "not_a_node"}}
+    assert route_after_validator(state) == "chart_selector"
+
+
+def test_route_after_validator_pass_goes_to_chart_selector():
+    assert route_after_validator({"validation_result": {"status": "pass"}}) == "chart_selector"
+
+
+def test_eda_graph_compiles():
+    # 전체 그래프 배선이 오류 없이 컴파일되는지 (LLM 호출 없음)
+    from DATA_Analyst_Assistant_Agent.agents.eda.graph import build_app
+    assert build_app() is not None
