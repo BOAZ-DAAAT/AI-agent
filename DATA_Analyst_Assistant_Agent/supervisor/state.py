@@ -141,7 +141,7 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
 
     completed_agents = list(state.get("completed_agents", []))
     failed_agents = list(state.get("failed_agents", []))
-    if result.status in {"success", "warning", "approval_required"} and result.agent not in completed_agents:
+    if result.status in {"success", "warning"} and result.agent not in completed_agents:
         completed_agents.append(result.agent)
     if result.status == "failed" and result.agent not in failed_agents:
         failed_agents.append(result.agent)
@@ -153,6 +153,15 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
         "completed_agents": completed_agents,
         "failed_agents": failed_agents,
     }
+    if result.status == "approval_required":
+        approval = PendingApproval(
+            approval_id=f"{state['current_run_id']}:{result.agent}:approval",
+            agent=result.agent,
+            reason=result.summary,
+            approval_type="agent_approval",
+        )
+        merged["pending_approval"] = approval.model_dump(mode="json")
+        merged["terminal_state"] = SupervisorTerminalState.needs_user_approval.value
     if result.error:
         merged["error_state"] = {
             "agent": result.agent,
@@ -194,7 +203,13 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
     terminal_value = state.get("terminal_state")
     terminal_state = None
     if terminal_value and terminal_value != "running":
-        terminal_state = SupervisorTerminalState(str(terminal_value))
+        try:
+            terminal_state = SupervisorTerminalState(str(terminal_value))
+        except ValueError as exc:
+            valid_values = ", ".join(["running", *(item.value for item in SupervisorTerminalState)])
+            raise ValueError(
+                f"Invalid supervisor terminal_state: {terminal_value!r}. Expected one of: {valid_values}"
+            ) from exc
 
     plan_payload = state.get("analysis_plan") or {}
     planner_mode = "llm" if plan_payload.get("planner_mode") == "llm" else "deterministic"
@@ -228,7 +243,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         last_agent=(state.get("completed_agents") or [None])[-1],
         route_kind=plan.route_kind,
         planner_mode=plan.planner_mode,
-        generated_sql=state.get("generated_sql", ""),
+        generated_sql=generated_sql,
         retry_counts=dict(state.get("retry_counts", {})),
         max_retry_per_agent=int(state.get("max_retry_per_agent", 1)),
     )

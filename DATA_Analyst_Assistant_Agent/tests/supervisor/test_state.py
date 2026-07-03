@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -107,3 +111,86 @@ def test_to_orchestration_state_preserves_existing_agent_artifacts() -> None:
     assert orchestration.max_retry_per_agent == 3
     assert orchestration.generated_sql == "SELECT 1 AS sample_value"
     assert orchestration.terminal_state == SupervisorTerminalState.completed
+
+
+def test_merge_agent_result_marks_approval_required_as_pending_not_completed() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="approval_required",
+        summary="데이터마트 사용 승인이 필요합니다",
+    )
+
+    merged = merge_agent_result(state, result)
+
+    assert merged["completed_agents"] == []
+    assert merged["pending_approval"] == {
+        "approval_id": "run_001:sql_agent:approval",
+        "agent": "sql_agent",
+        "reason": "데이터마트 사용 승인이 필요합니다",
+        "approval_type": "agent_approval",
+    }
+    assert merged["terminal_state"] == SupervisorTerminalState.needs_user_approval.value
+
+
+def test_to_orchestration_state_rejects_invalid_terminal_state() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["terminal_state"] = "not_a_real_terminal_state"
+
+    with pytest.raises(ValueError, match="Invalid supervisor terminal_state"):
+        to_orchestration_state(state)
+
+
+def test_to_orchestration_state_uses_same_generated_sql_fallback_in_plan_and_state() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.generated_sql == "SELECT 1 AS sample_value"
+    assert orchestration.plan is not None
+    assert orchestration.plan.generated_sql == orchestration.generated_sql
+
+
+def test_supervisor_state_defaults_and_merged_results_are_json_serializable() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    json.dumps(state, ensure_ascii=False)
+
+    merged = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 실행 완료",
+            artifact_ids=["artifact_sql_result"],
+            artifacts=[
+                ArtifactSummary(
+                    artifact_id="artifact_sql_result",
+                    type="sql_result",
+                    kind="sql_result",
+                    summary="10 rows",
+                )
+            ],
+        ),
+    )
+
+    json.dumps(merged, ensure_ascii=False)
