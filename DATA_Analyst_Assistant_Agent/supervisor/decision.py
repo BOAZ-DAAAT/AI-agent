@@ -10,7 +10,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_P
 from DATA_Analyst_Assistant_Agent.supervisor.state import NextAction, SupervisorState, artifact_ids_by_agent
 
 
-_EVIDENCE_AGENTS = {"sql_agent", "eda_agent", "analysis_agent"}
 _SNAPSHOT_MAX_TEXT = 120
 _SNAPSHOT_MAX_ITEMS = 3
 _SNAPSHOT_MAX_DEPTH = 3
@@ -26,14 +25,12 @@ def parse_decision_json(text: str) -> SupervisorDecision:
 
 
 def decide_next_action(state: SupervisorState, model: Any | None = None) -> SupervisorDecision:
-    if model is not None:
-        try:
-            response = model.invoke(_decision_messages(state))
-            content = getattr(response, "content", response)
-            return parse_decision_json(str(content))
-        except Exception:
-            pass
-    return _fallback_decision(state)
+    if model is None:
+        raise RuntimeError("Supervisor LLM decision model is required.")
+
+    response = model.invoke(_decision_messages(state))
+    content = getattr(response, "content", response)
+    return parse_decision_json(str(content))
 
 
 def _decision_messages(state: SupervisorState) -> list[dict[str, str]]:
@@ -55,27 +52,6 @@ def _compact_snapshot(state: SupervisorState) -> dict[str, Any]:
         "step_summaries": _truncate_for_snapshot(list(state.get("step_summaries", []))[-5:]),
         "terminal_state": _truncate_for_snapshot(state.get("terminal_state", "")),
     }
-
-
-def _fallback_decision(state: SupervisorState) -> SupervisorDecision:
-    artifact_ids = artifact_ids_by_agent(state)
-    has_evidence = any(artifact_ids.get(agent) for agent in _EVIDENCE_AGENTS)
-    has_report_evidence = bool(artifact_ids.get("report_agent"))
-
-    if has_report_evidence:
-        return SupervisorDecision(
-            next_action="finalize",
-            reason="fallback: report_agent 산출물 근거로 최종화를 진행합니다.",
-        )
-    if not has_evidence:
-        return SupervisorDecision(
-            next_action="call_sql_agent",
-            reason="fallback: 완료된 근거가 없어 SQL 에이전트부터 실행합니다.",
-        )
-    return SupervisorDecision(
-        next_action="fail",
-        reason="fallback: 이미 근거가 있어 안전한 다음 단계를 결정할 수 없습니다.",
-    )
 
 
 def _truncate_for_snapshot(

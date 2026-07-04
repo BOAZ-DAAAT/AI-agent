@@ -4,8 +4,11 @@ import json
 
 from dataclasses import dataclass
 
+import pytest
+from pydantic import ValidationError
+
 from DATA_Analyst_Assistant_Agent.supervisor.decision import decide_next_action, parse_decision_json
-from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state, merge_agent_result
+from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
 from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
 
@@ -101,7 +104,7 @@ def test_decide_next_action_uses_model_fenced_json_when_available() -> None:
     assert decision.next_action == "call_report_agent"
 
 
-def test_decide_next_action_fallback_runs_sql_only_without_evidence() -> None:
+def test_decide_next_action_requires_model() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",
@@ -109,13 +112,11 @@ def test_decide_next_action_fallback_runs_sql_only_without_evidence() -> None:
         datasource_id=None,
     )
 
-    decision = decide_next_action(state, model=None)
-
-    assert decision.next_action == "call_sql_agent"
-    assert "fallback" in decision.reason
+    with pytest.raises(RuntimeError, match="Supervisor LLM decision model is required."):
+        decide_next_action(state, model=None)
 
 
-def test_decide_next_action_fallback_handles_invalid_json() -> None:
+def test_decide_next_action_propagates_invalid_json_error() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",
@@ -123,13 +124,11 @@ def test_decide_next_action_fallback_handles_invalid_json() -> None:
         datasource_id=None,
     )
 
-    decision = decide_next_action(state, model=InvalidJsonModel())
-
-    assert decision.next_action == "call_sql_agent"
-    assert "fallback" in decision.reason
+    with pytest.raises(ValueError, match="No JSON object found in decision text"):
+        decide_next_action(state, model=InvalidJsonModel())
 
 
-def test_decide_next_action_fallback_handles_model_exception() -> None:
+def test_decide_next_action_propagates_model_exception() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",
@@ -137,145 +136,20 @@ def test_decide_next_action_fallback_handles_model_exception() -> None:
         datasource_id=None,
     )
 
-    decision = decide_next_action(state, model=ExceptionModel())
-
-    assert decision.next_action == "call_sql_agent"
-    assert "fallback" in decision.reason
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        decide_next_action(state, model=ExceptionModel())
 
 
-def test_decide_next_action_fallback_ignores_completed_agent_without_artifact_evidence() -> None:
+def test_decide_next_action_propagates_invalid_model_action() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",
         user_query="월별 매출 추이를 분석해줘",
         datasource_id=None,
     )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="sql_agent",
-            status="success",
-            summary="SQL 완료",
-            artifact_ids=[],
-        ),
-    )
 
-    decision = decide_next_action(state, model=None)
-
-    assert decision.next_action == "call_sql_agent"
-    assert "fallback" in decision.reason
-
-
-def test_decide_next_action_fallback_fails_after_evidence_exists() -> None:
-    state = empty_supervisor_state(
-        thread_id="thread_sales_001",
-        run_id="run_001",
-        user_query="월별 매출 추이를 분석해줘",
-        datasource_id=None,
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="sql_agent",
-            status="success",
-            summary="SQL 완료",
-            artifact_ids=["artifact_sql_result"],
-        ),
-    )
-
-    decision = decide_next_action(state, model=None)
-
-    assert decision.next_action == "fail"
-    assert "fallback" in decision.reason
-
-
-def test_decide_next_action_fallback_rejects_invalid_model_action_after_evidence_exists() -> None:
-    state = empty_supervisor_state(
-        thread_id="thread_sales_001",
-        run_id="run_001",
-        user_query="월별 매출 추이를 분석해줘",
-        datasource_id=None,
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="sql_agent",
-            status="success",
-            summary="SQL 완료",
-            artifact_ids=["artifact_sql_result"],
-        ),
-    )
-
-    decision = decide_next_action(state, model=InvalidActionModel())
-
-    assert decision.next_action == "fail"
-    assert "fallback" in decision.reason
-
-
-def test_decide_next_action_fallback_finalizes_after_report_agent_completed() -> None:
-    state = empty_supervisor_state(
-        thread_id="thread_sales_001",
-        run_id="run_001",
-        user_query="월별 매출 추이를 분석해줘",
-        datasource_id=None,
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="report_agent",
-            status="success",
-            summary="리포트 완료",
-            artifact_ids=["artifact_report"],
-        ),
-    )
-
-    decision = decide_next_action(state, model=InvalidJsonModel())
-
-    assert decision.next_action == "finalize"
-    assert "fallback" in decision.reason
-
-
-def test_decide_next_action_fallback_does_not_finalize_completed_report_without_artifact() -> None:
-    state = empty_supervisor_state(
-        thread_id="thread_sales_001",
-        run_id="run_001",
-        user_query="월별 매출 추이를 분석해줘",
-        datasource_id=None,
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="report_agent",
-            status="success",
-            summary="리포트 완료",
-        ),
-    )
-
-    decision = decide_next_action(state, model=None)
-
-    assert decision.next_action != "finalize"
-
-
-def test_decide_next_action_fallback_finalizes_with_report_artifact_evidence() -> None:
-    state = empty_supervisor_state(
-        thread_id="thread_sales_001",
-        run_id="run_001",
-        user_query="월별 매출 추이를 분석해줘",
-        datasource_id=None,
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="report_agent",
-            status="warning",
-            summary="리포트 경고 포함 완료",
-            artifact_ids=["artifact_report"],
-        ),
-    )
-
-    decision = decide_next_action(state, model=None)
-
-    assert decision.next_action == "finalize"
+    with pytest.raises(ValidationError):
+        decide_next_action(state, model=InvalidActionModel())
 
 
 def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
