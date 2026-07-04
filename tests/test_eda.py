@@ -845,3 +845,110 @@ def test_get_llm_caches_per_model_env(monkeypatch):
         assert calls == ["LLM_MODEL", "CODE_GENERATOR_MODEL"]  # 캐시 히트는 재생성 안 함
     finally:
         R._llms.clear()
+
+
+# ─────────────────────────────
+# codegen AST 게이트 + denylist (안전 핵심) — 토큰 0
+# ─────────────────────────────
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.codegen_gate import (
+    CodegenRequest,
+    validate_expression,
+    validate_request,
+)
+
+_COLS = ["order_price", "review_score", "product_category"]
+
+
+def test_gate_allows_safe_pandas_expression():
+    r = validate_expression('df["order_price"].mean()', _COLS)
+    assert r.ok, r.reason
+
+
+def test_gate_allows_grouped_aggregation():
+    r = validate_expression('df.groupby("product_category")["order_price"].median()', _COLS)
+    assert r.ok, r.reason
+
+
+def test_gate_rejects_multiple_statements():
+    r = validate_expression('x = 1\ndf.mean()', _COLS)      # eval 모드 파싱 실패
+    assert not r.ok and "single_expression" in r.reason
+
+
+def test_gate_rejects_import_name():
+    r = validate_expression('__import__("os").system("ls")', _COLS)
+    assert not r.ok and "name_not_allowed" in r.reason
+
+
+def test_gate_rejects_open_builtin():
+    r = validate_expression('open("secret.txt").read()', _COLS)
+    assert not r.ok and "name_not_allowed: open" in r.reason
+
+
+def test_gate_rejects_dunder_escape():
+    r = validate_expression('df.__class__.__mro__', _COLS)   # 샌드박스 이스케이프 시도
+    assert not r.ok and "dunder" in r.reason
+
+
+def test_gate_rejects_unknown_column():
+    r = validate_expression('df["nope"].mean()', _COLS)
+    assert not r.ok and "unknown_column: nope" in r.reason
+
+
+def test_gate_rejects_merge_cross_explosion():
+    r = validate_expression('df.merge(df, how="cross")', _COLS)  # N² 폭발
+    assert not r.ok and "denied_method: merge" in r.reason
+
+
+def test_gate_rejects_get_dummies_explosion():
+    r = validate_expression('pd.get_dummies(df)', _COLS)
+    assert not r.ok and "denied_method" in r.reason
+
+
+def test_gate_rejects_explode():
+    r = validate_expression('df["product_category"].explode()', _COLS)
+    assert not r.ok and "denied_method: explode" in r.reason
+
+
+def test_gate_rejects_file_io():
+    r = validate_expression('df.to_csv("out.csv")', _COLS)
+    assert not r.ok and "denied_method: to_csv" in r.reason
+
+
+def test_gate_rejects_read_io():
+    r = validate_expression('pd.read_csv("x.csv")', _COLS)
+    assert not r.ok and "denied_method: read_csv" in r.reason
+
+
+def test_gate_rejects_eval_exec_path():
+    r = validate_expression('pd.eval("1+1")', _COLS)
+    assert not r.ok and "denied_method: eval" in r.reason
+
+
+def test_gate_rejects_comprehension():
+    r = validate_expression('[x for x in range(10)]', _COLS)   # 반복 → 리소스/임의실행
+    assert not r.ok and "comprehension" in r.reason
+
+
+def test_gate_rejects_lambda():
+    r = validate_expression('df["order_price"].apply(lambda v: v)', _COLS)
+    assert not r.ok and "lambda" in r.reason
+
+
+def test_validate_request_ok():
+    req = CodegenRequest(intent="평균가", target_columns=["order_price"],
+                         expression='df["order_price"].mean()', expected_shape="scalar")
+    assert validate_request(req, _COLS).ok
+
+
+def test_validate_request_rejects_unknown_target_column():
+    req = CodegenRequest(intent="x", target_columns=["ghost"],
+                         expression='df["order_price"].mean()')
+    r = validate_request(req, _COLS)
+    assert not r.ok and "unknown_target_columns" in r.reason
+
+
+def test_validate_request_rejects_bad_shape():
+    req = CodegenRequest(intent="x", target_columns=["order_price"],
+                         expression='df["order_price"].mean()', expected_shape="matrix")
+    r = validate_request(req, _COLS)
+    assert not r.ok and "invalid_expected_shape" in r.reason
