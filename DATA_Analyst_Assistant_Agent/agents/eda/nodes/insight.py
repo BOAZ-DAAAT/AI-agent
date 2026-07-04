@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any, Dict
 
 import pandas as pd
@@ -161,9 +162,78 @@ def compute_group_comparison(df, key_col, numeric_cols) -> Dict[str, Any]:
     return group_comparison
 
 
+# ─────────────────────────────
+# semantic_type 분류 (순수 코드, 토큰 0)
+# dtype(numeric/categorical) 위에 컬럼의 '의미 역할'을 이름·값 신호로 추론한다.
+# 이름+값 일치=high, 이름·값 불일치나 한쪽만=medium, 값도 이름도 약함=low.
+# 이름 추론은 휴리스틱이라 confidence 필수 — 분석이 신뢰도 보고 소비한다.
+# ─────────────────────────────
+_ID_NAME = re.compile(r"(^|_)(id|uuid|guid)($|_)", re.IGNORECASE)
+_MONETARY_KEYS = ("price", "value", "payment", "amount", "cost", "revenue",
+                  "freight", "sales", "gmv", "profit", "fee", "_brl", "monetary")
+_RATING_KEYS = ("score", "rating", "review", "star", "csat", "nps")
+_COUNT_KEYS = ("count", "qty", "quantity", "num_", "n_", "_cnt", "freq", "items",
+               "orders", "units", "transactions", "sessions")
+_DURATION_KEYS = ("days", "duration", "elapsed", "latency", "tenure",
+                  "age", "delay", "_time", "hours", "minutes", "seconds")
+
+
+def _name_signal_numeric(name: str) -> str | None:
+    """컬럼 이름으로 의미 역할 추정(id 우선). 없으면 None."""
+    low = name.casefold()
+    if _ID_NAME.search(low):
+        return "id"
+    if any(k in low for k in _MONETARY_KEYS):
+        return "monetary"
+    if any(k in low for k in _RATING_KEYS):
+        return "rating"
+    if any(k in low for k in _COUNT_KEYS):
+        return "count"
+    if any(k in low for k in _DURATION_KEYS):
+        return "duration"
+    return None
+
+
+def classify_semantic_numeric(col, s, unique_count, all_positive, non_negative):
+    """수치형 컬럼의 의미 역할 + confidence. 반환 (semantic_type, confidence)."""
+    name_type = _name_signal_numeric(col)
+    try:
+        is_int = bool((s % 1 == 0).all())
+    except TypeError:
+        is_int = False
+    n = len(s)
+    value_type = None
+    if is_int and n and unique_count > 0.9 * n:
+        value_type = "id"
+    elif is_int and float(s.min()) >= 1 and float(s.max()) <= 10 and unique_count <= 10:
+        value_type = "rating"
+    elif is_int and non_negative:
+        value_type = "count"
+    elif all_positive:
+        value_type = "monetary"
+
+    if name_type and value_type:
+        return (name_type, "high") if name_type == value_type else (name_type, "medium")
+    if name_type:
+        return name_type, "medium"
+    if value_type:
+        return value_type, "medium"
+    return "generic", "low"
+
+
+def classify_semantic_categorical(col, is_id_like):
+    """범주형 컬럼의 의미 역할 + confidence. 집계본 group_key는 조립부에서 별도 교정."""
+    name_id = bool(_ID_NAME.search(col.casefold()))
+    if is_id_like:
+        return "id", ("high" if name_id else "medium")
+    if name_id:
+        return "id", "low"   # 이름은 id인데 값이 유니크하지 않음 → 약한 신호
+    return "category", "high"
+
+
 def compute_numeric_distribution(df, numeric_cols) -> Dict[str, Any]:
     """수치형 컬럼 분포 통계. 순수 계산(LLM 없음).
-    percentile·skewness·kurtosis·outlier_rate·all_positive·normality + eda_notes(shape·handling).
+    percentile·skewness·kurtosis·outlier_rate·all_positive·normality·semantic_type + eda_notes.
     """
     dist_stats: Dict[str, Any] = {}
     for col in numeric_cols:
@@ -201,8 +271,20 @@ def compute_numeric_distribution(df, numeric_cols) -> Dict[str, Any]:
         normality = ("approx_normal" if abs(skew) < 0.5 and abs(kurt) < 1 else
                      "heavy_tailed" if abs(kurt) >= 3 else "skewed")
 
+        semantic_type, semantic_confidence = classify_semantic_numeric(
+            col, s, int(s.nunique()), all_positive, non_negative)
+
+        # semantic_type 기반 handling 교정: 분포 모양만으론 틀리는 추천을 의미로 바로잡는다.
+        # rating=순서형(log·이상치제거 부적합), id=분석 대상 아님.
+        if semantic_type == "rating":
+            handling = ["treat_as_ordinal", "avoid_outlier_removal", "use_rank_or_nonparametric"]
+        elif semantic_type == "id":
+            handling = ["exclude_from_analysis"]
+
         dist_stats[col] = {
             "type":             "numeric",
+            "semantic_type":       semantic_type,
+            "semantic_confidence": semantic_confidence,
             "mean":             _jround(s.mean()),
             "median":           _jround(s.median()),
             "std":              _jround(s.std()),
@@ -266,8 +348,12 @@ def compute_categorical_distribution(df, numeric_cols) -> Dict[str, Any]:
         if balance == "dominated":
             handling.append("check_dominant_category")
 
+        semantic_type, semantic_confidence = classify_semantic_categorical(col, is_id_like)
+
         entry = {
             "type":                    "categorical",
+            "semantic_type":           semantic_type,
+            "semantic_confidence":     semantic_confidence,
             "unique_count":            nun,
             "missing_rate":            _jround(df[col].isna().mean()),
             "is_id_like":              is_id_like,
@@ -381,11 +467,12 @@ def insight_node(state: EDAState) -> dict:
         sample_reliability = assess_sample_reliability(
             df, key_col=key_col, count_col=count_col, data_level=data_level.get("level", "unknown"))
 
-        # 집계본의 group key는 ID가 아니라 '묶는 기준' — id_like 오판 교정(집계본은 그룹당 1행이라
-        # key_col이 전부 유니크→ID로 오인됨). semantic_type 전체 체계는 후속(커밋7), 여긴 이 케이스만.
+        # 집계본의 group key는 ID가 아니라 '묶는 기준' — classifier가 near-unique라 id로 오판하는 걸
+        # 구조 사실(집계본 key_col)로 교정한다. semantic_type 체계의 정식 일부(집계 여부는 구조라 high).
         if data_level.get("is_aggregated") and key_col and isinstance(dist_stats.get(key_col), dict):
             gk = dist_stats[key_col]
             gk["semantic_type"] = "group_key"
+            gk["semantic_confidence"] = "high"
             gk["is_id_like"] = False
             if isinstance(gk.get("eda_notes"), dict):
                 gk["eda_notes"]["recommended_handling"] = ["use_as_group_key"]
