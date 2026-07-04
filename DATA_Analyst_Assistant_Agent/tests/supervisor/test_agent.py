@@ -9,7 +9,11 @@ import pytest
 from data_agent_backend.models.runs import RunStatus
 from langgraph.types import Command
 
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    OrchestrationState,
+    SupervisorRunResult,
+    SupervisorTerminalState,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SQLAgentSupervisor, SupervisorAgent
 
 
@@ -18,12 +22,18 @@ class FakeRun:
     run_id: str
 
 
+@dataclass
+class FakeInterrupt:
+    value: dict[str, Any]
+
+
 class FakeBackendAdapter:
     base_data_dir = ".data_agent"
 
     def __init__(self) -> None:
         self.created_runs: list[dict[str, Any]] = []
         self.status_updates: list[tuple[str, Any, dict[str, Any] | None]] = []
+        self.events: list[dict[str, Any]] = []
 
     def create_run(self, *, thread_id=None, project_id=None, metadata=None):
         self.created_runs.append(
@@ -38,6 +48,30 @@ class FakeBackendAdapter:
     def update_run_status(self, run_id, status, *, metadata=None, context=None):
         self.status_updates.append((run_id, status, metadata))
         return FakeRun(run_id=run_id)
+
+    def append_run_event(
+        self,
+        run_id,
+        event_type,
+        message,
+        *,
+        node_name=None,
+        tool_name=None,
+        artifact_ids=None,
+        approval_id=None,
+        metadata=None,
+        context=None,
+    ):
+        self.events.append(
+            {
+                "run_id": run_id,
+                "event_type": event_type,
+                "message": message,
+                "node_name": node_name,
+                "metadata": metadata,
+            }
+        )
+        return {"event_id": f"evt_{len(self.events)}"}
 
 
 class FakeGraph:
@@ -83,6 +117,17 @@ class ApprovalResumeGraph(CapturingGraph):
         return {"configurable": {"thread_id": config["configurable"]["thread_id"], "checkpoint": "updated"}}
 
 
+class CheckpointResumeGraph(CapturingGraph):
+    def __init__(self, checkpoint_state: dict[str, Any], result: dict[str, Any]) -> None:
+        super().__init__(result=result)
+        self.checkpoint_state = checkpoint_state
+        self.state_reads: list[dict[str, Any]] = []
+
+    def get_state(self, config):
+        self.state_reads.append(config)
+        return StateSnapshot(self.checkpoint_state)
+
+
 class CatalogFailingBackendAdapter(FakeBackendAdapter):
     def get_catalog_summary(self, datasource_id):
         raise RuntimeError("카탈로그 조회 실패")
@@ -123,13 +168,57 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
 
     monkeypatch.setattr(agent, "_invoke_graph", lambda initial_state, thread_id: FakeGraph().invoke(initial_state, {}))
 
-    state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id=None)
+    result = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id=None)
 
+    assert isinstance(result, SupervisorRunResult)
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.interrupt is None
+    state = result.state
     assert isinstance(state, OrchestrationState)
     assert state.run_id == "run_001"
     assert state.thread_id == "thread_sales_001"
     assert state.terminal_state.value == "completed"
     assert adapter.status_updates[-1][0] == "run_001"
+
+
+def test_supervisor_agent_run_returns_interrupt_result_and_waiting_input_status(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+
+    def interrupt_output(initial_state, thread_id):
+        return {
+            "__interrupt__": (
+                FakeInterrupt(
+                    {
+                        "type": "clarification",
+                        "status": "waiting_input",
+                        "run_id": initial_state["current_run_id"],
+                        "thread_id": thread_id,
+                        "question": "어떤 기간과 단위로 매출을 분석할까요?",
+                        "node": "collect_clarification",
+                        "expected_resume": {"answer": "string"},
+                    }
+                ),
+            )
+        }
+
+    monkeypatch.setattr(agent, "_invoke_graph", interrupt_output)
+
+    result = agent.run("매출", thread_id="thread_sales_001", datasource_id=None)
+
+    assert result.kind == "interrupt"
+    assert result.state is None
+    assert result.interrupt is not None
+    assert result.interrupt.type == "clarification"
+    assert result.interrupt.question == "어떤 기간과 단위로 매출을 분석할까요?"
+    assert adapter.status_updates[-1] == (
+        "run_001",
+        RunStatus.waiting_input,
+        {"interrupt_type": "clarification", "node": "collect_clarification"},
+    )
+    assert adapter.events[-1]["event_type"] == "human_input.required"
+    assert adapter.events[-1]["node_name"] == "collect_clarification"
 
 
 def test_run_creates_backend_run_with_supervisor_metadata(monkeypatch) -> None:
@@ -242,26 +331,100 @@ def test_run_uses_runtime_graph_with_thread_config(monkeypatch) -> None:
     agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
-    state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+    result = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
 
     invoked_state, config = graph.invocations[-1]
-    assert state.terminal_state == SupervisorTerminalState.completed
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.terminal_state == SupervisorTerminalState.completed
     assert invoked_state["thread_id"] == "thread_sales_001"
     assert config == {"configurable": {"thread_id": "thread_sales_001"}}
 
 
 def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
-    graph = CapturingGraph()
+    graph = CapturingGraph(
+        result=_completed_graph_state(
+            {
+                "thread_id": "thread_sales_001",
+                "current_run_id": "run_resumed_001",
+                "latest_user_query": "월별 매출 추이를 분석해줘",
+                "analysis_plan": {},
+                "datasource_id": None,
+                "catalog_summary": None,
+                "retry_counts": {},
+                "generated_sql": "",
+                "artifacts": {},
+                "agent_results": [],
+                "completed_agents": [],
+                "error_state": {},
+                "max_retry_per_agent": 1,
+            },
+            run_id="run_resumed_001",
+        )
+    )
     agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     result = agent.resume("thread_sales_001", {"approved": True})
 
     invoked_state, config = graph.invocations[-1]
-    assert result == {"resumed": True}
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.run_id == "run_resumed_001"
     assert isinstance(invoked_state, Command)
     assert invoked_state.resume == {"approved": True}
     assert config == {"configurable": {"thread_id": "thread_sales_001"}}
+
+
+def test_resume_with_clarification_answer_uses_command_resume_and_updates_status(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    checkpoint_state = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "매출",
+        "analysis_plan": {},
+        "datasource_id": None,
+        "catalog_summary": None,
+        "retry_counts": {},
+        "generated_sql": "",
+        "artifacts": {},
+        "agent_results": [],
+        "completed_agents": [],
+        "failed_agents": [],
+        "error_state": {},
+        "max_retry_per_agent": 1,
+        "terminal_state": "running",
+    }
+    graph = CheckpointResumeGraph(
+        checkpoint_state,
+        _completed_graph_state(checkpoint_state, run_id="run_resumed_001"),
+    )
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    result = agent.resume("thread_sales_001", {"answer": "최근 6개월 월별 매출"})
+
+    invoked_state, config = graph.invocations[-1]
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.run_id == "run_resumed_001"
+    assert isinstance(invoked_state, Command)
+    assert invoked_state.resume == {"answer": "최근 6개월 월별 매출"}
+    assert config == {"configurable": {"thread_id": "thread_sales_001"}}
+    assert adapter.status_updates[0] == ("run_resumed_001", RunStatus.running, {"resumed_from": "clarification"})
+    assert adapter.status_updates[-1] == ("run_resumed_001", RunStatus.succeeded, {"terminal_state": "completed"})
+
+
+@pytest.mark.parametrize("payload", [{}, {"answer": ""}, {"answer": "   "}])
+def test_resume_with_invalid_clarification_answer_raises_without_invoking_graph(monkeypatch, payload) -> None:
+    graph = CapturingGraph()
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError, match="answer"):
+        agent.resume("thread_sales_001", payload)
+
+    assert graph.invocations == []
 
 
 def test_decision_model_propagates_model_construction_failure(monkeypatch) -> None:
@@ -331,7 +494,9 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
 
     result = agent.resume("thread_sales_001", {"approved": True})
 
-    assert result["terminal_state"] == "completed"
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.terminal_state == SupervisorTerminalState.completed
     assert graph.state_reads == [{"configurable": {"thread_id": "thread_sales_001"}}]
     assert graph.state_updates == [
         (
@@ -382,7 +547,9 @@ def test_resume_updates_backend_status_when_graph_returns_terminal_state(monkeyp
 
     result = agent.resume("thread_sales_001", {"approved": True})
 
-    assert result["current_run_id"] == "run_resumed_001"
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.run_id == "run_resumed_001"
     assert adapter.status_updates[-1] == (
         "run_resumed_001",
         RunStatus.succeeded,

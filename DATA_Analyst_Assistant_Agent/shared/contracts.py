@@ -3,7 +3,7 @@ from __future__ import annotations
 from data_agent_backend.models.common import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from data_agent_backend.models.artifacts import ArtifactRef
 
@@ -82,6 +82,8 @@ class AgentEnvelope(BaseModel):
     retry_hint: RetryHint = Field(default_factory=RetryHint)
     approval: ApprovalRequirement = Field(default_factory=ApprovalRequirement)
     context_refs: list[ContextRef] = Field(default_factory=list)
+    fallback_used: bool = False
+    error: str = ""
 
     def artifact_ids(self) -> list[str]:
         return [ref.artifact_id for ref in self.artifact_refs]
@@ -133,3 +135,29 @@ class OrchestrationState(BaseModel):
             return
         existing = self.artifact_ids.setdefault(key, [])
         existing.extend(artifact_id for artifact_id in artifact_ids if artifact_id not in existing)
+
+
+class SupervisorInterruptPayload(BaseModel):
+    type: Literal["clarification"]
+    status: Literal["waiting_input"]
+    run_id: str
+    thread_id: str
+    question: str
+    node: str
+    expected_resume: dict[str, str] = Field(default_factory=lambda: {"answer": "string"})
+
+
+class SupervisorRunResult(BaseModel):
+    kind: Literal["state", "interrupt"]
+    state: OrchestrationState | None = None
+    interrupt: SupervisorInterruptPayload | None = None
+
+    @model_validator(mode="after")
+    def validate_result_payload(self) -> SupervisorRunResult:
+        if self.kind == "state":
+            if self.state is None or self.interrupt is not None:
+                raise ValueError("state 결과에는 state만 포함해야 합니다.")
+        if self.kind == "interrupt":
+            if self.interrupt is None or self.state is not None:
+                raise ValueError("interrupt 결과에는 interrupt만 포함해야 합니다.")
+        return self

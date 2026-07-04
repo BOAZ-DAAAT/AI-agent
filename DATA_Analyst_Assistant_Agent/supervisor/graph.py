@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
@@ -80,14 +81,42 @@ def make_clarify_query_node(model: Any | None):
             "llm_decisions": _append_llm_decision(state, "clarify_query", decision),
         }
         if decision.needs_clarification:
-            updates["terminal_state"] = SupervisorTerminalState.needs_clarification.value
-            updates["next_action"] = "finalize"
+            updates["terminal_state"] = "running"
+            updates["next_action"] = "clarify"
         else:
             updates["terminal_state"] = "running"
             updates["next_action"] = "create_plan"
         return updates
 
     return clarify_query_node
+
+
+def make_collect_clarification_node():
+    def collect_clarification_node(state: SupervisorState) -> SupervisorState:
+        question = state.get("clarification_question") or "분석을 진행하기 위해 추가 정보가 필요합니다."
+        payload = {
+            "type": "clarification",
+            "status": "waiting_input",
+            "run_id": state["current_run_id"],
+            "thread_id": state["thread_id"],
+            "question": question,
+            "node": "collect_clarification",
+            "expected_resume": {"answer": "string"},
+        }
+        resume_value = interrupt(payload)
+        answer = _clarification_answer_from_resume(resume_value)
+        base_query = state.get("clarified_query") or state.get("latest_user_query", "")
+        clarified_query = f"{base_query}\n추가 답변: {answer}"
+        return {
+            "clarified_query": clarified_query,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "terminal_state": "running",
+            "next_action": "create_plan",
+            "current_step": "collect_clarification",
+        }
+
+    return collect_clarification_node
 
 
 def make_create_analysis_plan_node(model: Any | None):
@@ -367,6 +396,10 @@ def create_analysis_plan_node(state: SupervisorState) -> SupervisorState:
     return make_create_analysis_plan_node(None)(state)
 
 
+def collect_clarification_node(state: SupervisorState) -> SupervisorState:
+    return make_collect_clarification_node()(state)
+
+
 def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
     return make_validate_subagent_result_node(None)(state)
 
@@ -386,6 +419,7 @@ def build_graph(
 ):
     graph = StateGraph(SupervisorState)
     graph.add_node("clarify_query", make_clarify_query_node(model))
+    graph.add_node("collect_clarification", make_collect_clarification_node())
     graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
@@ -397,8 +431,13 @@ def build_graph(
     graph.add_conditional_edges(
         "clarify_query",
         _route_after_clarify,
-        {"create_analysis_plan": "create_analysis_plan", "finalize": "finalize"},
+        {
+            "collect_clarification": "collect_clarification",
+            "create_analysis_plan": "create_analysis_plan",
+            "finalize": "finalize",
+        },
     )
+    graph.add_edge("collect_clarification", "create_analysis_plan")
     graph.add_edge("create_analysis_plan", "decide_next_action")
     graph.add_conditional_edges(
         "decide_next_action",
@@ -536,6 +575,8 @@ def _terminal_failure_updates(
 def _route_after_clarify(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
+    if state.get("next_action") == "clarify" or state.get("needs_clarification"):
+        return "collect_clarification"
     return "create_analysis_plan"
 
 
@@ -601,3 +642,12 @@ def _default_final_answer_for_terminal_state(
         return "요청을 완료할 수 없습니다."
 
     return "요청 처리를 종료했습니다."
+
+
+def _clarification_answer_from_resume(resume_value: Any) -> str:
+    if not isinstance(resume_value, dict):
+        raise ValueError("clarification resume payload는 {'answer': '...'} 형식이어야 합니다.")
+    answer = str(resume_value.get("answer") or "").strip()
+    if not answer:
+        raise ValueError("clarification resume payload의 answer는 비어 있을 수 없습니다.")
+    return answer

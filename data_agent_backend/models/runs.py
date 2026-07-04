@@ -9,6 +9,7 @@ class RunStatus(StrEnum):
     created = "created"
     running = "running"
     waiting_approval = "waiting_approval"
+    waiting_input = "waiting_input"
     succeeded = "succeeded"
     failed = "failed"
     cancelled = "cancelled"

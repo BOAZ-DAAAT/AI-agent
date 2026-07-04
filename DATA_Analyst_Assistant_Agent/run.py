@@ -16,7 +16,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 from dotenv import load_dotenv
 
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SupervisorAgent
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorRunResult
 from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
 
 
@@ -103,6 +103,32 @@ def _state_summary(state: OrchestrationState) -> dict[str, Any]:
         "mart_id": state.mart_id,
         "error_state": state.error_state,
     }
+
+
+def _interrupt_summary(result: SupervisorRunResult) -> dict[str, Any]:
+    if result.interrupt is None:
+        return {"kind": result.kind}
+    return {
+        "kind": result.kind,
+        "interrupt": result.interrupt.model_dump(mode="json"),
+        "resume_payload": {"answer": "..."},
+    }
+
+
+def _print_interrupt_summary(result: SupervisorRunResult) -> None:
+    if result.interrupt is None:
+        print("사용자 입력 대기 상태입니다.")
+        return
+    payload = result.interrupt
+    print("\n=== Human Input Required ===")
+    print(f"type:       {payload.type}")
+    print(f"status:     {payload.status}")
+    print(f"run_id:     {payload.run_id}")
+    print(f"thread_id:  {payload.thread_id}")
+    print(f"node:       {payload.node}")
+    print(f"question:   {payload.question}")
+    print("\nresume payload:")
+    print(json.dumps({"answer": "..."}, ensure_ascii=False, indent=2))
 
 
 def _artifact_preview(adapter: BackendAdapter, artifact_id: str) -> dict[str, Any]:
@@ -631,7 +657,17 @@ def main() -> None:
 
     adapter = BackendAdapter()
     supervisor = SupervisorAgent(adapter)
-    state = supervisor.run(query, thread_id=args.thread_id, datasource_id=args.datasource_id)
+    result = supervisor.run(query, thread_id=args.thread_id, datasource_id=args.datasource_id)
+    if result.kind == "interrupt":
+        if args.json:
+            print(json.dumps(_interrupt_summary(result), ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_interrupt_summary(result)
+        return
+
+    if result.state is None:
+        raise RuntimeError("Supervisor state result is missing state payload.")
+    state = result.state
     outputs = None
     if not args.no_output:
         outputs = _write_outputs(adapter, state, query, Path(args.output_dir))
