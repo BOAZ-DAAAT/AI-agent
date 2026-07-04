@@ -27,12 +27,10 @@ class SupervisorAgent:
         *,
         checkpoint_path: str | Path | None = None,
         model: Any | None = None,
-        use_llm_decision: bool = True,
     ) -> None:
         self.adapter = adapter or BackendAdapter()
         self.checkpoint_path = checkpoint_path
         self.model = model
-        self.use_llm_decision = use_llm_decision
 
     def run(
         self,
@@ -151,16 +149,10 @@ class SupervisorAgent:
             checkpointer=checkpointer,
         )
 
-    def _decision_model(self) -> Any | None:
+    def _decision_model(self) -> Any:
         if self.model is not None:
             return self.model
-        if not self.use_llm_decision:
-            return None
-        try:
-            return get_chat_model(temperature=0)
-        except Exception:
-            # 모델 생성 실패 시 Supervisor fallback 결정 로직으로 계속 진행한다.
-            return None
+        return get_chat_model(temperature=0)
 
     def _resolve_datasource_id(self, datasource_id: str | None) -> str | None:
         if datasource_id is not None:

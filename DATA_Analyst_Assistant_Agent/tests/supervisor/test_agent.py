@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -99,7 +100,7 @@ def _completed_graph_state(state: dict[str, Any], run_id: str | None = None) -> 
 
 def _agent_with_terminal(terminal_state: SupervisorTerminalState) -> tuple[FakeBackendAdapter, SupervisorAgent]:
     adapter = FakeBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     def invoke_graph(initial_state, thread_id):
         return {
@@ -112,9 +113,13 @@ def _agent_with_terminal(terminal_state: SupervisorTerminalState) -> tuple[FakeB
     return adapter, agent
 
 
+def test_supervisor_agent_constructor_no_longer_exposes_use_llm_decision() -> None:
+    assert "use_llm_decision" not in inspect.signature(SupervisorAgent).parameters
+
+
 def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     monkeypatch.setattr(agent, "_invoke_graph", lambda initial_state, thread_id: FakeGraph().invoke(initial_state, {}))
 
@@ -129,7 +134,7 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
 
 def test_run_creates_backend_run_with_supervisor_metadata(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     monkeypatch.setattr(agent, "_invoke_graph", lambda initial_state, thread_id: FakeGraph().invoke(initial_state, {}))
 
@@ -185,7 +190,7 @@ def test_failed_terminal_updates_backend_status_failed() -> None:
 
 def test_graph_invoke_exception_updates_backend_status_failed_and_reraises(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     def raise_error(initial_state, thread_id):
         raise RuntimeError("그래프 실패")
@@ -201,7 +206,7 @@ def test_graph_invoke_exception_updates_backend_status_failed_and_reraises(monke
 
 def test_catalog_summary_exception_updates_backend_status_failed_and_reraises() -> None:
     adapter = CatalogFailingBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     with pytest.raises(RuntimeError, match="카탈로그 조회 실패"):
         agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id="datasource_001")
@@ -214,7 +219,7 @@ def test_catalog_summary_exception_updates_backend_status_failed_and_reraises() 
 
 def test_invalid_graph_output_updates_backend_status_failed_and_reraises(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
 
     def invalid_output(initial_state, thread_id):
         return {
@@ -234,7 +239,7 @@ def test_invalid_graph_output_updates_backend_status_failed_and_reraises(monkeyp
 
 def test_run_uses_runtime_graph_with_thread_config(monkeypatch) -> None:
     graph = CapturingGraph(result=lambda state, config: _completed_graph_state(state))
-    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
@@ -247,7 +252,7 @@ def test_run_uses_runtime_graph_with_thread_config(monkeypatch) -> None:
 
 def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
     graph = CapturingGraph()
-    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     result = agent.resume("thread_sales_001", {"approved": True})
@@ -259,7 +264,7 @@ def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
     assert config == {"configurable": {"thread_id": "thread_sales_001"}}
 
 
-def test_decision_model_returns_none_when_model_construction_fails(monkeypatch) -> None:
+def test_decision_model_propagates_model_construction_failure(monkeypatch) -> None:
     agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
 
     def raise_model_error(*args, **kwargs):
@@ -267,7 +272,8 @@ def test_decision_model_returns_none_when_model_construction_fails(monkeypatch) 
 
     monkeypatch.setattr("DATA_Analyst_Assistant_Agent.supervisor.agent.get_chat_model", raise_model_error)
 
-    assert agent._decision_model() is None
+    with pytest.raises(RuntimeError, match="모델 생성 실패"):
+        agent._decision_model()
 
 
 def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> None:
@@ -320,7 +326,7 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
         run_id="run_resumed_001",
     )
     graph = ApprovalResumeGraph(checkpoint_state, resumed_result)
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     result = agent.resume("thread_sales_001", {"approved": True})
@@ -371,7 +377,7 @@ def test_resume_updates_backend_status_when_graph_returns_terminal_state(monkeyp
             run_id="run_resumed_001",
         )
     )
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     result = agent.resume("thread_sales_001", {"approved": True})
@@ -392,7 +398,7 @@ def test_resume_does_not_update_backend_status_without_terminal_state(monkeypatc
         "latest_user_query": "월별 매출 추이를 분석해줘",
     }
     graph = CapturingGraph(result=result)
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     returned = agent.resume("thread_sales_001", {"approved": True})
@@ -410,7 +416,7 @@ def test_resume_does_not_update_backend_status_for_running_terminal_state(monkey
         "latest_user_query": "월별 매출 추이를 분석해줘",
     }
     graph = CapturingGraph(result=result)
-    agent = SupervisorAgent(adapter, checkpoint_path=":memory:", use_llm_decision=False)
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
 
     returned = agent.resume("thread_sales_001", {"approved": True})
