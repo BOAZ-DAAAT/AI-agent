@@ -12,23 +12,18 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "~openai/gpt-latest"
+DEFAULT_LLM_MODEL = "~openai/gpt-latest"
 
 
-def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_OPENROUTER_MODEL) -> str:
-    specific_model = os.getenv(env_name)
-    if specific_model:
-        return specific_model
-    if os.getenv("OPENROUTER_API_KEY"):
-        return os.getenv("OPENROUTER_MODEL") or default
-    return os.getenv("AGENT_MODEL") or default
+def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_LLM_MODEL) -> str:
+    return os.getenv(env_name) or default
 
 
 def get_chat_model(
     *,
     model: str | None = None,
     model_env: str = "LLM_MODEL",
-    default_model: str = DEFAULT_OPENROUTER_MODEL,
+    default_model: str = DEFAULT_LLM_MODEL,
     temperature: float = 0,
     **kwargs: Any,
 ) -> Any:
@@ -39,7 +34,7 @@ def get_chat_model(
     if not api_key:
         if google_key:
             return ChatGoogleGenerativeAI(
-                model=os.getenv("GOOGLE_MODEL") or os.getenv("LLM_MODEL") or "gemini-2.5-flash",
+                model=model or get_model_name(model_env, default_model),
                 temperature=temperature,
                 google_api_key=google_key,
                 **kwargs,

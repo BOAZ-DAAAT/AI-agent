@@ -13,7 +13,7 @@ from urllib import error, request
 
 from pydantic import BaseModel, Field
 
-from DATA_Analyst_Assistant_Agent.shared.llm import DEFAULT_OPENROUTER_MODEL, OPENROUTER_BASE_URL, get_model_name
+from DATA_Analyst_Assistant_Agent.shared.llm import DEFAULT_LLM_MODEL, OPENROUTER_BASE_URL, get_model_name
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
 
 
@@ -172,7 +172,7 @@ def _call_openrouter_planner(*, api_key: str, system_prompt: str, user_query: st
     if os.getenv("OPENROUTER_APP_TITLE"):
         headers["X-OpenRouter-Title"] = os.getenv("OPENROUTER_APP_TITLE", "")
     payload = {
-        "model": get_model_name(default=DEFAULT_OPENROUTER_MODEL),
+        "model": get_model_name(default=DEFAULT_LLM_MODEL),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query},
@@ -192,7 +192,7 @@ def _call_openrouter_planner(*, api_key: str, system_prompt: str, user_query: st
 
 
 def _call_gemini_planner(*, api_key: str, system_prompt: str, user_query: str) -> str:
-    model_name = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+    model_name = get_model_name(default=DEFAULT_LLM_MODEL)
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
