@@ -171,7 +171,7 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
             "terminal_state": state.get("terminal_state", ""),
         },
         max_text=120,
-        max_items=3,
+        max_items=8,
         depth=3,
     )
 

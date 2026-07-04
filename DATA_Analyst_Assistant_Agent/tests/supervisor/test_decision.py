@@ -278,9 +278,19 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     assert len(model.messages) == 2
     assert model.messages[0]["role"] == "system"
     assert model.messages[1]["role"] == "user"
-    assert len(model.messages[1]["content"]) <= 6000
+    assert len(model.messages[1]["content"]) <= 12000
     snapshot = json.loads(model.messages[1]["content"])
     assert snapshot["query"] == "월별 매출 추이를 분석해줘"
+    assert snapshot["available_next_actions"] == [
+        "clarify",
+        "create_plan",
+        "call_sql_agent",
+        "call_eda_agent",
+        "call_analysis_agent",
+        "call_report_agent",
+        "finalize",
+        "fail",
+    ]
 
 
 def test_invoke_supervisor_decision_requires_model() -> None:
