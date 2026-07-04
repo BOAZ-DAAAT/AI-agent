@@ -1,0 +1,30 @@
+# 버전 관리 / 히스토리 (수백 MB, 이미지에 불필요)
+.git
+.gitignore
+
+# 파이썬 캐시 / 로컬 가상환경 (이미지 안에서 새로 설치함)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# 비밀값 — 절대 이미지에 넣지 않는다 (실행 시 env로 주입)
+.env
+.env.*
+!.env.example
+
+# 로컬 데이터 (볼륨으로 마운트하므로 이미지엔 넣지 않음)
+.data_agent/
+
+# 개발 도구 / OS 부산물
+.claude/
+.omc/
+.vscode/
+.idea/
+.DS_Store
+
+# 배포 이미지에 불필요한 것
+tests/
+docs/
