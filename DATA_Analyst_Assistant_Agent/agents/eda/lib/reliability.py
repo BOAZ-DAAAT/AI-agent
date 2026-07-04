@@ -69,6 +69,10 @@ def detect_data_level(df: pd.DataFrame, key_col: Optional[str] = None,
         result["reason"] = "판정 신호 부족(key_col 없음/집계명 없음) — 보류"
 
     result["aggregated_named_columns"] = agg_cols
+    # 계약형 필드(analysis_constraints 근거) — 기존 data_level에 보강(별도 data_grain 안 만듦)
+    result["is_aggregated"] = (result["level"] == "aggregated")
+    # EDA는 SQL이 준 데이터만 봄 → 원본 row-level 별도 제공 여부는 여기서 모름(기본 False)
+    result["raw_observation_level_available"] = False
     return result
 
 
@@ -176,28 +180,120 @@ def correct_hypothesis_feasibility(df: pd.DataFrame, hypotheses_text: str,
     return "\n".join(lines), corrections
 
 
+SEVERE_IMBALANCE_TOP1_SHARE = 0.8  # 최빈 범주가 이 비율 이상이면 심한 클래스 불균형
+
+
 def build_cautions(data_level: Dict[str, Any], reliability: Dict[str, Any],
-                   correlation_pairs: Optional[Dict[str, float]] = None) -> List[str]:
-    """진단 결과 + 정적 주의사항을 사람이 읽을 문장 리스트로."""
-    cautions: List[str] = []
+                   correlation_pairs: Optional[Dict[str, Any]] = None,
+                   distribution: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """진단 결과 → 계약형 구조체 리스트(rule 기반). LLM 없음(순수 코드).
+
+    각 caution: code(영어 태그)·source·severity·message_ko(한국어)·implication·recommended_action[].
+    hard 제약은 여기 안 넣음 — analysis_constraints(build_analysis_constraints)가 담당.
+    caution↔constraint 연결은 constraint_ids로. (LLM inferred caution은 insight.py에서 별도로 붙임)
+    """
+    cautions: List[Dict[str, Any]] = []
+
+    # ① 집계 데이터 — grain mismatch (C001 계약과 연결)
+    if data_level.get("level") == "aggregated":
+        grain = data_level.get("grain_hint") or "집계 단위"
+        cautions.append({
+            "code": "AGGREGATED_DATA",
+            "source": "rule",
+            "severity": "high",
+            "message_ko": (f"집계 데이터({grain})로 판단됨. 개별 관측 수준 분석(분포 형태·회귀·이상치)은 "
+                           "부적합하고 집계 단위 비교·추세 해석에 적합."),
+            "implication": "avoid_individual_level_inference",
+            "recommended_action": ["use_group_level_analysis", "avoid_row_level_regression"],
+            "constraint_ids": ["C001"],
+        })
+
+    # ② 표본 적은 그룹
+    if reliability.get("low_n_count"):
+        groups = reliability.get("low_n_groups", [])[:5]
+        cautions.append({
+            "code": "SMALL_GROUP_SIZE",
+            "source": "rule",
+            "severity": "medium",
+            "message_ko": f"표본 적은 그룹 {reliability['low_n_count']}개 존재. 기준 n<{reliability.get('threshold')}.",
+            "threshold": reliability.get("threshold"),
+            "affected_groups": [{"group": str(g["group"]), "n": int(g["n"])} for g in groups],
+            "implication": "unstable_group_statistics",
+            "recommended_action": ["merge_small_groups", "exclude_from_rankings", "show_uncertainty"],
+        })
+
+    # ③ 심한 클래스 불균형 (범주형 분포 top1_share 기반) — 새 rule detector
+    imbalanced = []
+    for col, d in (distribution or {}).items():
+        if not isinstance(d, dict) or d.get("type") != "categorical" or d.get("is_id_like"):
+            continue
+        share = d.get("top1_share")
+        if share is not None and share >= SEVERE_IMBALANCE_TOP1_SHARE:
+            imbalanced.append({"column": col, "top1_share": share, "mode": d.get("mode")})
+    if imbalanced:
+        cols_txt = ", ".join(f"{x['column']}({x['top1_share']:.0%})" for x in imbalanced)
+        cautions.append({
+            "code": "SEVERE_CLASS_IMBALANCE",
+            "source": "rule",
+            "severity": "medium",
+            "message_ko": (f"최빈 범주가 {int(SEVERE_IMBALANCE_TOP1_SHARE*100)}% 이상 차지하는 "
+                           f"심한 불균형 컬럼 존재: {cols_txt}."),
+            "affected_columns": imbalanced,
+            "implication": "biased_toward_majority_class",
+            "recommended_action": ["group_rare_categories", "report_per_class_metrics",
+                                   "avoid_accuracy_only_evaluation"],
+        })
+
+    # ④ 상관 ≠ 인과
+    def _abs_r(v):
+        r = v.get("pearson_r") if isinstance(v, dict) else v   # 관계객체/실수 둘 다 지원
+        return abs(r) if r is not None else 0.0
+    if correlation_pairs and any(_abs_r(v) >= 0.3 for v in correlation_pairs.values()):
+        # 교란변수 후보 = 실제 범주형 컬럼명(있으면), 없으면 일반 예시
+        confounders = [c for c, d in (distribution or {}).items()
+                       if isinstance(d, dict) and d.get("type") == "categorical" and not d.get("is_id_like")][:3]
+        cautions.append({
+            "code": "CORRELATION_NOT_CAUSATION",
+            "source": "rule",
+            "severity": "medium",
+            "message_ko": "관찰된 상관은 인과가 아니며, 교란변수 통제가 필요할 수 있음.",
+            "possible_confounders": confounders or ["category", "region", "price"],
+            "implication": "avoid_causal_claims",
+            "recommended_action": ["use_control_variables_if_modeling", "phrase_as_association"],
+        })
+
+    return cautions
+
+
+def build_analysis_constraints(data_level: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """rule 기반 hard 분석 계약(allowed/blocked operations). LLM 없음(순수 코드).
+
+    caution의 constraint_ids가 여기 id를 가리킨다. **LLM inferred caution은 여기로 오지 않는다**
+    (hard contract = rule only). unless는 예외 조건(딱딱함 완화).
+    """
+    constraints: List[Dict[str, Any]] = []
 
     if data_level.get("level") == "aggregated":
         grain = data_level.get("grain_hint") or "집계 단위"
-        cautions.append(
-            f"집계 데이터({grain})로 판단됨 → 개별 관측 수준 분석(분포 형태·회귀·이상치)은 부적합하고, "
-            "집계 단위 비교·추세 해석에 적합."
-        )
-    elif data_level.get("level") == "raw":
-        cautions.append("개별 관측(raw) 데이터로 판단됨 → 분포·회귀·그룹 분포 비교 가능.")
+        constraints.append({
+            "id": "C001",
+            "source": "rule",
+            "type": "grain_mismatch",
+            "severity": "high",
+            "allowed_operations": [
+                "group_level_summary",
+                "group_level_comparison",
+                "ranking",
+                "descriptive_correlation_with_caveat",
+            ],
+            "blocked_operations": [
+                "individual_distribution_inference",
+                "individual_level_outlier_detection",
+                "individual_level_regression_interpretation",
+                "causal_claim",
+            ],
+            "reason_ko": f"데이터가 {grain} 단위 집계이므로 개별 주문/고객/상품 수준의 분포나 관계로 해석하면 안 됨.",
+            "unless": "raw_observation_level_data_is_provided",
+        })
 
-    if reliability.get("low_n_count"):
-        ex = ", ".join(f"{g['group']}(n={g['n']})" for g in reliability.get("low_n_groups", [])[:3])
-        cautions.append(
-            f"표본 적은 그룹 {reliability['low_n_count']}개 존재({ex} 등, 기준 {reliability.get('threshold')}) "
-            "→ 해당 그룹의 평균·비교는 신뢰도 낮으니 통합/제외 고려."
-        )
-
-    if correlation_pairs and any(abs(v) >= 0.3 for v in correlation_pairs.values()):
-        cautions.append("관찰된 상관은 인과가 아니며, 교란변수(카테고리·지역·가격 등) 통제가 필요할 수 있음.")
-
-    return cautions
+    return constraints

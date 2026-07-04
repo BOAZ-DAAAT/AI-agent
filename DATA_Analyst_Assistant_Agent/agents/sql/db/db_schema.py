@@ -15,10 +15,10 @@ def enrich_schema_descriptions(engine, schema_data): # engine 인자 추가
     수정 사항: 샘플 데이터 10개를 직접 추출하여 프롬프트에 포함하고, 
     결과 구조에도 sample_data를 추가합니다.
     """
-    model_name = os.getenv("SCHEMA_LLM_MODEL") or os.getenv("OPENROUTER_MODEL") or os.getenv("LLM_MODEL")
+    model_name = os.getenv("LLM_MODEL")
 
     if not model_name:
-        raise ValueError("🚨 .env에 'SCHEMA_LLM_MODEL'이 설정되지 않았습니다.")
+        raise ValueError("🚨 .env에 'LLM_MODEL'이 설정되지 않았습니다.")
 
     llm = get_chat_model(model=model_name, temperature=0)
     print(f"🤖 {model_name} 모델이 샘플 데이터를 분석 중입니다... (비용 발생)")

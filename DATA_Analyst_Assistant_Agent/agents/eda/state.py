@@ -53,8 +53,9 @@ class EDAState(TypedDict, total=False):
     has_time_column: bool
 
     # 데이터 한계 자가점검 (insight 노드, 코드 기반)
-    data_level: Dict[str, Any]            # {level: raw|aggregated|..., grain_hint, reason}
-    cautions: List[str]                   # 해석 주의사항(집계한계·표본부족·상관≠인과 등)
+    data_level: Dict[str, Any]            # {level, grain_hint, reason, is_aggregated, raw_observation_level_available}
+    cautions: List[Dict[str, Any]]        # 계약형 주의사항 구조체(code·severity·message_ko·recommended_action·source)
+    analysis_constraints: List[Dict[str, Any]]  # rule 기반 hard 계약(allowed/blocked_operations·reason_ko·unless)
 
     # 최종 출력
     insight_result: str

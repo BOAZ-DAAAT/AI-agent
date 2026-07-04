@@ -43,6 +43,20 @@ class FakeChatModel:
         return FakeStructuredModel(self.response, self.error)
 
 
+class FakeCodeGeneratorModel:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    def invoke(self, messages):
+        assert len(messages) == 2
+
+        class Response:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        return Response(self.content)
+
+
 def _execution_plan(
     *,
     question_type: str = "comparison",
@@ -479,6 +493,106 @@ def test_internal_workflow_runs_plan_execute_validate_nodes() -> None:
     assert all(check.passed for check in checks)
 
 
+def test_workflow_routes_needed_chart_to_multimodal_reader() -> None:
+    state = _state("run_visual", "배송일과 리뷰 점수 관계를 분석해줘")
+    df = pd.DataFrame({"delivery_days": [1, 5, 20], "review_score": [5, 4, 1]})
+    eda_profile = {
+        "statistical_metadata": {
+            "correlation_pairs": {
+                "corr_delivery_days_vs_review_score": {
+                    "pearson_r": -0.7,
+                    "spearman_r": -0.8,
+                    "n": 3,
+                    "binned_trend": [{"x_range": [1, 20], "y_median": 4, "n": 3}],
+                }
+            }
+        },
+        "key_charts": [
+            {
+                "filename": "scatter_delivery_days_vs_review_score.png",
+                "artifact_id": "art_chart",
+                "chart_type": "scatter",
+            }
+        ],
+    }
+
+    def fake_loader(artifact_id: str) -> bytes:
+        assert artifact_id == "art_chart"
+        return b"png-bytes"
+
+    def fake_reader(chart: dict, image_bytes: bytes, workflow_state: dict) -> dict:
+        assert image_bytes == b"png-bytes"
+        return {
+            "status": "read_success",
+            "multimodal_summary": "산점도는 전반적인 우하향 패턴을 보입니다.",
+            "cautions": ["시각 해석은 멀티모달 리더가 수행했습니다."],
+        }
+
+    result, checks, terminal_reason = run_analysis_workflow(
+        state,
+        df,
+        [eda_profile],
+        question_type="correlation",
+        planner_model=FakeChatModel(_execution_plan(
+            question_type="correlation",
+            analysis_kind="correlation",
+            analysis_subtype="pearson_correlation",
+            tool_names=["measure_correlation"],
+            metric=None,
+            dimension=None,
+            feature_columns=["delivery_days", "review_score"],
+        )),
+        chart_artifact_loader=fake_loader,
+        chart_reader=fake_reader,
+    )
+
+    assert terminal_reason == "validated_result"
+    assert all(check.passed for check in checks)
+    assert result["chart_status"] == "read_success"
+    assert result["visual_evidence"][0]["chart_artifact_id"] == "art_chart"
+    assert result["visual_evidence"][0]["multimodal_summary"].startswith("산점도")
+
+
+def test_workflow_does_not_infer_visuals_without_chart_artifact() -> None:
+    state = _state("run_visual_unavailable", "배송일과 리뷰 점수 관계를 분석해줘")
+    df = pd.DataFrame({"delivery_days": [1, 5, 20], "review_score": [5, 4, 1]})
+    eda_profile = {
+        "statistical_metadata": {
+            "correlation_pairs": {
+                "corr_delivery_days_vs_review_score": {
+                    "pearson_r": -0.7,
+                    "spearman_r": -0.8,
+                    "n": 3,
+                    "binned_trend": [{"x_range": [1, 20], "y_median": 4, "n": 3}],
+                }
+            }
+        },
+        "key_charts": [{"filename": "scatter_delivery_days_vs_review_score.png", "artifact_id": None}],
+    }
+
+    result, checks, terminal_reason = run_analysis_workflow(
+        state,
+        df,
+        [eda_profile],
+        question_type="correlation",
+        planner_model=FakeChatModel(_execution_plan(
+            question_type="correlation",
+            analysis_kind="correlation",
+            analysis_subtype="pearson_correlation",
+            tool_names=["measure_correlation"],
+            metric=None,
+            dimension=None,
+            feature_columns=["delivery_days", "review_score"],
+        )),
+    )
+
+    assert terminal_reason == "validated_result"
+    assert all(check.passed for check in checks)
+    assert result["chart_status"] == "needed_unavailable"
+    assert result["visual_evidence"] == []
+    assert any("no visual evidence was inspected" in item for item in result["limitations"])
+
+
 def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter) -> None:
     run = adapter.create_run()
     sql_ref = adapter.register_artifact(
@@ -526,3 +640,44 @@ def test_invalid_llm_plan_is_rejected_without_substitution() -> None:
 
     with pytest.raises(ValueError, match="unknown tools"):
         build_analysis_plan(context, model=FakeChatModel(invalid))
+
+
+def test_general_task_uses_code_generator_model_for_custom_analysis() -> None:
+    state = _state("run_general_task", "Find the revenue share of the top category.")
+    df = pd.DataFrame({"category": ["A", "B", "B"], "revenue": [10, 20, 30]})
+    plan = _execution_plan(
+        question_type="general_task",
+        analysis_kind="general_task",
+        analysis_subtype="llm_code_generated_analysis",
+        tool_names=["code_generator"],
+        metric=None,
+        dimension=None,
+        feature_columns=[],
+    )
+    code_model = FakeCodeGeneratorModel(json.dumps({
+        "python_code": (
+            "total = float(df['revenue'].sum())\n"
+            "by_category = df.groupby('category')['revenue'].sum().sort_values(ascending=False)\n"
+            "top_category = str(by_category.index[0])\n"
+            "top_share = float(by_category.iloc[0] / total)\n"
+            "result = {\n"
+            "  'summary': 'Top category revenue share computed.',\n"
+            "  'findings': [f'Top category is {top_category} with {top_share:.1%} of revenue.'],\n"
+            "  'statistics': {'top_category': top_category, 'top_share': top_share},\n"
+            "  'limitations': []\n"
+            "}\n"
+        ),
+        "rationale": "Custom aggregation is outside the specialized catalog.",
+    }))
+
+    payload = build_analysis_result(
+        state,
+        dataframe=df,
+        execution_plan=plan,
+        code_generator_model=code_model,
+    )
+
+    assert payload["plan"]["question_type"] == "general_task"
+    assert payload["evidence"][0]["tool_name"] == "code_generator"
+    assert payload["evidence"][0]["statistics"]["statistics"]["top_category"] == "B"
+    assert "Top category is B with 83.3% of revenue." in payload["key_findings"]

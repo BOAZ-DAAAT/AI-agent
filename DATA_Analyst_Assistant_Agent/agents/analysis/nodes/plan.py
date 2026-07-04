@@ -13,7 +13,10 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 
-ALLOWED_TOOLS = {tool for capability in CAPABILITIES.values() for tool in capability.tools} | {"analyze_trend"}
+ALLOWED_TOOLS = {tool for capability in CAPABILITIES.values() for tool in capability.tools} | {
+    "analyze_trend",
+    "code_generator",
+}
 
 COLUMN_PARAMETER_KEYS = {
     "metric",
@@ -120,6 +123,8 @@ def normalize_question_type(value: str | None) -> str | None:
         "customer_lifetime_value": "clv", "lifetime_value": "clv",
         "spatial": "geospatial", "geo": "geospatial", "\uacf5\uac04\ubd84\uc11d": "geospatial",
         "allocation": "optimization", "optimize": "optimization", "\ucd5c\uc801\ud654": "optimization",
+        "other": "general_task", "misc": "general_task", "\uae30\ud0c0": "general_task",
+        "general": "general_task", "general_analysis": "general_task",
     }
     normalized = value.strip().casefold().replace("-", "_").replace(" ", "_")
     return aliases.get(normalized, normalized)

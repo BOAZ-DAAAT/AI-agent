@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import pandas as pd
@@ -11,6 +12,37 @@ from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, r
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
+
+
+def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context):
+    """key 차트 PNG를 아티팩트로 등록한다 — **이상적 형태(content_bytes)** 로 호출.
+
+    adapter가 아직 바이너리(content_bytes)를 지원하지 않으면 가드로 잡아 artifact_id=None 폴백한다
+    (파이프라인 안 막음). 백엔드가 adapter에 content_bytes를 열면 코드 변경 없이 실제 등록이 작동한다.
+    분석 에이전트는 경로 대신 artifact_id로 차트를 로드(멀티모달)한다.
+    반환: [{"filename": str, "artifact_id": str | None}, ...]
+    """
+    entries: list[dict[str, Any]] = []
+    for path in chart_paths or []:
+        filename = os.path.basename(path)
+        artifact_id = None
+        try:
+            with open(path, "rb") as fh:
+                png_bytes = fh.read()
+            ref = runtime.adapter.register_artifact(
+                state.run_id,
+                ArtifactType.chart,
+                content_bytes=png_bytes,   # 이상형 — 백엔드가 content_bytes 열면 실제 저장
+                filename=filename,
+                created_by_tool="DATA_Analyst_Assistant_Agent.eda.lang_graph",
+                context=context,
+                parent_ids=parent_ids,
+            )
+            artifact_id = ref.artifact_id
+        except Exception:  # noqa: BLE001  # adapter 미지원/파일 없음 등 → 폴백
+            artifact_id = None
+        entries.append({"filename": filename, "artifact_id": artifact_id})
+    return entries
 
 
 class EDAAgent:
@@ -25,6 +57,10 @@ class EDAAgent:
         # 원본 LangGraph EDA 실행 (planner → 분석 노드 → insight/hypothesis → chart_selector)
         eda_result = self._run_eda_graph(csvs, state)
 
+        # key 차트 PNG를 아티팩트로 등록(이상형+가드) → 경로 대신 {filename, artifact_id}로 전달
+        key_chart_refs = register_key_chart_artifacts(
+            runtime, state, eda_result.get("key_charts", []), source_ids, context)
+
         payload = {
             "run_id": state.run_id,
             "source_artifacts": source_ids,
@@ -37,8 +73,9 @@ class EDAAgent:
             "analysis_target": eda_result.get("analysis_target", ""),
             "data_level": eda_result.get("data_level", {}),
             "cautions": eda_result.get("cautions", []),
+            "analysis_constraints": eda_result.get("analysis_constraints", []),
             "statistical_metadata": eda_result.get("statistical_metadata", {}),
-            "key_charts": eda_result.get("key_charts", []),
+            "key_charts": key_chart_refs,
             "error_log": eda_result.get("error_log", []),
         }
         ref = runtime.adapter.register_artifact(
@@ -64,8 +101,6 @@ class EDAAgent:
             artifact_refs=[ref],
             validation=ValidationBlock(local_checks=run_eda_self_check(source_ids, profile)),
             # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
-            # 빈 값으로 명시(공용 기본값 "validation_agent"가 삭제된 에이전트라 폴백 방지).
-            next_handoff="",
         )
 
     def _run_eda_graph(self, csvs: list[Any], state: OrchestrationState) -> dict[str, Any]:

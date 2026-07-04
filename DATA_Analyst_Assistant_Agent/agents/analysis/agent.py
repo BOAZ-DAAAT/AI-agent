@@ -26,13 +26,16 @@ class AnalysisAgent:
         *,
         question_type: str | None = None,
         planner_model: Any | None = None,
+        code_generator_model: Any | None = None,
+        chart_artifact_loader: Any | None = None,
+        chart_reader: Any | None = None,
     ) -> AgentEnvelope:
         context = runtime.context(state, node_name=self.name, tool_name="analysis_agent.result")
         parent_ids = state.artifact_ids.get("eda_agent", []) + state.artifact_ids.get("sql_agent", [])
         eda_profiles = []
         for artifact_id in state.artifact_ids.get("eda_agent", []):
             payload = read_json_artifact(runtime, artifact_id)
-            eda_profiles.append(payload.get("profile", payload))
+            eda_profiles.append(payload)
         csvs = read_sql_result_csvs(state, runtime)
         result, local_checks, terminal_reason = run_analysis_workflow(
             state,
@@ -40,6 +43,9 @@ class AnalysisAgent:
             eda_profiles,
             question_type=question_type,
             planner_model=planner_model,
+            code_generator_model=code_generator_model,
+            chart_artifact_loader=chart_artifact_loader,
+            chart_reader=chart_reader,
         )
         ref = runtime.adapter.register_artifact(
             state.run_id,
@@ -76,5 +82,4 @@ class AnalysisAgent:
                 reason=review["reason"],
                 approval_type="analysis.review" if review["required"] else "",
             ),
-            next_handoff="validation_agent",
         )
