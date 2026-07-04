@@ -16,9 +16,12 @@ DEFAULT_OPENROUTER_MODEL = "~openai/gpt-latest"
 
 
 def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_OPENROUTER_MODEL) -> str:
+    specific_model = os.getenv(env_name)
+    if specific_model:
+        return specific_model
     if os.getenv("OPENROUTER_API_KEY"):
         return os.getenv("OPENROUTER_MODEL") or default
-    return os.getenv(env_name) or os.getenv("AGENT_MODEL") or default
+    return os.getenv("AGENT_MODEL") or default
 
 
 def get_chat_model(
