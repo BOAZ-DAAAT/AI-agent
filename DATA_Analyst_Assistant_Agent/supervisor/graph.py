@@ -414,7 +414,11 @@ def build_graph(
             "finalize": "finalize",
         },
     )
-    graph.add_edge("validate_subagent_result", "summarize_step")
+    graph.add_conditional_edges(
+        "validate_subagent_result",
+        _route_after_validate,
+        {"summarize_step": "summarize_step", "finalize": "finalize"},
+    )
     graph.add_conditional_edges(
         "summarize_step",
         _route_after_summarize,
@@ -475,6 +479,22 @@ def _decision_failure_updates(state: SupervisorState, node: str, exc: Exception)
             "message": str(exc),
         }
     )
+
+    current_terminal_state = state.get("terminal_state")
+    if current_terminal_state in FINALIZE_PROTECTED_TERMINAL_STATES:
+        return {
+            "terminal_state": current_terminal_state,
+            "next_action": "finalize",
+            "final_answer": state.get("final_answer")
+            or _default_final_answer_for_terminal_state(state, current_terminal_state),
+            "current_step": node,
+            "decision_errors": errors,
+            "error_state": {
+                "node": node,
+                "message": message,
+            },
+        }
+
     return {
         "terminal_state": SupervisorTerminalState.failed_terminal.value,
         "next_action": "finalize",
@@ -537,6 +557,12 @@ def _route_after_execute(state: SupervisorState) -> str:
     return "finalize"
 
 
+def _route_after_validate(state: SupervisorState) -> str:
+    if state.get("terminal_state") in TERMINAL_STATES:
+        return "finalize"
+    return "summarize_step"
+
+
 def _route_after_summarize(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
@@ -545,3 +571,33 @@ def _route_after_summarize(state: SupervisorState) -> str:
     if state.get("next_action") in {"finalize", "fail"}:
         return "finalize"
     return "decide_next_action"
+
+
+def _default_final_answer_for_terminal_state(
+    state: SupervisorState,
+    terminal_state: str,
+) -> str:
+    if terminal_state == SupervisorTerminalState.needs_user_approval.value:
+        pending_approval = state.get("pending_approval")
+        if isinstance(pending_approval, dict):
+            reason = str(pending_approval.get("reason") or "")
+            if reason:
+                return reason
+        return "사용자 승인이 필요합니다."
+
+    if terminal_state == SupervisorTerminalState.needs_clarification.value:
+        return state.get("clarification_question") or "추가 확인이 필요합니다."
+
+    error_state = state.get("error_state")
+    if isinstance(error_state, dict):
+        message = str(error_state.get("message") or "")
+        if message:
+            return message
+
+    if terminal_state == SupervisorTerminalState.failed_with_recoverable_context.value:
+        return "복구 가능한 컨텍스트가 있지만 현재 요청을 완료하지 못했습니다."
+
+    if terminal_state == SupervisorTerminalState.failed_terminal.value:
+        return "요청을 완료할 수 없습니다."
+
+    return "요청 처리를 종료했습니다."

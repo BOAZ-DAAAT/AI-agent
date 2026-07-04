@@ -363,7 +363,6 @@ def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
         _plan_decision(),
         _next_action_decision("call_sql_agent"),
         _guard_decision("call_sql_agent"),
-        _summary_decision("sql_agent", next_action="finalize"),
         _final_decision("needs_user_approval", "사용자 승인이 필요합니다."),
     ]
     graph = build_graph(subagent_adapter=adapter, model=SequencedDecisionModel(decisions))
@@ -379,6 +378,46 @@ def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
     }
     assert result["completed_agents"] == []
     assert result["final_answer"] == "사용자 승인이 필요합니다."
+    assert "summarize_step" not in [entry["node"] for entry in result["llm_decisions"]]
+
+
+def test_approval_required_result_preserves_terminal_state_when_finalize_llm_fails() -> None:
+    adapter = FakeSubAgentAdapter(
+        {
+            "sql_agent": AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent="sql_agent",
+                    status="approval_required",
+                    summary="SQL 실행 승인 필요",
+                )
+            )
+        }
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        model=SequencedDecisionModel(
+            [
+                _clarify_decision(),
+                _plan_decision(),
+                _next_action_decision("call_sql_agent"),
+                _guard_decision("call_sql_agent"),
+            ]
+        ),
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert result["terminal_state"] == "needs_user_approval"
+    assert result["pending_approval"] == {
+        "approval_id": "run_001:sql_agent:approval",
+        "agent": "sql_agent",
+        "reason": "SQL 실행 승인 필요",
+        "approval_type": "agent_approval",
+    }
+    assert result["decision_errors"][0]["node"] == "finalize"
+    assert result["error_state"]["node"] == "finalize"
+    assert result["final_answer"] == "SQL 실행 승인 필요"
+    assert "summarize_step" not in [entry["node"] for entry in result["llm_decisions"]]
 
 
 def test_deterministic_fallback_result_finalizes_terminally() -> None:
@@ -401,7 +440,6 @@ def test_deterministic_fallback_result_finalizes_terminally() -> None:
         _plan_decision(),
         _next_action_decision("call_analysis_agent"),
         _guard_decision("call_analysis_agent"),
-        _summary_decision("analysis_agent", next_action="finalize"),
         _final_decision("failed_terminal", "검증 실패로 종료합니다."),
     ]
     graph = build_graph(subagent_adapter=adapter, model=SequencedDecisionModel(decisions))
@@ -535,7 +573,6 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
             _plan_decision(),
             _next_action_decision("call_report_agent"),
             _guard_decision("call_report_agent"),
-            _summary_decision("report_agent", next_action="finalize"),
             _final_decision("failed_terminal", "리포트 산출물이 없습니다."),
         ]
     )
@@ -551,7 +588,6 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
         "create_analysis_plan",
         "decide_next_action",
         "execute_subagent",
-        "summarize_step",
         "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
@@ -577,7 +613,6 @@ def test_finalize_preserves_validation_terminal_state_when_llm_returns_completed
                 _plan_decision(),
                 _next_action_decision("call_report_agent"),
                 _guard_decision("call_report_agent"),
-                _summary_decision("report_agent", next_action="finalize"),
                 _final_decision("completed", "LLM은 완료로 판단했습니다."),
             ]
         ),
