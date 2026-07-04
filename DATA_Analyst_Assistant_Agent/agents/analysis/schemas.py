@@ -80,6 +80,18 @@ class AnalysisEvidence(BaseModel):
     caveats: list[str] = Field(default_factory=list)
 
 
+class VisualEvidence(BaseModel):
+    chart_artifact_id: str | None = None
+    filename: str | None = None
+    chart_type: str | None = None
+    related_block: str | None = None
+    related_keys: list[str] = Field(default_factory=list)
+    variables: list[str] = Field(default_factory=list)
+    status: Literal["read_success", "not_available", "fetch_failed", "reader_failed", "reader_unavailable"] = "not_available"
+    multimodal_summary: str = ""
+    cautions: list[str] = Field(default_factory=list)
+
+
 class HypothesisSummary(BaseModel):
     null_hypothesis: str
     alternative_hypothesis: str
@@ -109,4 +121,7 @@ class AnalysisResult(BaseModel):
     source_artifacts: dict[str, list[str]] = Field(default_factory=dict)
     data_quality_notes: list[str] = Field(default_factory=list)
     eda_profile_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    chart_requests: list[dict[str, Any]] = Field(default_factory=list)
+    visual_evidence: list[VisualEvidence] = Field(default_factory=list)
+    chart_status: str = "not_needed"
     human_review: HumanReview = Field(default_factory=HumanReview)
