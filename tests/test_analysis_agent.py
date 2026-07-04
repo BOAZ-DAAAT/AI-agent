@@ -43,6 +43,20 @@ class FakeChatModel:
         return FakeStructuredModel(self.response, self.error)
 
 
+class FakeCodeGeneratorModel:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    def invoke(self, messages):
+        assert len(messages) == 2
+
+        class Response:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        return Response(self.content)
+
+
 def _execution_plan(
     *,
     question_type: str = "comparison",
@@ -626,3 +640,44 @@ def test_invalid_llm_plan_is_rejected_without_substitution() -> None:
 
     with pytest.raises(ValueError, match="unknown tools"):
         build_analysis_plan(context, model=FakeChatModel(invalid))
+
+
+def test_general_task_uses_code_generator_model_for_custom_analysis() -> None:
+    state = _state("run_general_task", "Find the revenue share of the top category.")
+    df = pd.DataFrame({"category": ["A", "B", "B"], "revenue": [10, 20, 30]})
+    plan = _execution_plan(
+        question_type="general_task",
+        analysis_kind="general_task",
+        analysis_subtype="llm_code_generated_analysis",
+        tool_names=["code_generator"],
+        metric=None,
+        dimension=None,
+        feature_columns=[],
+    )
+    code_model = FakeCodeGeneratorModel(json.dumps({
+        "python_code": (
+            "total = float(df['revenue'].sum())\n"
+            "by_category = df.groupby('category')['revenue'].sum().sort_values(ascending=False)\n"
+            "top_category = str(by_category.index[0])\n"
+            "top_share = float(by_category.iloc[0] / total)\n"
+            "result = {\n"
+            "  'summary': 'Top category revenue share computed.',\n"
+            "  'findings': [f'Top category is {top_category} with {top_share:.1%} of revenue.'],\n"
+            "  'statistics': {'top_category': top_category, 'top_share': top_share},\n"
+            "  'limitations': []\n"
+            "}\n"
+        ),
+        "rationale": "Custom aggregation is outside the specialized catalog.",
+    }))
+
+    payload = build_analysis_result(
+        state,
+        dataframe=df,
+        execution_plan=plan,
+        code_generator_model=code_model,
+    )
+
+    assert payload["plan"]["question_type"] == "general_task"
+    assert payload["evidence"][0]["tool_name"] == "code_generator"
+    assert payload["evidence"][0]["statistics"]["statistics"]["top_category"] == "B"
+    assert "Top category is B with 83.3% of revenue." in payload["key_findings"]

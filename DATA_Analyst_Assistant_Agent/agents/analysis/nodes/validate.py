@@ -45,6 +45,7 @@ def run_analysis_self_check(result: dict) -> list[LocalCheck]:
         "clv": {"clv"},
         "geospatial": {"geospatial"},
         "optimization": {"optimization"},
+        "general_task": {"general_task"},
     }
     allowed_kinds = expected_kinds.get(parsed.plan.question_type)
     return [
