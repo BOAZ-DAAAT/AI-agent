@@ -11,7 +11,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     ClarificationDecision,
     ExecutionGuardDecision,
     FinalizationDecision,
-    ResultValidationDecision,
     StepSummaryDecision,
     SupervisorDecision,
     build_clarification_context,
@@ -19,7 +18,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     build_finalization_context,
     build_next_action_context,
     build_plan_context,
-    build_result_validation_context,
     build_step_summary_context,
     invoke_supervisor_decision,
 )
@@ -29,7 +27,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     EXECUTION_GUARD_DECISION_PROMPT,
     FINALIZE_DECISION_PROMPT,
     PLAN_DECISION_PROMPT,
-    RESULT_VALIDATION_DECISION_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -41,6 +38,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     merge_agent_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+from DATA_Analyst_Assistant_Agent.supervisor.validation import (
+    validate_subagent_result as validate_subagent_result_contract,
+)
 
 
 ACTION_TO_AGENT: dict[NextAction, AgentName] = {
@@ -51,6 +51,12 @@ ACTION_TO_AGENT: dict[NextAction, AgentName] = {
 }
 
 TERMINAL_STATES = {item.value for item in SupervisorTerminalState}
+FINALIZE_PROTECTED_TERMINAL_STATES = {
+    SupervisorTerminalState.failed_terminal.value,
+    SupervisorTerminalState.needs_user_approval.value,
+    SupervisorTerminalState.needs_clarification.value,
+    SupervisorTerminalState.failed_with_recoverable_context.value,
+}
 
 
 def make_clarify_query_node(model: Any | None):
@@ -220,37 +226,40 @@ def make_validate_subagent_result_node(model: Any | None):
                 extra_updates={"last_agent_result": {}},
             )
 
-        try:
-            decision = invoke_supervisor_decision(
-                state,
-                model,
-                RESULT_VALIDATION_DECISION_PROMPT,
-                ResultValidationDecision,
-                extra=build_result_validation_context(state),
-            )
-        except Exception as exc:
-            return _decision_failure_updates(state, "validate_subagent_result", exc)
+        decision = validate_subagent_result_contract(state, result)
+        raw_next_action = decision.next_action
+        next_action = raw_next_action
+        terminal_state = state.get("terminal_state") or "running"
+        final_answer = ""
+
+        if raw_next_action == "fail":
+            terminal_state = SupervisorTerminalState.failed_terminal.value
+            next_action = "finalize"
+            final_answer = decision.reason
+        elif terminal_state in TERMINAL_STATES:
+            next_action = "finalize"
+        else:
+            terminal_state = "running"
 
         validation_results = list(state.get("validation_results", []))
         validation_results.append(
             {
                 "agent": result.agent,
                 "valid": decision.valid,
-                "next_action": decision.next_action,
-                "terminal_state": decision.terminal_state,
+                "next_action": next_action,
+                "terminal_state": terminal_state,
                 "reason": decision.reason,
             }
         )
 
         updates: SupervisorState = {
             "validation_results": validation_results,
-            "next_action": decision.next_action,
-            "terminal_state": decision.terminal_state,
+            "next_action": next_action,
+            "terminal_state": terminal_state,
             "current_step": "validate_subagent_result",
-            "llm_decisions": _append_llm_decision(state, "validate_subagent_result", decision),
         }
-        if decision.final_answer:
-            updates["final_answer"] = decision.final_answer
+        if final_answer:
+            updates["final_answer"] = final_answer
 
         if decision.valid:
             updates["failed_agents"] = [
@@ -261,14 +270,7 @@ def make_validate_subagent_result_node(model: Any | None):
                 agent for agent in state.get("completed_agents", []) if agent != result.agent
             ]
 
-        if decision.next_action == "fail":
-            updates["terminal_state"] = SupervisorTerminalState.failed_terminal.value
-            updates["next_action"] = "finalize"
-            if not decision.final_answer:
-                updates["final_answer"] = decision.reason
-        elif decision.terminal_state in TERMINAL_STATES:
-            updates["next_action"] = "finalize"
-        elif not decision.valid and decision.next_action in ACTION_TO_AGENT:
+        if not decision.valid and raw_next_action in ACTION_TO_AGENT:
             retry_counts = dict(state.get("retry_counts", {}))
             retry_counts[result.agent] = int(retry_counts.get(result.agent, 0)) + 1
             updates["retry_counts"] = retry_counts
@@ -340,9 +342,15 @@ def make_finalize_node(model: Any | None):
         except Exception as exc:
             return _decision_failure_updates(state, "finalize", exc)
 
+        terminal_state = decision.terminal_state
+        current_terminal_state = state.get("terminal_state")
+        if current_terminal_state in FINALIZE_PROTECTED_TERMINAL_STATES:
+            terminal_state = current_terminal_state
+
+        final_answer = state.get("final_answer") or decision.final_answer
         return {
-            "terminal_state": decision.terminal_state,
-            "final_answer": decision.final_answer,
+            "terminal_state": terminal_state,
+            "final_answer": final_answer,
             "next_action": "finalize",
             "current_step": "finalize",
             "llm_decisions": _append_llm_decision(state, "finalize", decision),
