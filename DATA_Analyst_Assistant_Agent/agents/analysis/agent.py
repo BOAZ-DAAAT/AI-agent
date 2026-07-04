@@ -76,5 +76,4 @@ class AnalysisAgent:
                 reason=review["reason"],
                 approval_type="analysis.review" if review["required"] else "",
             ),
-            next_handoff="validation_agent",
         )

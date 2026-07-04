@@ -101,8 +101,6 @@ class EDAAgent:
             artifact_refs=[ref],
             validation=ValidationBlock(local_checks=run_eda_self_check(source_ids, profile)),
             # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
-            # 빈 값으로 명시(공용 기본값 "validation_agent"가 삭제된 에이전트라 폴백 방지).
-            next_handoff="",
         )
 
     def _run_eda_graph(self, csvs: list[Any], state: OrchestrationState) -> dict[str, Any]:

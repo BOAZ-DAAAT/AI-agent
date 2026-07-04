@@ -223,7 +223,6 @@ class SQLAgent:
                 "reason_code": retry_hint.get("reason_code", "main_sql_agent_validation" if has_error else "none"),
                 "details": retry_hint.get("details", {}),
             },
-            next_handoff="validation_agent",
         )
 
     @staticmethod
