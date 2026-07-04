@@ -23,16 +23,21 @@ MAX_NODE_RETRIES = 2  # 노드당 최대 재시도 횟수
 
 
 # -----------------------------
-# LLM 메모이즈 접근자
+# LLM 메모이즈 접근자 (모델별)
 # -----------------------------
-_llm = None
+_llms: dict[str, Any] = {}
 
 
-def get_llm():
-    global _llm
-    if _llm is None:
-        _llm = get_chat_model(temperature=0)
-    return _llm
+def get_llm(model_env: str = "LLM_MODEL"):
+    """model_env별로 메모이즈한 LLM 접근자.
+
+    기본은 LLM_MODEL(공용 텍스트 모델). codegen 등 특수 경로만 전용 모델을
+    model_env로 요청한다(예: get_llm("CODE_GENERATOR_MODEL")). 모델별로 따로
+    캐시하므로 한 실행에서 서로 다른 모델을 섞어 써도 캐시가 서로를 덮지 않는다.
+    """
+    if model_env not in _llms:
+        _llms[model_env] = get_chat_model(temperature=0, model_env=model_env)
+    return _llms[model_env]
 
 
 # -----------------------------

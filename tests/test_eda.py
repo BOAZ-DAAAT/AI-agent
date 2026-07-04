@@ -814,3 +814,34 @@ def test_insight_node_aggregated_key_col_becomes_group_key(monkeypatch):
     assert key_entry["semantic_type"] == "group_key"       # id 오판이 group_key로 교정
     assert key_entry["semantic_confidence"] == "high"
     assert key_entry["is_id_like"] is False
+
+
+# ─────────────────────────────
+# get_llm model_env 배선 (codegen 전용 모델 라우팅 선행) — 토큰 0
+# ─────────────────────────────
+def test_get_llm_caches_per_model_env(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda._runtime as R
+
+    calls = []
+
+    class _Sentinel:
+        def __init__(self, model_env):
+            self.model_env = model_env
+
+    def fake_get_chat_model(*, temperature=0, model_env="LLM_MODEL", **kw):
+        calls.append(model_env)
+        return _Sentinel(model_env)
+
+    monkeypatch.setattr(R, "get_chat_model", fake_get_chat_model)
+    R._llms.clear()
+    try:
+        default = R.get_llm()
+        same = R.get_llm()                              # 같은 model_env → 캐시 재사용
+        codegen = R.get_llm("CODE_GENERATOR_MODEL")     # 다른 model_env → 별도 인스턴스
+        assert default is same
+        assert default.model_env == "LLM_MODEL"         # 기본값 = 하위호환
+        assert codegen.model_env == "CODE_GENERATOR_MODEL"
+        assert default is not codegen
+        assert calls == ["LLM_MODEL", "CODE_GENERATOR_MODEL"]  # 캐시 히트는 재생성 안 함
+    finally:
+        R._llms.clear()
