@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.insight import build_hypotheses, evidence_from_payload
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisEvidence,
     AnalysisExecutionPlan,
     AnalysisKind,
     AnalysisResult,
@@ -54,6 +55,7 @@ def build_analysis_result(
             evidence.append(evidence_from_payload(tool_name, payload, plan))
         except (TypeError, ValueError) as exc:
             limitations.append(f"{tool_name} was not executed: {exc}")
+            evidence.append(_failed_tool_evidence(tool_name, plan, str(exc)))
 
     findings = []
     if not df.empty:
@@ -88,6 +90,25 @@ def build_analysis_result(
         human_review=HumanReview(required=plan.requires_human_review, reason=plan.review_reason),
     )
     return result.model_dump(mode="json")
+
+
+def _failed_tool_evidence(tool_name: str, plan: AnalysisExecutionPlan, error_message: str) -> AnalysisEvidence:
+    return AnalysisEvidence(
+        tool_name=tool_name,
+        method="failed_execution",
+        inputs={
+            "metric": plan.metric,
+            "dimension": plan.dimension,
+            "time_column": plan.time_column,
+            "feature_columns": plan.feature_columns,
+        },
+        statistics={"status": "failed", "error": error_message},
+        finding=f"{tool_name} execution failed before producing statistical evidence.",
+        caveats=[
+            "The tool was selected by the validated plan but did not complete successfully.",
+            error_message,
+        ],
+    )
 
 
 def _invoke_tool(

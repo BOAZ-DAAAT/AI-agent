@@ -129,6 +129,15 @@ def extract_time_condition(question: str) -> Optional[str]:
     return None
 
 
+def is_explicit_aggregate_question(question: str) -> bool:
+    q = question.lower()
+    aggregate_tokens = (
+        "합계", "총합", "총액", "평균", "건수", "개수", "카운트", "비율", "최대", "최소", "median",
+        "sum", "avg", "average", "count", "ratio", "rate", "max", "min",
+    )
+    return any(token in question or token in q for token in aggregate_tokens)
+
+
 def default_validation_contract(
     *,
     question: str,
@@ -144,7 +153,7 @@ def default_validation_contract(
     expected_aliases: list[str] = []
     if route_kind == "comprehensive":
         expected_result_shape = "datamart_creation"
-    elif dimensions:
+    elif dimensions and is_explicit_aggregate_question(question):
         expected_result_shape = "grouped_aggregate"
     elif is_average_delivery_days_question(question):
         expected_result_shape = "single_scalar"

@@ -12,6 +12,9 @@ from data_agent_backend.services.run_service import RunService
 from data_agent_backend.services.sandbox_executor import DisabledSandboxExecutor, DockerSandboxExecutor, SandboxExecutor
 from data_agent_backend.services.datasource_service import DatasourceService
 from data_agent_backend.services.sql_executor import SQLExecutor
+from data_agent_backend.services.workspace_backend import WorkspaceBackend
+from data_agent_backend.services.workspace_router import ArtifactMount, LocalDirectoryMount, WorkspaceRouter
+from data_agent_backend.services.workspace_storage_service import WorkspaceStorageService
 from data_agent_backend.storage.sqlite import SQLiteStore
 
 
@@ -26,6 +29,7 @@ class CoreBackendServices:
     sql_executor: SQLExecutor
     sandbox_executor: SandboxExecutor
     run_service: RunService
+    workspace_storage: WorkspaceStorageService
 
 
 BackendServices = CoreBackendServices
@@ -47,6 +51,14 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
     else:
         sandbox_executor = DisabledSandboxExecutor(policy_engine)
     run_service = RunService(sqlite, policy_engine, artifact_registry)
+    workspace_router = WorkspaceRouter(
+        {
+            "/workspace": LocalDirectoryMount("/workspace", config.workspace_dir, policy_engine, writable=True),
+            "/artifacts": ArtifactMount(artifact_registry, artifact_store, policy_engine),
+        }
+    )
+    workspace_backend = WorkspaceBackend(workspace_router)
+    workspace_storage = WorkspaceStorageService(artifact_registry, artifact_store, workspace_backend)
 
     return CoreBackendServices(
         config=config,
@@ -58,6 +70,7 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
         sql_executor=sql_executor,
         sandbox_executor=sandbox_executor,
         run_service=run_service,
+        workspace_storage=workspace_storage,
     )
 
 

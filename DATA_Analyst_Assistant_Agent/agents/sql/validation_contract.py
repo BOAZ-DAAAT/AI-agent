@@ -47,6 +47,7 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
     contract = build_intent_contract(plan)
+    route_kind = plan.get("route_kind") or ("comprehensive" if plan.get("task_type") == "data_mart_build" else "simple")
     if contract.get("expected_result_shape") == "datamart_creation":
         return findings
     for agg in contract.get("required_aggregations", []):
@@ -61,6 +62,15 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     for table_name in required_tables:
         if table_name not in source_tables and table_name.lower() not in sql_lower:
             findings.append({"category": "invalid_join_plan", "severity": "error", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
+    if route_kind == "simple" and contract.get("expected_result_shape") == "table_preview":
+        has_aggregate_summary = any(token in sql for token in ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX("))
+        if has_aggregate_summary:
+            findings.append({
+                "category": "simple_summary_bias",
+                "severity": "error",
+                "retryable": True,
+                "detail": "simple 조회는 원본 행 수준 유지가 우선인데 불필요한 요약 집계가 포함되었습니다. 조인/정제/파생 컬럼 중심의 row-preserving SQL로 다시 작성하세요.",
+            })
     return findings
 
 
@@ -152,7 +162,7 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
-    priority = {"mysql_dialect_error": 0, "missing_table": 1, "missing_column": 2, "intent_mismatch": 3, "result_shape_mismatch": 4, "invalid_join_plan": 5, "postcheck_failed": 6, "mart_summary_bias": 7, "mart_grain_missing": 8, "execution_error": 9}
+    priority = {"mysql_dialect_error": 0, "missing_table": 1, "missing_column": 2, "intent_mismatch": 3, "result_shape_mismatch": 4, "invalid_join_plan": 5, "simple_summary_bias": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_grain_missing": 9, "execution_error": 10}
     ranked_findings = sorted(findings, key=lambda item: priority.get(str(item.get("category")), 99))
     category = ranked_findings[0].get("category", "validation_failed")
     suggested_action = {
@@ -162,6 +172,7 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "intent_mismatch": "rewrite_for_metric",
         "result_shape_mismatch": "rewrite_result_shape",
         "invalid_join_plan": "rebuild_join_plan",
+        "simple_summary_bias": "rewrite_row_preserving_query",
         "postcheck_failed": "repair_postcheck",
         "mart_summary_bias": "rewrite_row_preserving_mart",
         "mart_grain_missing": "clarify_mart_grain",

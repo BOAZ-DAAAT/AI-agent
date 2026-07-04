@@ -84,11 +84,17 @@ def assess_sample_reliability(df: pd.DataFrame, key_col: Optional[str] = None,
                            "low_n_count": 0, "total_groups": 0, "note": ""}
 
     sizes = None
-    if count_col and count_col in df.columns and key_col and key_col in df.columns:
-        sizes = df.groupby(key_col)[count_col].sum()
+    numeric_count = None
+    if count_col and count_col in df.columns:
+        coerced = pd.to_numeric(df[count_col], errors="coerce")
+        if coerced.notna().any():
+            numeric_count = coerced
+
+    if numeric_count is not None and key_col and key_col in df.columns:
+        sizes = numeric_count.groupby(df[key_col]).sum()
         out["basis"] = f"{count_col} 합(그룹별)"
-    elif count_col and count_col in df.columns:
-        sizes = df[count_col]
+    elif numeric_count is not None:
+        sizes = numeric_count
         out["basis"] = f"{count_col}(행별)"
     elif data_level == "raw" and key_col and key_col in df.columns:
         sizes = df.groupby(key_col).size()

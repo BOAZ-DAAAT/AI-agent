@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 
 class AnalysisWorkflowState(TypedDict, total=False):
     orchestration_state: OrchestrationState
-    dataframe: pd.DataFrame
+    dataframe_records: list[dict[str, Any]]
     eda_profiles: list[dict[str, Any]]
     question_type: str | None
     planner_model: Any | None
@@ -45,12 +45,17 @@ class AnalysisWorkflowState(TypedDict, total=False):
     terminal_reason: str
 
 
+def _dataframe_from_state(state: AnalysisWorkflowState) -> pd.DataFrame:
+    records = state.get("dataframe_records", [])
+    return pd.DataFrame.from_records(records)
+
+
 def plan_node(state: AnalysisWorkflowState) -> dict[str, Any]:
     try:
         orchestration = state["orchestration_state"]
         context = build_analysis_context(
             orchestration,
-            state["dataframe"],
+            _dataframe_from_state(state),
             state.get("eda_profiles", []),
             question_type=state.get("question_type"),
         )
@@ -67,7 +72,7 @@ def execute_node(state: AnalysisWorkflowState) -> dict[str, Any]:
     try:
         result = build_analysis_result(
             state["orchestration_state"],
-            dataframe=state["dataframe"],
+            dataframe=_dataframe_from_state(state),
             eda_profiles=state.get("eda_profiles", []),
             question_type=state.get("question_type"),
             execution_plan=state["execution_plan"],
@@ -171,7 +176,7 @@ def run_analysis_workflow(
 ) -> tuple[dict[str, Any], list[LocalCheck], str]:
     output = build_analysis_graph().invoke({
         "orchestration_state": state,
-        "dataframe": dataframe,
+        "dataframe_records": dataframe.where(pd.notna(dataframe), None).to_dict(orient="records"),
         "eda_profiles": eda_profiles,
         "question_type": question_type,
         "planner_model": planner_model,
