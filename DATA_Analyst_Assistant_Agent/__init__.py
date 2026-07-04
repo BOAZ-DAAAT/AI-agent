@@ -13,6 +13,8 @@ __all__ = [
     "SQLAgent",
     "SQLAgentSupervisor",
     "SupervisorAgent",
+    "SupervisorInterruptPayload",
+    "SupervisorRunResult",
     "SupervisorTerminalState",
     "build_graph",
 ]
@@ -28,6 +30,8 @@ _EXPORT_MAP = {
     "SQLAgent": ("DATA_Analyst_Assistant_Agent.agents", "SQLAgent"),
     "SQLAgentSupervisor": ("DATA_Analyst_Assistant_Agent.supervisor", "SQLAgentSupervisor"),
     "SupervisorAgent": ("DATA_Analyst_Assistant_Agent.supervisor", "SupervisorAgent"),
+    "SupervisorInterruptPayload": ("DATA_Analyst_Assistant_Agent.shared.contracts", "SupervisorInterruptPayload"),
+    "SupervisorRunResult": ("DATA_Analyst_Assistant_Agent.shared.contracts", "SupervisorRunResult"),
     "SupervisorTerminalState": ("DATA_Analyst_Assistant_Agent.shared.contracts", "SupervisorTerminalState"),
     "build_graph": ("DATA_Analyst_Assistant_Agent.supervisor.graph", "build_graph"),
 }

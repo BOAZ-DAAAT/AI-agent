@@ -8,7 +8,12 @@ from data_agent_backend.models.runs import RunStatus
 from langgraph.types import Command
 
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    OrchestrationState,
+    SupervisorInterruptPayload,
+    SupervisorRunResult,
+    SupervisorTerminalState,
+)
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.supervisor.checkpoint import open_sqlite_checkpointer
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
@@ -39,7 +44,7 @@ class SupervisorAgent:
         thread_id: str | None = None,
         datasource_id: str | None = None,
         project_id: str | None = None,
-    ) -> OrchestrationState:
+    ) -> SupervisorRunResult:
         thread_id = thread_id or f"thread_{uuid4().hex}"
         run = self.adapter.create_run(
             thread_id=thread_id,
@@ -62,18 +67,41 @@ class SupervisorAgent:
                 catalog_summary=catalog_summary,
             )
             output = self._invoke_graph(initial_state, thread_id)
+            interrupt_payload = self._interrupt_payload_from_output(output)
+            if interrupt_payload is not None:
+                return self._update_run_from_interrupt(run.run_id, interrupt_payload)
             return self._update_run_from_terminal_output(run.run_id, output)
         except Exception as exc:
             self.adapter.update_run_status(run.run_id, RunStatus.failed, metadata={"error": str(exc)})
             raise
 
     def resume(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
+        if "answer" in resume_payload:
+            return self._resume_clarification(thread_id, resume_payload)
+        if resume_payload.get("approved") is not True:
+            raise ValueError("resume payload는 {'answer': '...'} 또는 {'approved': True} 형식이어야 합니다.")
+
         config = {"configurable": {"thread_id": thread_id}}
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
             result = self._resume_synthetic_approval(graph, config, resume_payload)
             if result is None:
                 result = graph.invoke(Command(resume=resume_payload), config)
+        return self._update_run_status_from_resume_result(result)
+
+    def _resume_clarification(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
+        answer = self._validated_clarification_answer(resume_payload)
+        config = {"configurable": {"thread_id": thread_id}}
+        with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
+            graph = self._build_runtime_graph(checkpointer)
+            run_id = self._current_run_id_from_checkpoint(graph, config)
+            if run_id:
+                self.adapter.update_run_status(
+                    run_id,
+                    RunStatus.running,
+                    metadata={"resumed_from": "clarification"},
+                )
+            result = graph.invoke(Command(resume={"answer": answer}), config)
         return self._update_run_status_from_resume_result(result)
 
     def _resume_synthetic_approval(
@@ -119,6 +147,10 @@ class SupervisorAgent:
         }.get(str(agent_name))
 
     def _update_run_status_from_resume_result(self, result: Any) -> Any:
+        interrupt_payload = self._interrupt_payload_from_output(result)
+        if interrupt_payload is not None:
+            return self._update_run_from_interrupt(interrupt_payload.run_id, interrupt_payload)
+
         if not isinstance(result, dict):
             return result
 
@@ -131,7 +163,7 @@ class SupervisorAgent:
             return result
 
         try:
-            self._update_run_from_terminal_output(run_id, result)
+            return self._update_run_from_terminal_output(run_id, result)
         except Exception as exc:
             self.adapter.update_run_status(run_id, RunStatus.failed, metadata={"error": str(exc)})
             raise
@@ -170,14 +202,67 @@ class SupervisorAgent:
             return None
         return getter(datasource_id)
 
-    def _update_run_from_terminal_output(self, run_id: str, output: SupervisorState) -> OrchestrationState:
+    def _update_run_from_terminal_output(self, run_id: str, output: SupervisorState) -> SupervisorRunResult:
         orchestration_state = to_orchestration_state(output)
         self.adapter.update_run_status(
             run_id,
             self._run_status_for_terminal(orchestration_state.terminal_state),
             metadata={"terminal_state": output.get("terminal_state")},
         )
-        return orchestration_state
+        return SupervisorRunResult(kind="state", state=orchestration_state)
+
+    def _update_run_from_interrupt(
+        self,
+        run_id: str,
+        interrupt_payload: SupervisorInterruptPayload,
+    ) -> SupervisorRunResult:
+        self.adapter.update_run_status(
+            run_id,
+            RunStatus.waiting_input,
+            metadata={
+                "interrupt_type": interrupt_payload.type,
+                "node": interrupt_payload.node,
+            },
+        )
+        append_event = getattr(self.adapter, "append_run_event", None)
+        if append_event is not None:
+            append_event(
+                run_id,
+                "human_input.required",
+                interrupt_payload.question,
+                node_name=interrupt_payload.node,
+                metadata=interrupt_payload.model_dump(mode="json"),
+            )
+        return SupervisorRunResult(kind="interrupt", interrupt=interrupt_payload)
+
+    @staticmethod
+    def _interrupt_payload_from_output(output: Any) -> SupervisorInterruptPayload | None:
+        if not isinstance(output, dict) or "__interrupt__" not in output:
+            return None
+        interrupts = output.get("__interrupt__") or ()
+        if not interrupts:
+            return None
+        first_interrupt = interrupts[0]
+        raw_payload = getattr(first_interrupt, "value", first_interrupt)
+        return SupervisorInterruptPayload.model_validate(raw_payload)
+
+    @staticmethod
+    def _validated_clarification_answer(resume_payload: dict[str, Any]) -> str:
+        answer = str(resume_payload.get("answer") or "").strip()
+        if not answer:
+            raise ValueError("clarification resume payload의 answer는 비어 있을 수 없습니다.")
+        return answer
+
+    @staticmethod
+    def _current_run_id_from_checkpoint(graph: Any, config: dict[str, Any]) -> str | None:
+        if not hasattr(graph, "get_state"):
+            return None
+        snapshot = graph.get_state(config)
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, dict):
+            return None
+        run_id = values.get("current_run_id")
+        return run_id if isinstance(run_id, str) and run_id else None
 
     @staticmethod
     def _run_status_for_terminal(terminal_state: SupervisorTerminalState | None) -> RunStatus:

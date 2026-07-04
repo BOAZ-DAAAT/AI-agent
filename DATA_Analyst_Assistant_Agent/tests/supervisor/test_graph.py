@@ -4,6 +4,9 @@ import json
 
 from typing import Any
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     build_graph,
     make_create_analysis_plan_node,
@@ -219,6 +222,74 @@ def test_build_graph_accepts_positional_subagent_adapter() -> None:
 
     assert result["terminal_state"] == "completed"
     assert result["completed_agents"] == ["sql_agent", "report_agent"]
+
+
+def test_clarification_interrupt_returns_payload_and_skips_subagents() -> None:
+    adapter = FakeSubAgentAdapter()
+    graph = build_graph(
+        subagent_adapter=adapter,
+        model=SequencedDecisionModel(
+            [
+                _clarify_decision(
+                    needs_clarification=True,
+                    clarified_query="매출",
+                    clarification_question="어떤 기간과 단위로 매출을 분석할까요?",
+                )
+            ]
+        ),
+        checkpointer=InMemorySaver(),
+    )
+
+    result = graph.invoke(_state("매출"), {"configurable": {"thread_id": "thread_clarify_001"}})
+
+    assert "__interrupt__" in result
+    interrupt_payload = result["__interrupt__"][0].value
+    assert interrupt_payload == {
+        "type": "clarification",
+        "status": "waiting_input",
+        "run_id": "run_001",
+        "thread_id": "thread_sales_001",
+        "question": "어떤 기간과 단위로 매출을 분석할까요?",
+        "node": "collect_clarification",
+        "expected_resume": {"answer": "string"},
+    }
+    assert adapter.calls == []
+
+
+def test_clarification_resume_continues_from_create_analysis_plan() -> None:
+    adapter = FakeSubAgentAdapter()
+    graph = build_graph(
+        subagent_adapter=adapter,
+        model=SequencedDecisionModel(
+            [
+                _clarify_decision(
+                    needs_clarification=True,
+                    clarified_query="매출",
+                    clarification_question="어떤 기간과 단위로 매출을 분석할까요?",
+                ),
+                _plan_decision(),
+                _next_action_decision("finalize"),
+                _final_decision(),
+            ]
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "thread_clarify_001"}}
+
+    paused = graph.invoke(_state("매출"), config)
+    resumed = graph.invoke(Command(resume={"answer": "최근 6개월 월별 매출"}), config)
+
+    assert "__interrupt__" in paused
+    assert resumed["terminal_state"] == "completed"
+    assert resumed["analysis_plan"]["goal"] == "월별 매출 추이 분석"
+    assert resumed["clarified_query"] == "매출\n추가 답변: 최근 6개월 월별 매출"
+    assert [entry["node"] for entry in resumed["llm_decisions"]] == [
+        "clarify_query",
+        "create_analysis_plan",
+        "decide_next_action",
+        "finalize",
+    ]
+    assert adapter.calls == []
 
 
 def test_finalize_llm_can_fail_without_report_evidence() -> None:
@@ -624,7 +695,7 @@ def test_finalize_preserves_validation_terminal_state_when_llm_returns_completed
     assert "리포트 산출물 ID" in result["final_answer"]
 
 
-def test_clarify_llm_decision_finalizes_with_question() -> None:
+def test_clarify_llm_decision_interrupts_with_question() -> None:
     question = "분석할 기간을 알려주세요."
     decisions = [
         _clarify_decision(
@@ -632,16 +703,16 @@ def test_clarify_llm_decision_finalizes_with_question() -> None:
             clarified_query="매출",
             clarification_question=question,
         ),
-        _final_decision("needs_clarification", question),
     ]
-    graph = build_graph(subagent_adapter=FakeSubAgentAdapter(), model=SequencedDecisionModel(decisions))
+    graph = build_graph(
+        subagent_adapter=FakeSubAgentAdapter(),
+        model=SequencedDecisionModel(decisions),
+        checkpointer=InMemorySaver(),
+    )
 
     result = graph.invoke(_state("매출"), {"configurable": {"thread_id": "thread_sales_001"}})
 
-    assert result["terminal_state"] == "needs_clarification"
-    assert result["needs_clarification"] is True
-    assert result["clarification_question"] == question
-    assert result["final_answer"] == question
+    assert result["__interrupt__"][0].value["question"] == question
 
 
 def test_invalid_llm_json_becomes_terminal_failure_without_fallback() -> None:
