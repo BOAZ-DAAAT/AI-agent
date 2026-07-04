@@ -61,6 +61,14 @@ class EDAAgent:
         key_chart_refs = register_key_chart_artifacts(
             runtime, state, eda_result.get("key_charts", []), source_ids, context)
 
+        # codegen 탈출구가 도메인 밖으로 판정하면 top-level 플래그로 정직하게 노출한다
+        # (성공 결과는 statistical_metadata.adhoc_analysis에 편입됨). 분석 에이전트가 라우팅에 씀.
+        codegen = eda_result.get("codegen", {}) or {}
+        out_of_domain = (
+            {"reason": codegen.get("reason", ""), "user_question": codegen.get("user_question", "")}
+            if codegen.get("status") == "out_of_domain" else None
+        )
+
         payload = {
             "run_id": state.run_id,
             "source_artifacts": source_ids,
@@ -76,6 +84,7 @@ class EDAAgent:
             "analysis_constraints": eda_result.get("analysis_constraints", []),
             "statistical_metadata": eda_result.get("statistical_metadata", {}),
             "key_charts": key_chart_refs,
+            "out_of_domain": out_of_domain,
             "error_log": eda_result.get("error_log", []),
         }
         ref = runtime.adapter.register_artifact(

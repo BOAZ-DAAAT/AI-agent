@@ -1021,3 +1021,38 @@ def test_route_done_without_substantive_goes_codegen():
 def test_build_app_compiles_with_codegen():
     from DATA_Analyst_Assistant_Agent.agents.eda.graph import build_app
     assert build_app() is not None                  # codegen 노드 포함 그래프 컴파일
+
+
+# ─────────────────────────────
+# codegen 결과 eda_summary 편입 (커밋4) — 토큰 0
+# ─────────────────────────────
+def test_insight_folds_codegen_success_into_adhoc_analysis(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    monkeypatch.setattr(I, "get_llm", lambda *a, **k: _FakeLLM("[]"))
+    df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    codegen = {"status": "success", "intent": "평균", "expression": 'df["order_price"].mean()',
+               "result": 20.0, "cautions": ["llm_generated"]}
+    try:
+        update = I.insight_node({"user_question": "q", "question_type": "", "codegen": codegen})
+    finally:
+        reset_context()
+    adhoc = update["statistical_metadata"]["adhoc_analysis"]
+    assert adhoc["result"] == 20.0
+    assert adhoc["expression"] == 'df["order_price"].mean()'      # provenance 전달됨
+    assert "llm_generated" in adhoc["cautions"]
+
+
+def test_insight_does_not_fold_out_of_domain(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    monkeypatch.setattr(I, "get_llm", lambda *a, **k: _FakeLLM("[]"))
+    df = pd.DataFrame({"order_price": [1.0, 2.0]})
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    try:
+        update = I.insight_node({"user_question": "q", "question_type": "",
+                                 "codegen": {"status": "out_of_domain", "reason": "불가"}})
+    finally:
+        reset_context()
+    assert "adhoc_analysis" not in update["statistical_metadata"]  # 실패는 편입 안 함(플래그로만)
