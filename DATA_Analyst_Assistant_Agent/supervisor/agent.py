@@ -155,12 +155,10 @@ class SupervisorAgent:
         return get_chat_model(temperature=0)
 
     def _resolve_datasource_id(self, datasource_id: str | None) -> str | None:
-        if datasource_id is not None:
-            return datasource_id
-        getter = getattr(self.adapter, "get_default_datasource_id", None)
-        if getter is None:
-            return None
-        return getter()
+        # Datasource is optional for the supervisor flow.
+        # Keep explicit datasource support, but do not auto-resolve a default
+        # datasource when the caller did not request one.
+        return datasource_id
 
     def _resolve_catalog_summary(self, datasource_id: str | None) -> dict[str, Any] | None:
         if datasource_id is None:

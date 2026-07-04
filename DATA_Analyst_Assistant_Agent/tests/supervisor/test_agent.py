@@ -88,6 +88,11 @@ class CatalogFailingBackendAdapter(FakeBackendAdapter):
         raise RuntimeError("카탈로그 조회 실패")
 
 
+class DefaultDatasourceFailingBackendAdapter(FakeBackendAdapter):
+    def get_default_datasource_id(self):
+        raise RuntimeError("기본 datasource 조회가 호출되면 안 됩니다")
+
+
 def _completed_graph_state(state: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
     return {
         **state,
@@ -215,6 +220,17 @@ def test_catalog_summary_exception_updates_backend_status_failed_and_reraises() 
     assert adapter.status_updates[-1][0] == "run_001"
     assert adapter.status_updates[-1][1] == RunStatus.failed
     assert adapter.status_updates[-1][2] == {"error": "카탈로그 조회 실패"}
+
+
+def test_run_without_datasource_does_not_lookup_default_datasource(monkeypatch) -> None:
+    adapter = DefaultDatasourceFailingBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+
+    monkeypatch.setattr(agent, "_invoke_graph", lambda initial_state, thread_id: FakeGraph().invoke(initial_state, {}))
+
+    state = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001", datasource_id=None)
+
+    assert state.datasource_id is None
 
 
 def test_invalid_graph_output_updates_backend_status_failed_and_reraises(monkeypatch) -> None:

@@ -8,6 +8,17 @@ from DATA_Analyst_Assistant_Agent.agents.eda.prompts import handoff_summary_prom
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
 
+def _candidate_name(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("metric", "name", "column", "target"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                return candidate
+    return ""
+
+
 def _resolve_target(state: EDAState) -> str:
     """가설 6유형의 앵커가 될 target 컬럼을 확정한다(LLM 없음).
     우선순위: 앞단 plan_metric → planner의 priority_metrics → measure_cols.
@@ -23,8 +34,9 @@ def _resolve_target(state: EDAState) -> str:
     candidates += list(getattr(ctx, "measure_cols", None) or [])
 
     for c in candidates:
-        if c and c in cols:
-            return c
+        candidate = _candidate_name(c)
+        if candidate and candidate in cols:
+            return candidate
     return ""
 
 

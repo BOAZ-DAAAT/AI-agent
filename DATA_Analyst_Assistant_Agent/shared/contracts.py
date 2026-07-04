@@ -78,6 +78,7 @@ class AgentEnvelope(BaseModel):
     agent_name: str
     summary: str
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    fallback_used: bool = False
     validation: ValidationBlock = Field(default_factory=ValidationBlock)
     retry_hint: RetryHint = Field(default_factory=RetryHint)
     approval: ApprovalRequirement = Field(default_factory=ApprovalRequirement)

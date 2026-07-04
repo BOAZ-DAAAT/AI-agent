@@ -278,7 +278,10 @@ class BackendAdapter:
 
     def get_default_datasource_id(self) -> str | None:
         if self.services.datasource_service:
-            return self.services.datasource_service.get_default_id()
+            getter = getattr(self.services.datasource_service, "get_default_id", None)
+            if getter is None:
+                return None
+            return getter()
         return None
 
     def get_catalog_summary(self, datasource_id: str) -> dict | None:

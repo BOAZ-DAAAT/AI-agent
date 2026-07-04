@@ -59,19 +59,33 @@ def analyze_time_series(
     if metric not in df.columns or time_column not in df.columns:
         raise ValueError("Metric and time column must both exist in the data.")
     work = df[[time_column, metric]].copy()
+    raw_time_values = work[time_column].astype(str)
     work[time_column] = pd.to_datetime(work[time_column], errors="coerce")
     work[metric] = pd.to_numeric(work[metric], errors="coerce")
     work = work.dropna().sort_values(time_column)
     if len(work) < 4:
         raise ValueError("Time-series analysis requires at least four valid observations.")
-    rule = {"D": "D", "W": "W", "M": "ME", "Q": "QE", "Y": "YE"}.get(frequency.upper(), frequency)
-    indexed = work.set_index(time_column)[metric]
-    if aggregation == "mean":
-        series = indexed.resample(rule).mean()
-    elif aggregation == "median":
-        series = indexed.resample(rule).median()
+    normalized_frequency = frequency.upper()
+    if normalized_frequency == "D":
+        period_keys = raw_time_values.loc[work.index].str.slice(0, 10)
+        grouped = work.groupby(period_keys)[metric]
+        if aggregation == "mean":
+            series = grouped.mean()
+        elif aggregation == "median":
+            series = grouped.median()
+        else:
+            series = grouped.sum(min_count=1)
+        series.index = pd.to_datetime(series.index, errors="coerce")
+        series = series[series.index.notna()].sort_index()
     else:
-        series = indexed.resample(rule).sum(min_count=1)
+        rule = {"D": "D", "W": "W", "M": "ME", "Q": "QE", "Y": "YE"}.get(normalized_frequency, frequency)
+        indexed = work.set_index(time_column)[metric]
+        if aggregation == "mean":
+            series = indexed.resample(rule).mean()
+        elif aggregation == "median":
+            series = indexed.resample(rule).median()
+        else:
+            series = indexed.resample(rule).sum(min_count=1)
     series = series.dropna()
     if len(series) < 4:
         raise ValueError("Aggregation produced fewer than four time periods.")

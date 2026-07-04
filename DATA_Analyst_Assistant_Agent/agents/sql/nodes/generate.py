@@ -17,9 +17,6 @@ def generate_sql(state: AgentState):
     task_type = state["plan"].get("task_type", "query_answer")
     route_kind = state["plan"].get("route_kind") or ("comprehensive" if task_type == "data_mart_build" else "simple")
     fallback = deterministic_sql_draft(state)
-    retry_hint = state.get("retry_hint") or {}
-    if state.get("retry_count", 0) > 0 and retry_hint.get("reason_code") in {"missing_table", "missing_column", "invalid_join_plan"}:
-        return {"sql_draft": fallback}
     feedback = retry_feedback_text(state)
     prompt = prompts.generate_mart_prompt(state, feedback) if task_type == "data_mart_build" else prompts.generate_query_prompt(state, feedback)
     response = try_llm_json(prompt)
