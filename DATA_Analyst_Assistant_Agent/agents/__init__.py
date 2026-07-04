@@ -18,6 +18,9 @@ _EXPORT_MAP = {
     "SQLAgent": ("DATA_Analyst_Assistant_Agent.agents.sql.agent", "SQLAgent"),
 }
 
+for _deleted_export in ("CentralValidationAgent", "VisualizationAgent"):
+    globals().pop(_deleted_export, None)
+
 
 def __getattr__(name: str):
     if name not in _EXPORT_MAP:

@@ -12,6 +12,7 @@ __all__ = [
     "ReportAgent",
     "SQLAgent",
     "SQLAgentSupervisor",
+    "SupervisorAgent",
     "SupervisorTerminalState",
     "build_graph",
 ]
@@ -26,9 +27,13 @@ _EXPORT_MAP = {
     "ReportAgent": ("DATA_Analyst_Assistant_Agent.agents", "ReportAgent"),
     "SQLAgent": ("DATA_Analyst_Assistant_Agent.agents", "SQLAgent"),
     "SQLAgentSupervisor": ("DATA_Analyst_Assistant_Agent.supervisor", "SQLAgentSupervisor"),
+    "SupervisorAgent": ("DATA_Analyst_Assistant_Agent.supervisor", "SupervisorAgent"),
     "SupervisorTerminalState": ("DATA_Analyst_Assistant_Agent.shared.contracts", "SupervisorTerminalState"),
     "build_graph": ("DATA_Analyst_Assistant_Agent.supervisor.graph", "build_graph"),
 }
+
+for _deleted_export in ("CentralValidationAgent", "VisualizationAgent"):
+    globals().pop(_deleted_export, None)
 
 
 def __getattr__(name: str):

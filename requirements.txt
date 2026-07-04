@@ -9,6 +9,7 @@ fastapi
 pytest
 sqlalchemy
 langgraph
+langgraph-checkpoint-sqlite
 langchain-core
 langchain-openai
 langchain-google-genai
