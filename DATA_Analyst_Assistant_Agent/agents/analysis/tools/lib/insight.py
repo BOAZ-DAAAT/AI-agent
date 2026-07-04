@@ -195,6 +195,7 @@ def evidence_from_payload(
         raise ValueError(f"No insight formatter is registered for tool: {tool_name}")
     return AnalysisEvidence(
         tool_name=tool_name,
+        status="success",
         method=method,
         inputs={
             "metric": plan.metric,
@@ -208,9 +209,34 @@ def evidence_from_payload(
     )
 
 
+def failed_evidence_from_exception(
+    tool_name: str,
+    exc: Exception,
+    plan: AnalysisExecutionPlan,
+) -> AnalysisEvidence:
+    message = str(exc)
+    return AnalysisEvidence(
+        tool_name=tool_name,
+        status="failed",
+        method="Tool execution attempted",
+        inputs={
+            "metric": plan.metric,
+            "dimension": plan.dimension,
+            "time_column": plan.time_column,
+            "feature_columns": plan.feature_columns,
+        },
+        statistics={"error_type": exc.__class__.__name__, "error": message},
+        finding=f"{tool_name} did not produce statistical output.",
+        caveats=[f"{tool_name} failed during execution: {message}"],
+    )
+
+
 def build_hypotheses(kind: AnalysisKind, evidence: list[AnalysisEvidence]) -> list[HypothesisSummary]:
     if kind == AnalysisKind.correlation:
-        correlation = next((item for item in evidence if item.tool_name == "measure_correlation"), None)
+        correlation = next(
+            (item for item in evidence if item.tool_name == "measure_correlation" and item.status == "success"),
+            None,
+        )
         pairs = correlation.statistics.get("pairs", []) if correlation else []
         significant = any(float(pair.get("p_value_adjusted_bh", 1.0)) < 0.05 for pair in pairs)
         return [HypothesisSummary(
@@ -220,7 +246,10 @@ def build_hypotheses(kind: AnalysisKind, evidence: list[AnalysisEvidence]) -> li
             rationale="Decision uses Benjamini-Hochberg adjusted Pearson p-values at alpha=0.05.",
         )]
     if kind == AnalysisKind.group_comparison:
-        test = next((item for item in evidence if item.tool_name == "test_group_difference"), None)
+        test = next(
+            (item for item in evidence if item.tool_name == "test_group_difference" and item.status == "success"),
+            None,
+        )
         if not test:
             return [HypothesisSummary(
                 null_hypothesis="The group metric summaries do not differ.",

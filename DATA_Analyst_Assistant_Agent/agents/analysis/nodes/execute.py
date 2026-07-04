@@ -6,7 +6,11 @@ import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
-from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.insight import build_hypotheses, evidence_from_payload
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.insight import (
+    build_hypotheses,
+    evidence_from_payload,
+    failed_evidence_from_exception,
+)
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisExecutionPlan,
     AnalysisKind,
@@ -52,8 +56,9 @@ def build_analysis_result(
                 code_generator_model=code_generator_model,
             )
             evidence.append(evidence_from_payload(tool_name, payload, plan))
-        except (TypeError, ValueError) as exc:
-            limitations.append(f"{tool_name} was not executed: {exc}")
+        except Exception as exc:
+            evidence.append(failed_evidence_from_exception(tool_name, exc, plan))
+            limitations.append(f"{tool_name} failed during execution: {exc}")
 
     findings = []
     if not df.empty:

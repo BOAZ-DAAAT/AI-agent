@@ -15,6 +15,7 @@ def run_analysis_self_check(result: dict) -> list[LocalCheck]:
 
     evidence_names = {item.tool_name for item in parsed.evidence}
     planned_names = set(parsed.plan.tool_names)
+    failed_evidence = [item for item in parsed.evidence if item.status == "failed"]
     expected_kinds = {
         "descriptive": {"descriptive"},
         "comparison": {"group_comparison"},
@@ -75,6 +76,15 @@ def run_analysis_self_check(result: dict) -> list[LocalCheck]:
             detail=(
                 f"question_type={parsed.plan.question_type}, "
                 f"analysis_kind={parsed.plan.analysis_kind.value}"
+            ),
+        ),
+        LocalCheck(
+            name="tool_execution_failures",
+            passed=not failed_evidence,
+            severity="error",
+            detail="; ".join(
+                f"{item.tool_name}: {item.statistics.get('error', item.finding)}"
+                for item in failed_evidence
             ),
         ),
         LocalCheck(
