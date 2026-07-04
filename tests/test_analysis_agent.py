@@ -15,6 +15,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_work
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.execute import build_analysis_result
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.plan import build_analysis_plan
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.validate import run_analysis_self_check
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools import ANALYSIS_TOOLS
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
@@ -161,6 +162,66 @@ def test_structured_result_contains_traceable_evidence() -> None:
     assert "SQL result contains 3 rows and 2 columns." in result.key_findings
     assert "Top category by revenue is B (20)." in result.key_findings
     assert result.hypotheses[0].decision == "inconclusive"
+
+
+def test_analysis_self_check_keeps_contract_and_methodology_checks() -> None:
+    state = _state("run_validate_correlation", "analyze relationship between delivery and review")
+    df = pd.DataFrame({"delivery_days": [1, 5, 20, 3], "review_score": [5, 4, 1, 5]})
+    payload = build_analysis_result(
+        state,
+        dataframe=df,
+        question_type="correlation",
+        execution_plan=_execution_plan(
+            question_type="correlation",
+            analysis_kind="correlation",
+            analysis_subtype="pearson_correlation",
+            tool_names=["measure_correlation"],
+            metric=None,
+            dimension=None,
+            feature_columns=["delivery_days", "review_score"],
+        ),
+    )
+
+    checks = run_analysis_self_check(payload)
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["structured_output_valid"].passed
+    assert by_name["findings_traceable_to_tools"].passed
+    assert by_name["all_planned_tools_executed"].passed
+    assert by_name["tool_parameters_match_plan"].passed
+    assert by_name["analysis_method_requirements_met"].passed
+    assert by_name["finding_claims_supported"].passed
+    assert by_name["limitations_match_analysis_kind"].passed
+
+
+def test_analysis_self_check_flags_methodology_gaps() -> None:
+    state = _state("run_validate_regression", "predict revenue")
+    df = pd.DataFrame({
+        "category": ["A", "B"] * 10,
+        "revenue": [float(index * 3 + (index % 2)) for index in range(20)],
+        "orders": list(range(20)),
+    })
+    payload = build_analysis_result(
+        state,
+        dataframe=df,
+        question_type="prediction",
+        execution_plan=_execution_plan(
+            question_type="prediction",
+            analysis_kind="regression",
+            analysis_subtype="linear_regression_baseline",
+            tool_names=["fit_regression_model"],
+            metric="revenue",
+            dimension=None,
+            feature_columns=["category", "orders"],
+        ),
+    )
+    payload["evidence"][0]["statistics"].pop("test_rmse")
+
+    check = next(item for item in run_analysis_self_check(payload) if item.name == "analysis_method_requirements_met")
+
+    assert check.passed is False
+    assert check.severity == "error"
+    assert "test_rmse" in check.detail
 
 
 def test_causal_request_emits_human_review_requirement() -> None:
