@@ -219,8 +219,11 @@ def test_route_after_planner_goes_to_chosen_analysis():
     assert route_after_planner({"next_analysis": "distribution"}) == "distribution"
 
 
-def test_route_after_planner_done_goes_to_insight():
-    assert route_after_planner({"next_analysis": "done"}) == "insight"
+def test_route_after_planner_done_with_result_goes_to_insight():
+    # done + 실질 분석 결과 있음 → insight (정상 경로)
+    assert route_after_planner(
+        {"next_analysis": "done", "controller_log": [{"choice": "distribution"}],
+         "distribution_result": "분포 요약"}) == "insight"
 
 
 def test_route_after_planner_unknown_goes_to_insight():
@@ -952,3 +955,69 @@ def test_validate_request_rejects_bad_shape():
                          expression='df["order_price"].mean()', expected_shape="matrix")
     r = validate_request(req, _COLS)
     assert not r.ok and "invalid_expected_shape" in r.reason
+
+
+# ─────────────────────────────
+# codegen 노드 + 결정론 트리거 (커밋3) — 토큰 0 (FakeLLM)
+# ─────────────────────────────
+import json as _json
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import route_after_planner
+
+
+def _run_codegen(monkeypatch, df, judge_json, generate_json, question="X 계산"):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+
+    def fake_get_llm(model_env="LLM_MODEL"):
+        return _FakeLLM(generate_json if model_env == "CODE_GENERATOR_MODEL" else judge_json)
+
+    monkeypatch.setattr(C, "get_llm", fake_get_llm)
+    reset_context()
+    set_context(EdaContext(df=df))
+    try:
+        return C.codegen_node({"user_question": question})["codegen"]
+    finally:
+        reset_context()
+
+
+def test_codegen_success_path(monkeypatch):
+    df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
+    gen = _json.dumps({"intent": "평균가", "target_columns": ["order_price"],
+                       "expression": 'df["order_price"].mean()', "expected_shape": "scalar"})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', gen)
+    assert out["status"] == "success"
+    assert out["result"] == 20.0
+    assert out["expression"] == 'df["order_price"].mean()'      # provenance
+    assert "llm_generated" in out["cautions"]
+    assert out["telemetry"]["output_shape"] == "scalar"
+
+
+def test_codegen_judge_says_not_computable(monkeypatch):
+    df = pd.DataFrame({"order_price": [1.0]})
+    out = _run_codegen(monkeypatch, df,
+                       '{"computable": false, "reason": "외부 데이터 필요"}', "{}")
+    assert out["status"] == "out_of_domain" and "외부 데이터" in out["reason"]
+
+
+def test_codegen_gate_rejects_dangerous_expression(monkeypatch):
+    df = pd.DataFrame({"order_price": [1.0]})
+    gen = _json.dumps({"intent": "나쁨", "target_columns": [],
+                       "expression": '__import__("os")', "expected_shape": "scalar"})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', gen)
+    assert out["status"] == "out_of_domain" and "gate_rejected" in out["reason"]
+
+
+def test_codegen_bad_generate_json_falls_back(monkeypatch):
+    df = pd.DataFrame({"order_price": [1.0]})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', "not json")
+    assert out["status"] == "out_of_domain" and "generate_error" in out["reason"]
+
+
+def test_route_done_without_substantive_goes_codegen():
+    state = {"next_analysis": "done", "controller_log": [{"choice": "quality"}],
+             "quality_result": "품질 점검"}          # quality만 = 실질분석 없음 → codegen
+    assert route_after_planner(state) == "codegen"
+
+
+def test_build_app_compiles_with_codegen():
+    from DATA_Analyst_Assistant_Agent.agents.eda.graph import build_app
+    assert build_app() is not None                  # codegen 노드 포함 그래프 컴파일

@@ -65,5 +65,9 @@ class EDAState(TypedDict, total=False):
     statistical_metadata: Dict[str, Any]  # downstream 에이전트용 raw 수치
     chart_requests: List[Dict[str, Any]]  # EDA가 발행한 차트 주문서(intent/stats/columns/hint) — chart/ 렌더용
 
+    # codegen 탈출구 결과 (도구로 답 못 낸 도메인 밖 질문에만 채워짐)
+    # {status: "success"|"out_of_domain", ...} — status 필드는 미래 "partial" 확장 여지
+    codegen: Dict[str, Any]
+
     # 에러 로그
     error_log: List[str]

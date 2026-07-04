@@ -33,6 +33,7 @@ def build_app():
     graph.add_node("planner",         planner_node)
     for name, fn in _ANALYSIS_NODE_FN.items():
         graph.add_node(name, fn)
+    graph.add_node("codegen",         nodes.codegen_node)
     graph.add_node("insight",         nodes.insight_node)
     graph.add_node("hypothesis",      nodes.hypothesis_node)
     graph.add_node("validator",       validator_node)
@@ -42,15 +43,18 @@ def build_app():
     graph.add_edge("load_mart", "inspect")
     graph.add_edge("inspect",   "planner")
 
-    # 플래너 → 고른 분석 노드 (또는 종료 시 insight)
+    # 플래너 → 고른 분석 노드 / 정상 종료 시 insight / 도구 소진(도메인 밖) 시 codegen
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
-        {**{name: name for name in ANALYSIS_NAMES}, "insight": "insight"},
+        {**{name: name for name in ANALYSIS_NAMES}, "insight": "insight", "codegen": "codegen"},
     )
     # 각 분석 노드 → 플래너로 복귀 (루프)
     for name in _ANALYSIS_NODE_FN:
         graph.add_edge(name, "planner")
+
+    # codegen 탈출구 → insight (결과/플래그를 이후 파이프라인이 이어받음)
+    graph.add_edge("codegen", "insight")
 
     graph.add_edge("insight",        "hypothesis")
     graph.add_edge("hypothesis",     "validator")

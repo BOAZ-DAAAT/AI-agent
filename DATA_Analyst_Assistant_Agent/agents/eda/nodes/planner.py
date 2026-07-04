@@ -121,9 +121,41 @@ def planner_node(state: EDAState) -> dict:
     }
 
 
+# 질문을 실제로 '답하는' 실질 분석 (quality는 항상 도는 일반 점검이라 제외)
+_SUBSTANTIVE = {"distribution", "comparison", "relationship", "time", "clustering"}
+_RESULT_FIELD = {t["name"]: t["result_field"] for t in ANALYSIS_TOOLS}
+
+
+def _is_empty_result(val: Any) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return not val.strip()
+    if isinstance(val, dict):
+        return not val or bool(val.get("skip"))
+    if isinstance(val, (list, tuple)):
+        return len(val) == 0
+    return False
+
+
+def _substantive_produced_output(state: EDAState) -> bool:
+    """실질 분석 중 하나라도 비어있지 않은 결과를 냈는가 (결정론, LLM 0)."""
+    attempted = {e["choice"] for e in state.get("controller_log", [])
+                 if e.get("choice") in _SUBSTANTIVE}
+    return any(not _is_empty_result(state.get(_RESULT_FIELD[n])) for n in attempted)
+
+
 def route_after_planner(state: EDAState):
-    """플래너 선택에 따라 분석 노드로 가거나, 종료하면 insight로."""
+    """플래너 선택에 따라 분석 노드로 가거나, 종료 시 결정론 게이트로 분기.
+
+    종료(done)일 때:
+      - 실질 분석이 하나라도 결과를 냄  → insight (정상 경로)
+      - 아무 실질 분석도 결과를 못 냄    → codegen (도구로 시도조차 못 한 도메인 밖 질문)
+    ※ 판단LLM은 codegen 노드 안에서만 돈다. 정상 질문은 이 게이트에서 걸러져 진입 자체가 없다.
+    """
     choice = state.get("next_analysis", "done")
     if choice in ANALYSIS_NAMES:
         return choice
-    return "insight"
+    if choice == "done":
+        return "insight" if _substantive_produced_output(state) else "codegen"
+    return "insight"   # 예상 밖 값(환각 등)은 안전 기본값 insight로 (codegen 게이트는 done에서만)
