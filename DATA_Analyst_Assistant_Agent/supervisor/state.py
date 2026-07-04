@@ -93,6 +93,8 @@ class SupervisorState(TypedDict, total=False):
     error_state: dict[str, Any]
     retry_counts: dict[str, int]
     max_retry_per_agent: int
+    llm_decisions: list[dict[str, Any]]
+    decision_errors: list[dict[str, Any]]
 
 
 def _ensure_json_serializable(state: SupervisorState) -> SupervisorState:
@@ -141,6 +143,8 @@ def empty_supervisor_state(
         "error_state": {},
         "retry_counts": {},
         "max_retry_per_agent": 1,
+        "llm_decisions": [],
+        "decision_errors": [],
     }
     return _ensure_json_serializable(state)
 

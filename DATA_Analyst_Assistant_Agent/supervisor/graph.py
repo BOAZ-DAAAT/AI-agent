@@ -3,23 +3,44 @@ from __future__ import annotations
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
-from DATA_Analyst_Assistant_Agent.supervisor.decision import decide_next_action
+from DATA_Analyst_Assistant_Agent.supervisor.decision import (
+    AnalysisPlanDecision,
+    ClarificationDecision,
+    ExecutionGuardDecision,
+    FinalizationDecision,
+    ResultValidationDecision,
+    StepSummaryDecision,
+    SupervisorDecision,
+    build_clarification_context,
+    build_execution_guard_context,
+    build_finalization_context,
+    build_next_action_context,
+    build_plan_context,
+    build_result_validation_context,
+    build_step_summary_context,
+    invoke_supervisor_decision,
+)
+from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
+    CLARIFY_DECISION_PROMPT,
+    DECIDE_NEXT_ACTION_PROMPT,
+    EXECUTION_GUARD_DECISION_PROMPT,
+    FINALIZE_DECISION_PROMPT,
+    PLAN_DECISION_PROMPT,
+    RESULT_VALIDATION_DECISION_PROMPT,
+    STEP_SUMMARY_DECISION_PROMPT,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     AgentName,
     NextAction,
+    StepSummary,
     SupervisorState,
-    artifact_ids_by_agent,
     merge_agent_result,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
-from DATA_Analyst_Assistant_Agent.supervisor.validation import (
-    guard_agent_preconditions,
-    validate_subagent_result,
-)
 
 
 ACTION_TO_AGENT: dict[NextAction, AgentName] = {
@@ -29,45 +50,75 @@ ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     "call_report_agent": "report_agent",
 }
 
-TERMINAL_STATES = {
-    SupervisorTerminalState.completed.value,
-    SupervisorTerminalState.needs_user_approval.value,
-    SupervisorTerminalState.needs_clarification.value,
-    SupervisorTerminalState.failed_terminal.value,
-}
+TERMINAL_STATES = {item.value for item in SupervisorTerminalState}
 
 
-def clarify_query_node(state: SupervisorState) -> SupervisorState:
-    query = (state.get("clarified_query") or state.get("latest_user_query") or "").strip()
-    if len(query) >= 4:
-        return {
-            "clarified_query": query,
-            "needs_clarification": False,
+def make_clarify_query_node(model: Any | None):
+    def clarify_query_node(state: SupervisorState) -> SupervisorState:
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                CLARIFY_DECISION_PROMPT,
+                ClarificationDecision,
+                extra=build_clarification_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "clarify_query", exc)
+
+        updates: SupervisorState = {
+            "clarified_query": decision.clarified_query,
+            "needs_clarification": decision.needs_clarification,
+            "clarification_question": decision.clarification_question,
             "current_step": "clarify_query",
+            "llm_decisions": _append_llm_decision(state, "clarify_query", decision),
+        }
+        if decision.needs_clarification:
+            updates["terminal_state"] = SupervisorTerminalState.needs_clarification.value
+            updates["next_action"] = "finalize"
+        else:
+            updates["terminal_state"] = "running"
+            updates["next_action"] = "create_plan"
+        return updates
+
+    return clarify_query_node
+
+
+def make_create_analysis_plan_node(model: Any | None):
+    def create_analysis_plan_node(state: SupervisorState) -> SupervisorState:
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                PLAN_DECISION_PROMPT,
+                AnalysisPlanDecision,
+                extra=build_plan_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "create_analysis_plan", exc)
+
+        plan: dict[str, Any] = {
+            "goal": decision.goal,
+            "route_kind": decision.route_kind,
+            "planner_mode": "llm",
+            "steps": list(decision.steps),
+            "metric": decision.metric,
+            "dimension": decision.dimension,
+            "filters": list(decision.filters),
+            "requires_mart_review": decision.requires_mart_review,
+        }
+        if state.get("datasource_id") is not None:
+            plan["datasource_id"] = state.get("datasource_id")
+        if state.get("catalog_summary") is not None:
+            plan["catalog_summary"] = state.get("catalog_summary")
+
+        return {
+            "analysis_plan": plan,
+            "current_step": "create_analysis_plan",
+            "llm_decisions": _append_llm_decision(state, "create_analysis_plan", decision),
         }
 
-    question = "분석할 질문을 조금 더 구체적으로 알려주세요."
-    return {
-        "clarified_query": query,
-        "needs_clarification": True,
-        "clarification_question": question,
-        "terminal_state": SupervisorTerminalState.needs_clarification.value,
-        "next_action": "finalize",
-        "current_step": "clarify_query",
-    }
-
-
-def create_analysis_plan_node(state: SupervisorState) -> SupervisorState:
-    plan = dict(state.get("analysis_plan") or {})
-    plan.setdefault("goal", state.get("clarified_query") or state.get("latest_user_query") or "")
-    plan.setdefault("route_kind", "simple")
-    plan.setdefault("planner_mode", "deterministic")
-    if state.get("datasource_id") is not None:
-        plan.setdefault("datasource_id", state.get("datasource_id"))
-    return {
-        "analysis_plan": plan,
-        "current_step": "create_analysis_plan",
-    }
+    return create_analysis_plan_node
 
 
 def make_decide_next_action_node(model: Any | None):
@@ -75,170 +126,249 @@ def make_decide_next_action_node(model: Any | None):
         if state.get("terminal_state") in TERMINAL_STATES:
             return {"next_action": "finalize", "current_step": "decide_next_action"}
 
-        decision = decide_next_action(state, model=model)
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                DECIDE_NEXT_ACTION_PROMPT,
+                SupervisorDecision,
+                extra=build_next_action_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "decide_next_action", exc)
+
         return {
             "next_action": decision.next_action,
             "current_step": "decide_next_action",
+            "llm_decisions": _append_llm_decision(state, "decide_next_action", decision),
         }
 
     return decide_next_action_node
 
 
-def make_execute_subagent_node(subagent_adapter: Any):
+def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
     def execute_subagent_node(state: SupervisorState) -> SupervisorState:
-        action = state.get("next_action")
-        agent_name = ACTION_TO_AGENT.get(action)  # type: ignore[arg-type]
-        if agent_name is None:
-            terminal_state = (
-                SupervisorTerminalState.failed_terminal.value if action == "fail" else state.get("terminal_state")
+        try:
+            guard = invoke_supervisor_decision(
+                state,
+                model,
+                EXECUTION_GUARD_DECISION_PROMPT,
+                ExecutionGuardDecision,
+                extra=build_execution_guard_context(state),
             )
-            return {
-                "terminal_state": terminal_state,
-                "next_action": "finalize",
-                "current_step": "execute_subagent",
-            }
+        except Exception as exc:
+            return _decision_failure_updates(state, "execute_subagent", exc)
 
-        guard = guard_agent_preconditions(agent_name, state)
+        llm_decisions = _append_llm_decision(state, "execute_subagent", guard)
         if not guard.allowed:
+            if guard.next_action not in ACTION_TO_AGENT and guard.next_action not in {"finalize", "fail"}:
+                return _terminal_failure_updates(
+                    state,
+                    "execute_subagent",
+                    f"실행 guard가 지원하지 않는 대체 action을 반환했습니다: {guard.next_action}",
+                    llm_decisions=llm_decisions,
+                )
             updates: SupervisorState = {
                 "next_action": guard.next_action,
                 "current_step": "guard_blocked",
+                "llm_decisions": llm_decisions,
             }
             if guard.next_action == "fail":
                 updates["terminal_state"] = SupervisorTerminalState.failed_terminal.value
+                updates["next_action"] = "finalize"
                 updates["final_answer"] = guard.reason
             return updates
+
+        agent_name = ACTION_TO_AGENT.get(guard.next_action)
+        if agent_name is None:
+            return _terminal_failure_updates(
+                state,
+                "execute_subagent",
+                f"실행 guard가 실행 가능한 agent action을 반환하지 않았습니다: {guard.next_action}",
+                llm_decisions=llm_decisions,
+            )
 
         tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
         merged = merge_agent_result(state, tool_result.agent_result)
         updates = _merge_state_updates(merged, tool_result.state_updates)
         updates["last_agent_result"] = tool_result.agent_result.model_dump(mode="json")
         updates["current_step"] = "executed_subagent"
+        updates["next_action"] = guard.next_action
+        updates["llm_decisions"] = llm_decisions
         return updates
 
     return execute_subagent_node
 
 
-def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
-    payload = state.get("last_agent_result") or {}
-    if not payload:
-        return {
-            "terminal_state": SupervisorTerminalState.failed_terminal.value,
-            "next_action": "finalize",
-            "final_answer": "검증할 에이전트 결과가 없습니다.",
-            "current_step": "validate_subagent_result",
-        }
+def make_validate_subagent_result_node(model: Any | None):
+    def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
+        payload = state.get("last_agent_result") or {}
+        if not payload:
+            return _terminal_failure_updates(
+                state,
+                "validate_subagent_result",
+                "검증할 에이전트 결과가 없습니다.",
+            )
 
-    try:
-        result = AgentCompactResult.model_validate(payload)
-    except Exception:
-        return {
-            "terminal_state": SupervisorTerminalState.failed_terminal.value,
-            "next_action": "finalize",
-            "final_answer": "에이전트 실행 결과 형식이 올바르지 않습니다.",
-            "last_agent_result": {},
-            "current_step": "validate_subagent_result",
-        }
+        try:
+            result = AgentCompactResult.model_validate(payload)
+        except Exception:
+            return _terminal_failure_updates(
+                state,
+                "validate_subagent_result",
+                "에이전트 실행 결과 형식이 올바르지 않습니다.",
+                extra_updates={"last_agent_result": {}},
+            )
 
-    decision = validate_subagent_result(state, result)
-    validation_results = list(state.get("validation_results", []))
-    validation_results.append(
-        {
-            "agent": result.agent,
-            "valid": decision.valid,
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                RESULT_VALIDATION_DECISION_PROMPT,
+                ResultValidationDecision,
+                extra=build_result_validation_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "validate_subagent_result", exc)
+
+        validation_results = list(state.get("validation_results", []))
+        validation_results.append(
+            {
+                "agent": result.agent,
+                "valid": decision.valid,
+                "next_action": decision.next_action,
+                "terminal_state": decision.terminal_state,
+                "reason": decision.reason,
+            }
+        )
+
+        updates: SupervisorState = {
+            "validation_results": validation_results,
             "next_action": decision.next_action,
-            "reason": decision.reason,
+            "terminal_state": decision.terminal_state,
+            "current_step": "validate_subagent_result",
+            "llm_decisions": _append_llm_decision(state, "validate_subagent_result", decision),
         }
-    )
+        if decision.final_answer:
+            updates["final_answer"] = decision.final_answer
 
-    updates: SupervisorState = {
-        "validation_results": validation_results,
-        "next_action": decision.next_action,
-        "current_step": "validate_subagent_result",
-    }
-    if decision.valid:
-        updates["failed_agents"] = [
-            agent for agent in state.get("failed_agents", []) if agent != result.agent
-        ]
-    else:
-        updates["completed_agents"] = [
-            agent for agent in state.get("completed_agents", []) if agent != result.agent
-        ]
+        if decision.valid:
+            updates["failed_agents"] = [
+                agent for agent in state.get("failed_agents", []) if agent != result.agent
+            ]
+        else:
+            updates["completed_agents"] = [
+                agent for agent in state.get("completed_agents", []) if agent != result.agent
+            ]
 
-    if decision.next_action == "fail":
-        updates["terminal_state"] = SupervisorTerminalState.failed_terminal.value
-        updates["next_action"] = "finalize"
-        updates["final_answer"] = "에이전트 실행 결과 검증에 실패했습니다."
-    elif not decision.valid and decision.next_action in ACTION_TO_AGENT:
-        retry_counts = dict(state.get("retry_counts", {}))
-        retry_counts[result.agent] = int(retry_counts.get(result.agent, 0)) + 1
-        updates["retry_counts"] = retry_counts
-    return updates
+        if decision.next_action == "fail":
+            updates["terminal_state"] = SupervisorTerminalState.failed_terminal.value
+            updates["next_action"] = "finalize"
+            if not decision.final_answer:
+                updates["final_answer"] = decision.reason
+        elif decision.terminal_state in TERMINAL_STATES:
+            updates["next_action"] = "finalize"
+        elif not decision.valid and decision.next_action in ACTION_TO_AGENT:
+            retry_counts = dict(state.get("retry_counts", {}))
+            retry_counts[result.agent] = int(retry_counts.get(result.agent, 0)) + 1
+            updates["retry_counts"] = retry_counts
+        return updates
+
+    return validate_subagent_result_node
+
+
+def make_summarize_step_node(model: Any | None):
+    def summarize_step_node(state: SupervisorState) -> SupervisorState:
+        payload = state.get("last_agent_result") or {}
+        if not payload:
+            return _terminal_failure_updates(
+                state,
+                "summarize_step",
+                "요약할 에이전트 결과가 없습니다.",
+            )
+
+        try:
+            AgentCompactResult.model_validate(payload)
+        except Exception:
+            return _terminal_failure_updates(
+                state,
+                "summarize_step",
+                "요약할 에이전트 결과 형식이 올바르지 않습니다.",
+                extra_updates={"last_agent_result": {}},
+            )
+
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                STEP_SUMMARY_DECISION_PROMPT,
+                StepSummaryDecision,
+                extra=build_step_summary_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "summarize_step", exc)
+
+        summary = StepSummary(
+            step=decision.step,
+            agent=decision.agent,
+            action=decision.action,
+            summary=decision.summary,
+            artifact_ids=list(decision.artifact_ids),
+            next_action=decision.next_action,
+        )
+        step_summaries = list(state.get("step_summaries", []))
+        step_summaries.append(summary.model_dump(mode="json"))
+        return {
+            "step_summaries": step_summaries,
+            "current_step": "summarize_step",
+            "llm_decisions": _append_llm_decision(state, "summarize_step", decision),
+        }
+
+    return summarize_step_node
+
+
+def make_finalize_node(model: Any | None):
+    def finalize_node(state: SupervisorState) -> SupervisorState:
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                FINALIZE_DECISION_PROMPT,
+                FinalizationDecision,
+                extra=build_finalization_context(state),
+            )
+        except Exception as exc:
+            return _decision_failure_updates(state, "finalize", exc)
+
+        return {
+            "terminal_state": decision.terminal_state,
+            "final_answer": decision.final_answer,
+            "next_action": "finalize",
+            "current_step": "finalize",
+            "llm_decisions": _append_llm_decision(state, "finalize", decision),
+        }
+
+    return finalize_node
+
+
+def clarify_query_node(state: SupervisorState) -> SupervisorState:
+    return make_clarify_query_node(None)(state)
+
+
+def create_analysis_plan_node(state: SupervisorState) -> SupervisorState:
+    return make_create_analysis_plan_node(None)(state)
+
+
+def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
+    return make_validate_subagent_result_node(None)(state)
 
 
 def summarize_step_node(state: SupervisorState) -> SupervisorState:
-    payload = state.get("last_agent_result") or {}
-    if not payload:
-        return {"current_step": "summarize_step"}
-
-    result = AgentCompactResult.model_validate(payload)
-    summary = summarize_agent_step(
-        state.get("current_step", "execute_subagent"),
-        result,
-        next_action=state.get("next_action", ""),
-    )
-    step_summaries = list(state.get("step_summaries", []))
-    step_summaries.append(summary.model_dump(mode="json"))
-    return {
-        "step_summaries": step_summaries,
-        "current_step": "summarize_step",
-    }
+    return make_summarize_step_node(None)(state)
 
 
 def finalize_node(state: SupervisorState) -> SupervisorState:
-    terminal_state = state.get("terminal_state")
-    final_answer = state.get("final_answer", "")
-
-    if terminal_state == SupervisorTerminalState.needs_clarification.value:
-        return {
-            "final_answer": final_answer or state.get("clarification_question", ""),
-            "next_action": "finalize",
-            "current_step": "finalize",
-        }
-    if terminal_state == SupervisorTerminalState.needs_user_approval.value:
-        return {
-            "final_answer": final_answer or "사용자 승인이 필요합니다.",
-            "next_action": "finalize",
-            "current_step": "finalize",
-        }
-    if terminal_state == SupervisorTerminalState.failed_terminal.value:
-        return {
-            "final_answer": final_answer or "작업을 완료할 수 없습니다.",
-            "next_action": "finalize",
-            "current_step": "finalize",
-        }
-    if state.get("next_action") == "fail":
-        return {
-            "terminal_state": SupervisorTerminalState.failed_terminal.value,
-            "final_answer": final_answer or "작업을 완료할 수 없습니다.",
-            "next_action": "finalize",
-            "current_step": "finalize",
-        }
-
-    if _has_report_evidence(state):
-        return {
-            "terminal_state": SupervisorTerminalState.completed.value,
-            "final_answer": final_answer or "최종 리포트 생성이 완료되었습니다.",
-            "next_action": "finalize",
-            "current_step": "finalize",
-        }
-
-    return {
-        "terminal_state": SupervisorTerminalState.failed_terminal.value,
-        "final_answer": final_answer or "최종 리포트 근거가 없어 완료할 수 없습니다.",
-        "next_action": "finalize",
-        "current_step": "finalize",
-    }
+    return make_finalize_node(None)(state)
 
 
 def build_graph(
@@ -247,13 +377,13 @@ def build_graph(
     checkpointer: Any | None = None,
 ):
     graph = StateGraph(SupervisorState)
-    graph.add_node("clarify_query", clarify_query_node)
-    graph.add_node("create_analysis_plan", create_analysis_plan_node)
+    graph.add_node("clarify_query", make_clarify_query_node(model))
+    graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
-    graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter))
-    graph.add_node("validate_subagent_result", validate_subagent_result_node)
-    graph.add_node("summarize_step", summarize_step_node)
-    graph.add_node("finalize", finalize_node)
+    graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
+    graph.add_node("validate_subagent_result", make_validate_subagent_result_node(model))
+    graph.add_node("summarize_step", make_summarize_step_node(model))
+    graph.add_node("finalize", make_finalize_node(model))
 
     graph.add_edge(START, "clarify_query")
     graph.add_conditional_edges(
@@ -311,12 +441,72 @@ def _merge_state_updates(state: SupervisorState, state_updates: dict[str, Any]) 
     return updates
 
 
-def _has_report_evidence(state: SupervisorState) -> bool:
-    return bool(artifact_ids_by_agent(state).get("report_agent"))
+def _append_llm_decision(
+    state: SupervisorState,
+    node: str,
+    decision: BaseModel,
+) -> list[dict[str, Any]]:
+    entries = list(state.get("llm_decisions", []))
+    entries.append(
+        {
+            "node": node,
+            "schema": decision.__class__.__name__,
+            "decision": decision.model_dump(mode="json"),
+        }
+    )
+    return entries
+
+
+def _decision_failure_updates(state: SupervisorState, node: str, exc: Exception) -> SupervisorState:
+    message = f"{node} 단계의 Supervisor LLM decision에 실패했습니다: {exc}"
+    errors = list(state.get("decision_errors", []))
+    errors.append(
+        {
+            "node": node,
+            "error_type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+    )
+    return {
+        "terminal_state": SupervisorTerminalState.failed_terminal.value,
+        "next_action": "finalize",
+        "final_answer": message,
+        "current_step": node,
+        "decision_errors": errors,
+        "error_state": {
+            "node": node,
+            "message": message,
+        },
+    }
+
+
+def _terminal_failure_updates(
+    state: SupervisorState,
+    node: str,
+    message: str,
+    *,
+    llm_decisions: list[dict[str, Any]] | None = None,
+    extra_updates: SupervisorState | None = None,
+) -> SupervisorState:
+    updates: SupervisorState = {
+        "terminal_state": SupervisorTerminalState.failed_terminal.value,
+        "next_action": "finalize",
+        "final_answer": message,
+        "current_step": node,
+        "error_state": {
+            "node": node,
+            "message": message,
+        },
+    }
+    if llm_decisions is not None:
+        updates["llm_decisions"] = llm_decisions
+    if extra_updates:
+        updates.update(extra_updates)
+    return updates
 
 
 def _route_after_clarify(state: SupervisorState) -> str:
-    if state.get("terminal_state") == SupervisorTerminalState.needs_clarification.value:
+    if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
     return "create_analysis_plan"
 
@@ -330,12 +520,12 @@ def _route_after_decide(state: SupervisorState) -> str:
 
 
 def _route_after_execute(state: SupervisorState) -> str:
+    if state.get("current_step") == "executed_subagent" and state.get("last_agent_result"):
+        return "validate_subagent_result"
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
     if state.get("current_step") == "guard_blocked" and state.get("next_action") in ACTION_TO_AGENT:
         return "execute_subagent"
-    if state.get("current_step") == "executed_subagent" and state.get("last_agent_result"):
-        return "validate_subagent_result"
     return "finalize"
 
 
@@ -344,6 +534,6 @@ def _route_after_summarize(state: SupervisorState) -> str:
         return "finalize"
     if state.get("next_action") in ACTION_TO_AGENT:
         return "execute_subagent"
-    if state.get("next_action") == "finalize":
+    if state.get("next_action") in {"finalize", "fail"}:
         return "finalize"
     return "decide_next_action"

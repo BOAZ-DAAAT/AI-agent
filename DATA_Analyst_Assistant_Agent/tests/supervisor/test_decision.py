@@ -7,7 +7,26 @@ from dataclasses import dataclass
 import pytest
 from pydantic import ValidationError
 
-from DATA_Analyst_Assistant_Agent.supervisor.decision import decide_next_action, parse_decision_json
+from DATA_Analyst_Assistant_Agent.supervisor.decision import (
+    AnalysisPlanDecision,
+    ClarificationDecision,
+    ExecutionGuardDecision,
+    FinalizationDecision,
+    ResultValidationDecision,
+    StepSummaryDecision,
+    SupervisorDecision,
+    build_clarification_context,
+    build_execution_guard_context,
+    build_finalization_context,
+    build_next_action_context,
+    build_plan_context,
+    build_result_validation_context,
+    build_step_summary_context,
+    decide_next_action,
+    invoke_supervisor_decision,
+    parse_decision_json,
+    parse_decision_json_as,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
 from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
@@ -76,6 +95,86 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
 
     assert decision.next_action == "finalize"
     assert decision.reason == "리포트 완료"
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (
+            SupervisorDecision,
+            {"next_action": "call_sql_agent", "reason": "SQL 실행"},
+        ),
+        (
+            ClarificationDecision,
+            {
+                "needs_clarification": False,
+                "clarified_query": "월별 매출 분석",
+                "clarification_question": "",
+                "reason": "충분함",
+            },
+        ),
+        (
+            AnalysisPlanDecision,
+            {
+                "goal": "월별 매출 분석",
+                "route_kind": "trend",
+                "steps": ["SQL", "EDA"],
+                "metric": "매출",
+                "dimension": "월",
+                "filters": [],
+                "requires_mart_review": False,
+                "reason": "추이 분석",
+            },
+        ),
+        (
+            ExecutionGuardDecision,
+            {"allowed": True, "next_action": "call_sql_agent", "reason": "실행 가능"},
+        ),
+        (
+            ResultValidationDecision,
+            {
+                "valid": True,
+                "next_action": "create_plan",
+                "reason": "유효함",
+                "terminal_state": "running",
+                "final_answer": "",
+            },
+        ),
+        (
+            StepSummaryDecision,
+            {
+                "step": "validate_subagent_result",
+                "agent": "sql_agent",
+                "action": "call_sql_agent",
+                "summary": "SQL 완료",
+                "artifact_ids": ["artifact_sql"],
+                "next_action": "call_eda_agent",
+                "reason": "요약",
+            },
+        ),
+        (
+            FinalizationDecision,
+            {
+                "terminal_state": "completed",
+                "final_answer": "완료",
+                "next_action": "finalize",
+                "reason": "종료",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        lambda text: text,
+        lambda text: f"판단 결과입니다.\n```json\n{text}\n```",
+        lambda text: f"다음 JSON을 사용하세요: {text} 감사합니다.",
+    ],
+)
+def test_parse_decision_json_as_supports_all_decision_schemas(schema, payload, wrapper) -> None:
+    decision = parse_decision_json_as(wrapper(json.dumps(payload, ensure_ascii=False)), schema)
+
+    assert decision.model_dump(mode="json") == payload
 
 
 def test_decide_next_action_uses_model_json_when_available() -> None:
@@ -182,6 +281,57 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     assert len(model.messages[1]["content"]) <= 6000
     snapshot = json.loads(model.messages[1]["content"])
     assert snapshot["query"] == "월별 매출 추이를 분석해줘"
+
+
+def test_invoke_supervisor_decision_requires_model() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Supervisor LLM decision model is required."):
+        invoke_supervisor_decision(state, None, "prompt", SupervisorDecision, extra={})
+
+
+def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="datasource_001",
+        catalog_summary={"tables": [{"name": "sales", "detail": "상세" * 1000}] * 20},
+    )
+    state["analysis_plan"] = {
+        "goal": "매출 분석" * 1000,
+        "steps": [{"name": f"step_{index}", "detail": "상세 설명" * 500} for index in range(20)],
+    }
+    state["last_agent_result"] = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="SQL 완료" * 500,
+        artifact_ids=["artifact_sql"],
+    ).model_dump(mode="json")
+
+    contexts = [
+        build_clarification_context(state),
+        build_plan_context(state),
+        build_next_action_context(state),
+        build_execution_guard_context(state),
+        build_result_validation_context(state),
+        build_step_summary_context(state),
+        build_finalization_context(state),
+    ]
+
+    assert "latest_user_query" in contexts[0]
+    assert "query" in contexts[1]
+    assert "available_next_actions" in contexts[2]
+    assert "requested_next_action" in contexts[3]
+    assert "last_agent_result" in contexts[4]
+    assert "latest_validation_result" in contexts[5]
+    assert "terminal_state" in contexts[6]
+    assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
 
 
 def test_summarize_agent_step_is_compact() -> None:
