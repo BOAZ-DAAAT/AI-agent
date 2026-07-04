@@ -34,10 +34,14 @@ def build_analysis_context(
     quality_statuses: list[str] = []
     issues: list[str] = []
     for profile in eda_profiles:
-        status = profile.get("quality_status")
+        profile_block = profile.get("profile", profile)
+        status = profile_block.get("quality_status")
         if status:
             quality_statuses.append(str(status))
-        issues.extend(str(item) for item in profile.get("key_issues", []) or [])
+        issues.extend(str(item) for item in profile_block.get("key_issues", []) or [])
+        for caution in profile.get("cautions", []) or []:
+            if isinstance(caution, dict) and caution.get("message_ko"):
+                issues.append(str(caution["message_ko"]))
 
     plan = state.plan
     return AnalysisContext(

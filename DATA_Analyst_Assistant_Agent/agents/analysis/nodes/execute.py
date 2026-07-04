@@ -51,6 +51,7 @@ def build_analysis_result(
     if profiles:
         findings.append("EDA profile evidence was considered before interpreting the analysis results.")
         limitations.append("EDA profile artifacts summarize data quality signals and do not replace full validation.")
+        limitations.extend(_eda_limitations(profiles))
     if df.empty:
         findings.append("No usable rows were available in the SQL result artifacts.")
         limitations.append("Statistical tools could not run because the SQL result was empty or unreadable.")
@@ -122,11 +123,34 @@ def _method_summary(kind: AnalysisKind, tools: list[str]) -> str:
 def _quality_notes(df: pd.DataFrame, profiles: list[dict[str, Any]]) -> list[str]:
     notes: list[str] = []
     for profile in profiles:
-        status = profile.get("quality_status")
+        profile_block = profile.get("profile", profile)
+        status = profile_block.get("quality_status")
         if status:
             notes.append(f"EDA quality status: {status}.")
-        notes.extend(str(item) for item in profile.get("key_issues", []) or [])
+        notes.extend(str(item) for item in profile_block.get("key_issues", []) or [])
+        for caution in profile.get("cautions", []) or []:
+            if isinstance(caution, dict) and caution.get("message_ko"):
+                notes.append(f"EDA caution ({caution.get('severity', 'unknown')}): {caution['message_ko']}")
     for column, count in df.isna().sum().items():
         if int(count) > 0:
             notes.append(f"Column {column} contains {int(count)} missing values.")
     return list(dict.fromkeys(notes))
+
+
+def _eda_limitations(profiles: list[dict[str, Any]]) -> list[str]:
+    limitations: list[str] = []
+    for profile in profiles:
+        data_level = profile.get("data_level", {}) or {}
+        if data_level.get("is_aggregated"):
+            limitations.append(
+                "EDA indicates aggregated data; avoid individual customer/order/product-level interpretation."
+            )
+        for constraint in profile.get("analysis_constraints", []) or []:
+            blocked = ", ".join(str(item) for item in constraint.get("blocked_operations", []) or [])
+            reason = constraint.get("reason_ko") or "EDA analysis constraint applies."
+            if blocked:
+                limitations.append(f"{reason} Blocked operations: {blocked}.")
+        for caution in profile.get("cautions", []) or []:
+            if isinstance(caution, dict) and caution.get("implication") == "avoid_causal_claims":
+                limitations.append("Observed associations should not be phrased as causal effects.")
+    return list(dict.fromkeys(limitations))
