@@ -74,6 +74,7 @@ class AnalysisExecutionPlan(BaseModel):
 
 class AnalysisEvidence(BaseModel):
     tool_name: str
+    status: Literal["success", "failed"] = "success"
     method: str
     inputs: dict[str, Any] = Field(default_factory=dict)
     statistics: dict[str, Any] = Field(default_factory=dict)

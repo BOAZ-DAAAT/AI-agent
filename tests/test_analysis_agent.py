@@ -14,8 +14,8 @@ from DATA_Analyst_Assistant_Agent.agents.analysis import AnalysisAgent, Analysis
 from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.execute import build_analysis_result
-from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.plan import build_analysis_plan
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.validate import run_analysis_self_check
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.plan import build_analysis_plan
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools import ANALYSIS_TOOLS
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
@@ -158,7 +158,13 @@ def test_structured_result_contains_traceable_evidence() -> None:
     result = AnalysisResult.model_validate(payload)
 
     assert result.plan.analysis_kind.value == "group_comparison"
-    assert {item.tool_name for item in result.evidence} == {"describe_metric", "compare_groups"}
+    assert {item.tool_name for item in result.evidence} == {
+        "describe_metric",
+        "compare_groups",
+        "test_group_difference",
+    }
+    failed_test = next(item for item in result.evidence if item.tool_name == "test_group_difference")
+    assert failed_test.status == "failed"
     assert "SQL result contains 3 rows and 2 columns." in result.key_findings
     assert "Top category by revenue is B (20)." in result.key_findings
     assert result.hypotheses[0].decision == "inconclusive"
@@ -222,6 +228,19 @@ def test_analysis_self_check_flags_methodology_gaps() -> None:
     assert check.passed is False
     assert check.severity == "error"
     assert "test_rmse" in check.detail
+
+
+def test_failed_tool_evidence_satisfies_plan_traceability_contract() -> None:
+    state = _state("run_failed_tool_evidence")
+    df = pd.DataFrame({"category": ["A", "B", "A"], "revenue": [10, 20, 5]})
+    payload = build_analysis_result(state, dataframe=df, execution_plan=_execution_plan())
+
+    checks = run_analysis_self_check(payload)
+
+    assert next(check for check in checks if check.name == "all_planned_tools_executed").passed is True
+    failure_check = next(check for check in checks if check.name == "tool_execution_failures")
+    assert failure_check.passed is False
+    assert failure_check.severity == "error"
 
 
 def test_causal_request_emits_human_review_requirement() -> None:
