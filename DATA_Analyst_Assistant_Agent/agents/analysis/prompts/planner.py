@@ -16,6 +16,9 @@ Rules:
 - Prefer inferential tests with assumptions and effect sizes over descriptive ranking alone.
 - Prediction and classification plans must separate training from evaluation.
 - Anomaly detection identifies review candidates, not confirmed errors or fraud.
+- If the request does not fit the specialized domains/tools in the catalog, use the general fallback:
+  question_type="general_task", analysis_kind="general_task",
+  analysis_subtype="llm_code_generated_analysis", tool_names=["code_generator"].
 - If the requested analysis cannot be supported by available columns, raise an error by producing
   an empty tool_names list and explain the issue in review_reason. Do not silently substitute a
   different question type.

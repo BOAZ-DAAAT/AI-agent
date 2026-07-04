@@ -186,6 +186,11 @@ def evidence_from_payload(
         )
         method = "Constrained OR-Tools allocation"
         caveats.append("Optimization is a recommendation and requires approval before operational execution.")
+    elif tool_name == "code_generator":
+        generated_findings = payload.get("findings") or []
+        finding = generated_findings[0] if generated_findings else payload.get("summary", "Generated code analysis completed.")
+        method = "LLM-generated pandas code analysis"
+        caveats.extend(payload.get("limitations") or [])
     else:
         raise ValueError(f"No insight formatter is registered for tool: {tool_name}")
     return AnalysisEvidence(

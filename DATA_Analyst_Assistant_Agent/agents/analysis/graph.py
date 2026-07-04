@@ -28,6 +28,7 @@ class AnalysisWorkflowState(TypedDict, total=False):
     eda_profiles: list[dict[str, Any]]
     question_type: str | None
     planner_model: Any | None
+    code_generator_model: Any | None
     chart_artifact_loader: Any | None
     chart_reader: Any | None
     execution_plan: AnalysisExecutionPlan
@@ -70,6 +71,7 @@ def execute_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             eda_profiles=state.get("eda_profiles", []),
             question_type=state.get("question_type"),
             execution_plan=state["execution_plan"],
+            code_generator_model=state.get("code_generator_model"),
         )
         return {"result": result, "error": "", "terminal_reason": ""}
     except Exception as exc:
@@ -165,6 +167,7 @@ def run_analysis_workflow(
     planner_model: Any | None = None,
     chart_artifact_loader: Any | None = None,
     chart_reader: Any | None = None,
+    code_generator_model: Any | None = None,
 ) -> tuple[dict[str, Any], list[LocalCheck], str]:
     output = build_analysis_graph().invoke({
         "orchestration_state": state,
@@ -172,6 +175,7 @@ def run_analysis_workflow(
         "eda_profiles": eda_profiles,
         "question_type": question_type,
         "planner_model": planner_model,
+        "code_generator_model": code_generator_model,
         "chart_artifact_loader": chart_artifact_loader,
         "chart_reader": chart_reader,
         "retry_count": 0,

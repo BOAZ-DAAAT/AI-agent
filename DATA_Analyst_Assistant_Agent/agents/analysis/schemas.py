@@ -29,6 +29,7 @@ class AnalysisKind(str, Enum):
     clv = "clv"
     geospatial = "geospatial"
     optimization = "optimization"
+    general_task = "general_task"
 
 
 class AnalysisContext(BaseModel):
