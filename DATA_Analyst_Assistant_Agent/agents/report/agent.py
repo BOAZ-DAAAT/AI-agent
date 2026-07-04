@@ -20,15 +20,11 @@ class ReportAgent:
         analysis_result = None
         if state.artifact_ids.get("analysis_agent"):
             analysis_result = read_json_artifact(runtime, state.artifact_ids["analysis_agent"][0])
-        visualization_result = None
-        if state.artifact_ids.get("visualization_agent"):
-            visualization_result = read_json_artifact(runtime, state.artifact_ids["visualization_agent"][0])
         report = build_report(
             state,
             generated_sql=generated_sql_from_artifacts(state, runtime),
             eda_profile=eda_profile,
             analysis_result=analysis_result,
-            visualization_result=visualization_result,
         )
         ref = runtime.adapter.save_workspace_file(
             state.run_id,
@@ -46,5 +42,4 @@ class ReportAgent:
             summary="Final report generated from registered evidence artifacts.",
             artifact_refs=[ref],
             validation=ValidationBlock(local_checks=run_report_self_check(report)),
-            next_handoff="validation_agent",
         )

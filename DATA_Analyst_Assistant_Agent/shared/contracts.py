@@ -82,7 +82,6 @@ class AgentEnvelope(BaseModel):
     retry_hint: RetryHint = Field(default_factory=RetryHint)
     approval: ApprovalRequirement = Field(default_factory=ApprovalRequirement)
     context_refs: list[ContextRef] = Field(default_factory=list)
-    next_handoff: str = "validation_agent"
 
     def artifact_ids(self) -> list[str]:
         return [ref.artifact_id for ref in self.artifact_refs]

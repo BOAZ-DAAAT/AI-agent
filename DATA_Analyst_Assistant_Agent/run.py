@@ -384,7 +384,6 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     sql_item = _first_artifact(artifacts, "sql_agent", "sql_result")
     sql_plan = _artifact_json(_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result"))
     analysis = _artifact_json(_first_artifact(artifacts, "analysis_agent", "analysis_result"))
-    chart = _artifact_json(_first_artifact(artifacts, "visualization_agent", "vega_lite_spec"))
     columns, rows = _read_csv_artifact(sql_item)
 
     final_answer = str(sql_plan.get("final_answer") or sql_plan.get("preview", {}).get("final_answer") or "")
@@ -404,13 +403,13 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
                 "</tr>"
             )
 
-    chart_preview = (_first_artifact(artifacts, "visualization_agent") or {}).get("preview", {})
+    chart_preview = {}
     encoding = chart_preview.get("encoding", {}) if isinstance(chart_preview, dict) else {}
     x_field = ((encoding.get("x") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
     y_field = ((encoding.get("y") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
-    chart_type = chart_preview.get("chart_type") or chart.get("mark", {}).get("type") or chart.get("mark") or "unknown"
-    chart_title = chart_preview.get("title") or chart.get("title") or "제목 없는 차트"
-    chart_body = _chart_svg(columns, rows, str(x_field), str(y_field))
+    chart_type = "not_generated"
+    chart_title = "Visualization artifact not generated"
+    chart_body = "<p>Visualization is disabled as a separate agent in the current flow.</p>"
 
     key_findings = analysis.get("key_findings") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("key_findings") or []
     limitations = analysis.get("limitations") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("limitations") or []
