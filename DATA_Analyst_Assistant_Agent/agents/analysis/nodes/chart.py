@@ -186,7 +186,7 @@ def _default_multimodal_chart_reader(chart: dict[str, Any], image_bytes: bytes, 
     if not (os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")):
         return _visual_status(chart, "reader_unavailable", "GPT multimodal chart reader is not configured.")
 
-    model = get_chat_model(model_env="CHART_READER_MODEL", default_model=os.getenv("CHART_READER_MODEL", "gpt-5"))
+    model = get_chat_model(model_env="CHART_READER_MODEL", default_model="gpt-5")
     encoded = base64.b64encode(image_bytes).decode("ascii")
     prompt = (
         "이 차트를 데이터 분석 근거로 읽어줘. "
