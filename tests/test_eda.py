@@ -18,6 +18,8 @@ from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import (
 )
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.clustering_skill import _select_k
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight import (
+    classify_semantic_categorical,
+    classify_semantic_numeric,
     compute_categorical_distribution,
     compute_correlation_pairs,
     compute_group_comparison,
@@ -729,3 +731,86 @@ def test_hypothesis_node_falls_back_when_llm_raises(monkeypatch):
     finally:
         reset_context()
     assert "실패" in update["hypotheses"]          # run_node_with_retry 폴백
+
+
+# ─────────────────────────────
+# semantic_type 분류 + handling 교정 (순수 코드, 토큰 0)
+# ─────────────────────────────
+def _num(col, values):
+    s = pd.Series(values, dtype="float64").dropna()
+    return classify_semantic_numeric(
+        col, s, int(s.nunique()), bool(s.min() > 0), bool(s.min() >= 0))
+
+
+def test_semantic_numeric_rating_name_and_value_agree_high():
+    st, conf = _num("review_score", list(range(1, 6)) * 40)          # 정수 1~5
+    assert st == "rating" and conf == "high"
+
+
+def test_semantic_numeric_monetary_name_and_positive_values_high():
+    st, conf = _num("order_price", [12.5, 88.0, 250.3, 9.9] * 30)     # 이름 price + 양수 실수
+    assert st == "monetary" and conf == "high"
+
+
+def test_semantic_numeric_count_name_and_value_agree():
+    st, conf = _num("num_items", [0, 1, 2, 3, 1, 2, 0, 5] * 30)       # num_ + 음수없는 정수
+    assert st == "count" and conf == "high"
+
+
+def test_semantic_numeric_id_from_near_unique_integers():
+    st, conf = _num("txn_id", list(range(500)))                      # 이름 _id + unique≈n
+    assert st == "id" and conf == "high"
+
+
+def test_semantic_numeric_name_value_disagree_is_medium():
+    st, conf = _num("delivery_days", list(range(1, 41)))             # 이름 duration vs 값 count
+    assert st == "duration" and conf == "medium"
+
+
+def test_semantic_numeric_no_signal_is_generic_low():
+    st, conf = _num("x", [-3.2, 0.5, -1.1, 4.4, -9.9])              # 이름·값 신호 없음
+    assert st == "generic" and conf == "low"
+
+
+def test_semantic_categorical_id_when_near_unique():
+    assert classify_semantic_categorical("order_id", True)[0] == "id"
+
+
+def test_semantic_categorical_category_when_repeated():
+    st, conf = classify_semantic_categorical("product_category", False)
+    assert st == "category" and conf == "high"
+
+
+def test_handling_rating_excludes_log_and_outlier_removal():
+    df = pd.DataFrame({"review_score": [1, 2, 3, 4, 5, 5, 5, 4, 1] * 40})
+    h = compute_numeric_distribution(df, ["review_score"])["review_score"]["eda_notes"]["recommended_handling"]
+    assert "treat_as_ordinal" in h
+    assert not any("log" in x for x in h)          # 평점에 log 변환 추천 금지
+    assert "avoid_naive_outlier_removal" not in h  # 1점은 이상치가 아니라 진짜 값
+
+
+def test_handling_id_is_exclude_from_analysis():
+    df = pd.DataFrame({"txn_id": list(range(300))})
+    h = compute_numeric_distribution(df, ["txn_id"])["txn_id"]["eda_notes"]["recommended_handling"]
+    assert h == ["exclude_from_analysis"]
+
+
+def test_insight_node_aggregated_key_col_becomes_group_key(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
+    monkeypatch.setattr(I, "get_llm", lambda: _FakeLLM("[]"))       # LLM 호출 폴백
+    df = pd.DataFrame({
+        "product_category": [f"c{i}" for i in range(40)],           # 카테고리당 1행 = 집계본
+        "avg_review_score": np.linspace(3.0, 5.0, 40),
+        "total_orders": np.arange(100, 140),
+    })
+    reset_context()
+    set_context(EdaContext(df=df, key_col="product_category",
+                           measure_cols=["avg_review_score", "total_orders"]))
+    try:
+        update = I.insight_node({"user_question": "카테고리 비교", "question_type": ""})
+    finally:
+        reset_context()
+    key_entry = update["statistical_metadata"]["distribution"]["product_category"]
+    assert key_entry["semantic_type"] == "group_key"       # id 오판이 group_key로 교정
+    assert key_entry["semantic_confidence"] == "high"
+    assert key_entry["is_id_like"] is False
