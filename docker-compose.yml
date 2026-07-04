@@ -1,0 +1,46 @@
+# 상자(컨테이너)들을 함께 정의하고 실행하는 파일.
+# 서버에서  `docker compose up -d`  한 줄로 아래 서비스가 전부 뜬다.
+# 비밀값(비번/키)은 여기 직접 쓰지 않고 같은 폴더의 .env 에서 읽어온다.
+
+services:
+  # ── MySQL 8: 추출한 테이블 + SQL 에이전트가 만든 analytics 마트를 저장 ──
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped          # 서버 재부팅/충돌 시 자동 재시작
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DATAMART_DB_NAME:-analytics}   # 없으면 analytics로 기본값
+      MYSQL_USER: ${DATAMART_DB_USER}
+      MYSQL_PASSWORD: ${DATAMART_DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql     # DB 데이터를 볼륨에 영속화(컨테이너 지워도 유지)
+    ports:
+      - "127.0.0.1:3306:3306"         # 서버 내부에서만 접근(외부 노출 X). 로컬 디버깅용
+    healthcheck:                      # "MySQL이 진짜 준비됐는지" 확인
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── FastAPI 백엔드: 위 Dockerfile로 빌드 ──
+  backend:
+    build: .                          # 현재 폴더의 Dockerfile로 이미지 빌드
+    restart: unless-stopped
+    env_file: .env                    # .env의 모든 값을 컨테이너 환경변수로 주입
+    environment:
+      # backend는 MySQL을 "mysql"이라는 서비스 이름(=호스트명)으로 접속한다.
+      # .env에 다른 값이 있어도 여기 값이 우선 적용된다.
+      DATAMART_DB_HOST: mysql
+      DATAMART_DB_PORT: "3306"
+    volumes:
+      - agent_data:/app/.data_agent   # CSV·artifacts·backend.sqlite 영속화
+    ports:
+      - "8000:8000"                   # 외부:컨테이너 → 밖에서 8000으로 접속 가능
+    depends_on:
+      mysql:
+        condition: service_healthy    # MySQL이 healthy 된 뒤에 backend 시작
+
+# 컨테이너 밖에 데이터를 보관하는 창고. 컨테이너 재생성과 무관하게 유지된다.
+volumes:
+  mysql_data:
+  agent_data:
