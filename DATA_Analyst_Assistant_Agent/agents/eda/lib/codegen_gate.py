@@ -44,7 +44,12 @@ _DENY_EXEC = {"eval", "query"}
 # 서브모듈 순회로 IO/시스템에 도달하는 진입점 차단 (예: np.lib.npyio.*, pd.io.*, ctypeslib)
 # 계산용 표현식은 이 속성들을 쓸 일이 없다(df/pd/np의 계산 함수만 필요).
 _DENY_TRAVERSAL = {"lib", "core", "io", "ctypeslib", "testing", "distutils"}
-_DENY_ATTRS = _DENY_EXPLODE | _DENY_IO | _DENY_EXEC | _DENY_TRAVERSAL
+# 대형 배열 생성 (크기 인자로 메모리 폭발 — np.ones((10**9,)) 등). 집계 표현식은 쓸 일이 없다.
+# ⚠️ "empty"는 df.empty(빈 DF 여부 체크)와 충돌하므로 제외한다.
+_DENY_ALLOC = {"ones", "zeros", "full", "arange", "linspace", "logspace", "geomspace",
+               "eye", "identity", "tile", "broadcast_to", "meshgrid",
+               "ones_like", "zeros_like", "full_like", "fromiter", "frombuffer"}
+_DENY_ATTRS = _DENY_EXPLODE | _DENY_IO | _DENY_EXEC | _DENY_TRAVERSAL | _DENY_ALLOC
 
 _VALID_SHAPES = {"scalar", "series", "frame"}
 

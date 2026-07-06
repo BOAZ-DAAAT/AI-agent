@@ -231,6 +231,31 @@ def test_route_after_planner_unknown_goes_to_insight():
     assert route_after_planner({"next_analysis": "not_a_real_node"}) == "insight"
 
 
+def test_route_after_planner_selects_codegen():
+    # 질문기준: 플래너가 codegen을 직접 고르면 codegen 노드로 (존재기준 fallback 아님).
+    assert route_after_planner({"next_analysis": "codegen"}) == "codegen"
+
+
+def test_planner_prompt_offers_codegen_with_guardrail():
+    from DATA_Analyst_Assistant_Agent.agents.eda.prompts.planner import planner_prompt
+    shape = {"row_count": 100, "numeric_cols": ["a"], "cat_cols": ["b"], "time_cols": []}
+    p = planner_prompt("파생 비율 질문", "", shape,
+                       [{"name": "distribution", "desc": "분포"}], {},
+                       round_idx=0, max_rounds=5, need_priority=False, codegen_selectable=True)
+    assert "codegen" in p                       # 카드 노출
+    assert "최후수단" in p and "도구 우선" in p   # over-fire 방지 울타리 문구
+
+
+def test_planner_prompt_hides_codegen_when_not_selectable():
+    # 기본값(codegen_selectable=False)일 땐 codegen 카드/문구가 안 나온다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.prompts.planner import planner_prompt
+    shape = {"row_count": 100, "numeric_cols": ["a"], "cat_cols": ["b"], "time_cols": []}
+    p = planner_prompt("정상 질문", "", shape,
+                       [{"name": "distribution", "desc": "분포"}], {},
+                       round_idx=0, max_rounds=5, need_priority=False)
+    assert "codegen" not in p
+
+
 # ─────────────────────────────
 # validator 순수 함수 (LLM 없는 결정론 체크)
 # ─────────────────────────────
@@ -965,6 +990,30 @@ def test_gate_still_rejects_wrong_original_column():
     assert not r.ok and "unknown_column: prop" in r.reason
 
 
+def test_gate_rejects_large_alloc():
+    # 대형 배열 생성(메모리 폭발)은 거부. np.ones/zeros/arange 등.
+    for expr in ('np.ones((10**9,))', 'np.zeros(10**9)', 'np.arange(10**9)',
+                 'np.full(10**9, 1)', 'np.tile(df["order_price"].values, 10**6)'):
+        r = validate_expression(expr, _COLS)
+        assert not r.ok and "denied_method" in r.reason, expr
+
+
+def test_gate_allows_df_empty_property():
+    # 완화 주의: df.empty(빈 DF 체크)는 alloc denylist("empty" 제외)라 여전히 허용.
+    r = validate_expression('df.empty', _COLS)
+    assert r.ok, r.reason
+
+
+def test_plot_top_n_barplot_top_only_skips_bottom(tmp_path):
+    # top_only=True면 하위 잉여차트를 안 그린다(codegen용).
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
+    visualize.set_output_dirs(str(tmp_path))
+    d = pd.DataFrame({"cat": list("abcdef"), "value": [6.0, 5, 4, 3, 2, 1]})
+    out = visualize.plot_top_n_barplot(d, measure_cols=["value"], top_only=True)
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert names and all("bar_bottom" not in n for n in names)
+
+
 def test_validate_request_rejects_bad_shape():
     req = CodegenRequest(intent="x", target_columns=["order_price"],
                          expression='df["order_price"].mean()', expected_shape="matrix")
@@ -1107,10 +1156,72 @@ def test_codegen_judge_failure_does_not_retry(monkeypatch):
     assert "errors" not in out                              # 시도 자체가 없어 errors 없음
 
 
+def test_codegen_success_emits_chart_request(monkeypatch, tmp_path):
+    # codegen 성공(차트 있음) → PNG와 별개로 chart_request 계약도 ctx에 발행된다.
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+    from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
+    visualize.set_output_dirs(str(tmp_path))                # 차트 파일 오염 방지
+    df = pd.DataFrame({"cat": list("aabbcc"), "order_price": [1.0, 2, 3, 4, 5, 6]})
+    gen = _json.dumps({"intent": "카테고리별 평균가", "target_columns": ["cat", "order_price"],
+                       "expression": 'df.groupby("cat")["order_price"].mean()',
+                       "expected_shape": "series", "chart_hint": "bar"})
+
+    def fake_get_llm(model_env="LLM_MODEL"):
+        return _FakeLLM(gen if model_env == "CODE_GENERATOR_MODEL"
+                        else '{"computable": true, "reason": "ok"}')
+
+    monkeypatch.setattr(C, "get_llm", fake_get_llm)
+    reset_context()
+    set_context(EdaContext(df=df))
+    try:
+        out = C.codegen_node({"user_question": "카테고리별 평균가"})["codegen"]
+        reqs = list(get_context().chart_requests)
+    finally:
+        reset_context()
+    assert out["status"] == "success"
+    assert len(reqs) == 1
+    assert reqs[0]["hint"] == "bar" and reqs[0]["stats"]["source"] == "codegen"
+    assert reqs[0]["stats"]["expression"] == 'df.groupby("cat")["order_price"].mean()'
+    # 컬럼 타입은 df에서 실제 추론(unknown 퉁치기 아님)
+    assert reqs[0]["columns"]["cat"]["type"] == "categorical"
+    assert reqs[0]["columns"]["order_price"]["type"] == "numeric"
+
+
 def test_route_done_without_substantive_goes_codegen():
     state = {"next_analysis": "done", "controller_log": [{"choice": "quality"}],
              "quality_result": "품질 점검"}          # quality만 = 실질분석 없음 → codegen
     assert route_after_planner(state) == "codegen"
+
+
+def test_planner_node_can_select_codegen(monkeypatch):
+    # 질문기준 발동: 플래너가 codegen을 고르면 환각가드가 죽이지 않고 그대로 통과시킨다.
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
+    monkeypatch.setattr(P, "get_llm",
+                        lambda *a, **k: _FakeLLM('{"next": "codegen", "reason": "파생 비율은 도구로 불가"}'))
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    try:
+        out = P.planner_node({"user_question": "X 이상 비율", "controller_log": [], "round": 0})
+    finally:
+        reset_context()
+    assert out["next_analysis"] == "codegen"
+
+
+def test_planner_node_rejects_hallucinated_choice(monkeypatch):
+    # codegen은 허용하되, 목록 밖 엉뚱한 값은 여전히 done으로 강등한다.
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
+    monkeypatch.setattr(P, "get_llm",
+                        lambda *a, **k: _FakeLLM('{"next": "teleport", "reason": "환각"}'))
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    try:
+        out = P.planner_node({"user_question": "정상 질문", "controller_log": [], "round": 0})
+    finally:
+        reset_context()
+    assert out["next_analysis"] == "done"
 
 
 def test_build_app_compiles_with_codegen():
@@ -1280,8 +1391,19 @@ def test_gate_rejects_invalid_chart_hint():
 # ─────────────────────────────
 def test_route_after_codegen_out_of_domain_ends():
     from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
+    # 실질 결과 전혀 없음(진짜 도메인 밖) → 종료
     assert route_after_codegen({"codegen": {"status": "out_of_domain"}}) == "end"
     assert route_after_codegen({"codegen": {"status": "success"}}) == "insight"
+
+
+def test_route_after_codegen_out_of_domain_with_tool_output_goes_insight():
+    # 플래너가 codegen을 오버픽했지만 실패(out_of_domain) — 도구가 이미 실질 결과를 냈으면
+    # 그 분석을 버리지 않고 insight로. (over-fire 피해 방지)
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
+    state = {"codegen": {"status": "out_of_domain"},
+             "controller_log": [{"choice": "comparison"}, {"choice": "codegen"}],
+             "comparison_result": "카테고리별 평균 비교 결과"}
+    assert route_after_codegen(state) == "insight"
 
 
 def test_out_of_domain_is_honest_not_mixed_summary(monkeypatch):

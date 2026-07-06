@@ -217,8 +217,10 @@ def plot_category_distribution(df: pd.DataFrame, top_n: int = 20,
 # Comparison
 # ─────────────────────────────
 
-def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, measure_cols: list = None) -> dict:
-    """카테고리 키 기준 수치형 지표 상위/하위 N개 barplot + 실제 값"""
+def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, measure_cols: list = None,
+                       top_only: bool = False) -> dict:
+    """카테고리 키 기준 수치형 지표 상위/하위 N개 barplot + 실제 값.
+    top_only=True면 상위만 그린다(codegen처럼 이미 정렬·상위추출된 결과에 하위 잉여 방지)."""
     paths = []
     stats = {}
     cat_cols = df.select_dtypes(include=["object"]).columns
@@ -239,6 +241,8 @@ def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, m
             "bottom": bottom_df.set_index(key_col)[metric].round(4).to_dict(),
         }
         for label, subset, color in [("top", top_df, PALETTE_POS), ("bottom", bottom_df, PALETTE_NEG)]:
+            if label == "bottom" and top_only:
+                continue                                       # 상위만 요청됨(codegen 등)
             # bottom이 전부 0이면 스킵
             if label == "bottom" and subset[metric].max() == 0:
                 continue

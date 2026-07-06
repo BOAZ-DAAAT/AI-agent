@@ -18,8 +18,28 @@ def planner_prompt(
     round_idx: int,
     max_rounds: int,
     need_priority: bool,
+    codegen_selectable: bool = False,
 ) -> str:
     cards_text = "\n".join(f"- {c['name']}: {c['desc']}" for c in feasible_cards) or "(없음)"
+
+    # codegen 카드 — 6개 분석 도구로 구조적으로 계산 불가한 질문에만. 도구 우선(over-fire 방지 울타리).
+    codegen_block = ""
+    codegen_rule = ""
+    codegen_next_hint = ""
+    if codegen_selectable:
+        codegen_block = (
+            "\n\n[특수 카드]\n"
+            "- codegen: 위 분석 도구로는 계산할 수 없는 파생 지표를 직접 계산한다 "
+            "(예: 조건부 비율 'X 이상 비율', 특정 서브셋 집계 '상위 10% 중 평균', "
+            "사용자 정의 파생 컬럼, 그룹별 커스텀 비율/순위)."
+        )
+        codegen_rule = (
+            '\n- ⚠️ codegen은 최후수단이다. 분포·비교·상관·시계열 도구로 답할 수 있는 질문이면 '
+            "절대 codegen을 고르지 마라(도구 우선). 위 도구들로 구조적으로 계산이 불가능한 "
+            "파생 계산이 질문의 핵심일 때만 codegen을 골라라. "
+            "이미 실행한 분석으로 질문에 충분히 답했다면 codegen이 아니라 done을 골라라."
+        )
+        codegen_next_hint = ', codegen'
     if completed_findings:
         done_text = "\n".join(
             f"[{name}] {(summary or '')[:400]}" for name, summary in completed_findings.items()
@@ -51,18 +71,18 @@ def planner_prompt(
 {done_text}
 
 [지금 실행 가능한 분석 (이 목록에서만 골라라)]
-{cards_text}
+{cards_text}{codegen_block}
 
 [현재 {round_idx + 1}번째 라운드 / 최대 {max_rounds}라운드]
 {priority_block}
 판단 기준:
 - 사용자 질문에 답하고 가설을 세우기에 "충분히" 봤다면 "done"을 골라라. 모든 분석을 다 할 필요 없다.
 - 지금까지 결과에서 흥미로운 단서(강한 상관, 큰 그룹 차이 등)가 보이면, 그걸 더 파고들 분석을 골라라.
-- 실행 가능 목록에 없는 분석은 고르지 마라.
+- 실행 가능 목록에 없는 분석은 고르지 마라.{codegen_rule}
 
 반드시 아래 JSON만 출력하라. 설명 없이.
 {{
-  "next": "위 목록의 분석명 중 하나, 또는 done",
+  "next": "위 목록의 분석명 중 하나, done{codegen_next_hint}",
   "reason": "왜 이걸 골랐는지(또는 왜 done인지) 한 문장"{priority_json}
 }}
 """

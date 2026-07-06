@@ -87,6 +87,7 @@ def planner_node(state: EDAState) -> dict:
             round_idx=round_idx,
             max_rounds=MAX_ANALYSES,
             need_priority=need_priority,
+            codegen_selectable=True,   # 질문기준 발동: 도구로 못 푸는 파생계산이면 플래너가 codegen 선택
         )
         fb = state.get("validation_feedback")
         if fb:
@@ -99,8 +100,9 @@ def planner_node(state: EDAState) -> dict:
 
         choice = decision.get("next", "done")
         reason = decision.get("reason", "")
-        # 환각 방지: feasible 목록 밖 선택이면 done
-        if choice != "done" and choice not in {t["name"] for t in feasible}:
+        # 환각 방지: feasible 목록 + codegen(특수 카드) 밖 선택이면 done
+        allowed = {t["name"] for t in feasible} | {"codegen"}
+        if choice != "done" and choice not in allowed:
             choice, reason = "done", f"유효하지 않은 선택({choice}) → 종료"
 
         # 첫 라운드: priority_metrics 확정 (df에 실제 있는 컬럼만)
@@ -156,6 +158,9 @@ def route_after_planner(state: EDAState):
     choice = state.get("next_analysis", "done")
     if choice in ANALYSIS_NAMES:
         return choice
+    if choice == "codegen":                 # 질문기준: 플래너가 파생계산 필요로 직접 선택
+        return "codegen"
     if choice == "done":
+        # 존재기준 fallback: 도구가 아무 결과도 못 냈으면(범주형 mart 등) codegen 자동
         return "insight" if _substantive_produced_output(state) else "codegen"
-    return "insight"   # 예상 밖 값(환각 등)은 안전 기본값 insight로 (codegen 게이트는 done에서만)
+    return "insight"   # 예상 밖 값(환각 등)은 안전 기본값 insight로

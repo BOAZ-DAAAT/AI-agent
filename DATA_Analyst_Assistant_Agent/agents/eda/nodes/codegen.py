@@ -21,9 +21,12 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import (
+    accumulate_chart_requests, get_context, get_llm, safe_json_parse,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.codegen_gate import CodegenRequest, validate_request
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
+from DATA_Analyst_Assistant_Agent.chart.contract import ChartRequest
 
 _MAX_RESULT_CELLS = 200  # 결과가 이보다 크면 잘라 실음(연산 후 방어 — 하드 리소스 보장은 아님)
 
@@ -102,7 +105,8 @@ def _render_from_hint(result: Any, chart_hint):
         from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
         if chart_hint == "bar":
             vcol = _first_value_col(df_r)                      # 값 1개만 → 잡차트 방지
-            out = visualize.plot_top_n_barplot(df_r, measure_cols=[vcol] if vcol else None)
+            # top_only: codegen 결과는 이미 정렬·상위추출됐으니 하위 잉여차트 안 그림
+            out = visualize.plot_top_n_barplot(df_r, measure_cols=[vcol] if vcol else None, top_only=True)
         elif chart_hint == "grouped_bar":
             out = visualize.plot_grouped_bar(df_r)
         else:  # line — 결과에 시간축 있어야, 없으면 함수가 빈 결과 반환(우아하게)
@@ -111,6 +115,41 @@ def _render_from_hint(result: Any, chart_hint):
         return os.path.basename(paths[0]) if paths else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _emit_chart_request(ctx, req: CodegenRequest, value: Any) -> None:
+    """codegen 성공 차트를 chart_request 계약으로도 발행한다(PNG 직접 렌더와 별개).
+
+    분석노드 차트처럼 chart_requests.json에 잡혀 report/Phase B가 소비할 수 있게 통일한다.
+    stats에 검증된 결과값(환각 방지 닻) + provenance(expression)를 담는다.
+    """
+    stats: Dict[str, Any] = {"source": "codegen", "expression": req.expression}
+    if isinstance(value, dict):                              # series 결과: {범주: 값}
+        stats["values"] = {str(k): v for k, v in list(value.items())[:20]}
+
+    df = getattr(ctx, "df", None)
+
+    def _col_type(c: str) -> str:
+        # 원본 컬럼은 실제 dtype으로, 계산 중 만든 컬럼은 derived로 표기(unknown 퉁치기 방지).
+        if df is None or c not in df.columns:
+            return "derived"
+        s = df[c]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            return "datetime"
+        if pd.api.types.is_numeric_dtype(s):
+            return "numeric"
+        return "categorical"
+
+    try:
+        cr = ChartRequest(
+            intent=req.intent or "codegen 파생 계산 결과",
+            stats=stats,
+            columns={c: {"type": _col_type(c)} for c in req.target_columns},
+            hint=req.chart_hint,
+        ).model_dump()
+        accumulate_chart_requests(ctx, [cr])
+    except Exception:  # noqa: BLE001 — 주문서 발행 실패해도 데이터 답/PNG는 유지
+        pass
 
 
 def _py(v: Any) -> Any:
@@ -221,9 +260,13 @@ def _retry_prompt(question: str, columns: list, prev_expression: str, error_reas
 
 
 def route_after_codegen(state: EDAState):
-    """codegen 성공 → insight(정상 파이프라인) / 도메인 밖 → 종료(그럴듯한 요약 생성 방지)."""
+    """codegen 성공 → insight. 도메인 밖일 때:
+      - 실질 도구가 이미 결과를 냄(플래너가 codegen을 오버픽했지만 실패 등) → insight로 정상 분석 살림
+      - 아무 실질 결과도 없음(진짜 도메인 밖) → 종료(그럴듯한 요약 생성 방지)
+    """
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import _substantive_produced_output
     if (state.get("codegen") or {}).get("status") == "out_of_domain":
-        return "end"
+        return "insight" if _substantive_produced_output(state) else "end"
     return "insight"
 
 
@@ -265,6 +308,8 @@ def codegen_node(state: EDAState) -> dict:
     attempts = 2 if errors else 1                          # errors가 있으면 재시도로 회복된 것
     value, out_shape, note = _coerce_result(result)
     chart_file = _render_from_hint(result, req.chart_hint)   # LLM 힌트→기존 함수, key_charts로 흘러감
+    if chart_file and req.chart_hint in {"bar", "line", "grouped_bar"}:
+        _emit_chart_request(ctx, req, value)                 # PNG와 별개로 chart_request 계약도 발행
     return {
         "codegen": {
             "status": "success",
