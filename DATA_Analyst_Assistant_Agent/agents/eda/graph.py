@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from DATA_Analyst_Assistant_Agent.agents.eda import nodes
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import ANALYSIS_NAMES, planner_node, route_after_planner
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import route_after_validator, validator_node
 
@@ -53,8 +54,10 @@ def build_app():
     for name in _ANALYSIS_NODE_FN:
         graph.add_edge(name, "planner")
 
-    # codegen 탈출구 → insight (결과/플래그를 이후 파이프라인이 이어받음)
-    graph.add_edge("codegen", "insight")
+    # codegen 성공 → insight(정상 파이프라인) / 도메인 밖 → 종료
+    # (out_of_domain인데 insight·hypothesis가 계속 돌면 그럴듯한 요약이 섞이므로 바로 END)
+    graph.add_conditional_edges(
+        "codegen", route_after_codegen, {"insight": "insight", "end": END})
 
     graph.add_edge("insight",        "hypothesis")
     graph.add_edge("hypothesis",     "validator")

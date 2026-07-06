@@ -943,11 +943,26 @@ def test_validate_request_ok():
     assert validate_request(req, _COLS).ok
 
 
-def test_validate_request_rejects_unknown_target_column():
-    req = CodegenRequest(intent="x", target_columns=["ghost"],
+def test_validate_request_allows_derived_target_column():
+    # target_columns는 실행 안 되는 '선언'이라(오직 expression만 eval) 보안과 무관하고,
+    # 파생·중간 컬럼이 섞일 수 있어(codegen의 본질) 하드 거부하지 않는다.
+    req = CodegenRequest(intent="x", target_columns=["prop"],   # 원본에 없는 계산 컬럼명
                          expression='df["order_price"].mean()')
-    r = validate_request(req, _COLS)
-    assert not r.ok and "unknown_target_columns" in r.reason
+    assert validate_request(req, _COLS).ok
+
+
+def test_gate_allows_derived_column_subscript():
+    # gpt-5가 계산 중 만든 파생 컬럼(prop)을 첨자로 꺼내도 통과해야 한다.
+    # (원본 df 직접 첨자만 실존 검증 — 중간결과 첨자는 런타임 KeyError로만 잡힌다.)
+    expr = 'df.groupby("product_category").agg(prop=("review_score", "mean"))["prop"]'
+    r = validate_expression(expr, _COLS)
+    assert r.ok, r.reason
+
+
+def test_gate_still_rejects_wrong_original_column():
+    # 완화 후에도 df에 직접 붙은 오타난 원본 컬럼은 여전히 거부한다.
+    r = validate_expression('df["prop"].mean()', _COLS)
+    assert not r.ok and "unknown_column: prop" in r.reason
 
 
 def test_validate_request_rejects_bad_shape():
@@ -955,6 +970,26 @@ def test_validate_request_rejects_bad_shape():
                          expression='df["order_price"].mean()', expected_shape="matrix")
     r = validate_request(req, _COLS)
     assert not r.ok and "invalid_expected_shape" in r.reason
+
+
+def test_chart_hint_string_null_normalized_to_none():
+    # LLM이 '차트 없음'을 문자열 "null"/"none"/""로 뱉어도 None으로 정규화 → 유효한 스칼라 답이
+    # invalid_chart_hint로 잘못 거부되지 않아야 한다.
+    for bad in ("null", "None", "NULL", "", "  none  "):
+        req = CodegenRequest(intent="x", target_columns=["order_price"],
+                             expression='df["order_price"].mean()', chart_hint=bad)
+        assert req.chart_hint is None, bad
+        assert validate_request(req, _COLS).ok
+
+
+def test_codegen_generate_prompt_forbids_denied_idioms():
+    # 게이트가 거부하는 관용구를 생성 프롬프트가 미리 금지하는지(신뢰성 fix, 보안 완화 아님).
+    # 실제 LLM이 지키는지는 비결정적이라 테스트하지 않고, 프롬프트 문자열만 deterministic하게 검증.
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+    p = C._generate_prompt("q", ["a", "b"])
+    assert "query" in p          # .query() 문자열 eval 금지 명시
+    assert "eval" in p
+    assert "df.loc" in p         # 필터링 대안 제시
 
 
 # ─────────────────────────────
@@ -979,6 +1014,26 @@ def _run_codegen(monkeypatch, df, judge_json, generate_json, question="X 계산"
         reset_context()
 
 
+def _run_codegen_seq(monkeypatch, df, judge_json, generate_jsons, question="X 계산"):
+    """생성 LLM이 호출마다 generate_jsons를 순서대로 돌려주는 버전(재시도 테스트용).
+    judge는 1회만 호출되고, CODE_GENERATOR_MODEL 호출마다 다음 응답을 소비한다."""
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+    seq = list(generate_jsons)
+
+    def fake_get_llm(model_env="LLM_MODEL"):
+        if model_env == "CODE_GENERATOR_MODEL":
+            return _FakeLLM(seq.pop(0) if seq else "{}")
+        return _FakeLLM(judge_json)
+
+    monkeypatch.setattr(C, "get_llm", fake_get_llm)
+    reset_context()
+    set_context(EdaContext(df=df))
+    try:
+        return C.codegen_node({"user_question": question})["codegen"]
+    finally:
+        reset_context()
+
+
 def test_codegen_success_path(monkeypatch):
     df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
     gen = _json.dumps({"intent": "평균가", "target_columns": ["order_price"],
@@ -989,6 +1044,8 @@ def test_codegen_success_path(monkeypatch):
     assert out["expression"] == 'df["order_price"].mean()'      # provenance
     assert "llm_generated" in out["cautions"]
     assert out["telemetry"]["output_shape"] == "scalar"
+    assert out["telemetry"]["attempts"] == 1                    # 첫 시도 성공
+    assert out["telemetry"]["recovered_by_retry"] is False
 
 
 def test_codegen_judge_says_not_computable(monkeypatch):
@@ -996,6 +1053,7 @@ def test_codegen_judge_says_not_computable(monkeypatch):
     out = _run_codegen(monkeypatch, df,
                        '{"computable": false, "reason": "외부 데이터 필요"}', "{}")
     assert out["status"] == "out_of_domain" and "외부 데이터" in out["reason"]
+    assert out["attempts"] == 0                                 # 생성 시도 안 함(judge에서 컷)
 
 
 def test_codegen_gate_rejects_dangerous_expression(monkeypatch):
@@ -1010,6 +1068,43 @@ def test_codegen_bad_generate_json_falls_back(monkeypatch):
     df = pd.DataFrame({"order_price": [1.0]})
     out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', "not json")
     assert out["status"] == "out_of_domain" and "generate_error" in out["reason"]
+
+
+def test_codegen_retry_recovers_execution_error(monkeypatch):
+    # attempt1: 게이트는 통과하나 런타임에서 터지는 코드(.dt on float) → execution_error
+    # attempt2: 유효한 코드 → 성공. 재시도로 회복돼야 한다.
+    df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
+    bad = _json.dumps({"intent": "x", "target_columns": ["order_price"],
+                       "expression": 'df["order_price"].dt.month.mean()', "expected_shape": "scalar"})
+    good = _json.dumps({"intent": "평균가", "target_columns": ["order_price"],
+                        "expression": 'df["order_price"].mean()', "expected_shape": "scalar"})
+    out = _run_codegen_seq(monkeypatch, df, '{"computable": true, "reason": "가능"}', [bad, good])
+    assert out["status"] == "success" and out["result"] == 20.0
+    assert out["telemetry"]["attempts"] == 2
+    assert out["telemetry"]["recovered_by_retry"] is True
+
+
+def test_codegen_retry_exhausted_reports_both_errors(monkeypatch):
+    # 두 시도 모두 실패 → retry_failed + errors에 attempt1/attempt2 둘 다 기록.
+    df = pd.DataFrame({"order_price": [10.0, 20.0]})
+    bad1 = _json.dumps({"intent": "x", "target_columns": ["order_price"],
+                        "expression": 'df["order_price"].dt.month.mean()', "expected_shape": "scalar"})
+    bad2 = _json.dumps({"intent": "x", "target_columns": ["order_price"],
+                        "expression": 'df.query("order_price > 0")', "expected_shape": "frame"})
+    out = _run_codegen_seq(monkeypatch, df, '{"computable": true, "reason": "가능"}', [bad1, bad2])
+    assert out["status"] == "out_of_domain"
+    assert out["reason"].startswith("retry_failed:")
+    assert out["attempts"] == 2
+    assert len(out["errors"]) == 2
+    assert out["errors"][0].startswith("attempt1:") and out["errors"][1].startswith("attempt2:")
+
+
+def test_codegen_judge_failure_does_not_retry(monkeypatch):
+    # judge computable=false는 재시도 대상이 아님(생성 자체를 시작하지 않음).
+    df = pd.DataFrame({"order_price": [1.0]})
+    out = _run_codegen_seq(monkeypatch, df, '{"computable": false, "reason": "외부 필요"}', ["{}", "{}"])
+    assert out["status"] == "out_of_domain" and out["attempts"] == 0
+    assert "errors" not in out                              # 시도 자체가 없어 errors 없음
 
 
 def test_route_done_without_substantive_goes_codegen():
@@ -1178,3 +1273,30 @@ def test_gate_rejects_invalid_chart_hint():
                          expression='df["order_price"].mean()', chart_hint="pie")
     r = validate_request(req, _COLS)
     assert not r.ok and "invalid_chart_hint" in r.reason
+
+
+# ─────────────────────────────
+# out_of_domain short-circuit (도메인 밖이면 insight/hypothesis 안 돌고 정직 종료)
+# ─────────────────────────────
+def test_route_after_codegen_out_of_domain_ends():
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
+    assert route_after_codegen({"codegen": {"status": "out_of_domain"}}) == "end"
+    assert route_after_codegen({"codegen": {"status": "success"}}) == "insight"
+
+
+def test_out_of_domain_is_honest_not_mixed_summary(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+    monkeypatch.setattr(C, "get_llm",
+                        lambda model_env="LLM_MODEL": _FakeLLM('{"computable": false, "reason": "외부 데이터 필요"}'))
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"region": ["a", "b"]})))
+    try:
+        update = C.codegen_node({"user_question": "경쟁사 점유율 반영해서 평가해줘"})
+    finally:
+        reset_context()
+    assert update["codegen"]["status"] == "out_of_domain"
+    assert "답할 수 없습니다" in update["final_summary"]      # 정직한 요약
+    assert "distribution" not in update["statistical_metadata"]  # 일반 통계 안 섞임
+    assert any(c["code"] == "OUT_OF_DOMAIN" for c in update["cautions"])          # top-level
+    assert any(c["code"] == "OUT_OF_DOMAIN"
+               for c in update["statistical_metadata"].get("cautions", []))       # stat_metadata에도

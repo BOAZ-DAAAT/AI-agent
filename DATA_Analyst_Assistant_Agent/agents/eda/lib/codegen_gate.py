@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # 노출 허용 이름(이 외의 bare name은 전부 거부 → builtins/os/open 접근 차단)
 _ALLOWED_NAMES = {"df", "pd", "np"}
@@ -59,6 +59,15 @@ class CodegenRequest(BaseModel):
     expression: str                                      # df 위 단일 pandas 표현식
     expected_shape: str = "scalar"                       # scalar | series | frame
     chart_hint: str | None = None                        # bar | line | grouped_bar | None (LLM이 차트 종류 판단)
+
+    @field_validator("chart_hint", mode="before")
+    @classmethod
+    def _normalize_chart_hint(cls, v):
+        # LLM이 '차트 없음'을 JSON null 대신 문자열 "null"/"none"/""로 뱉는 경우를 None으로 정규화한다.
+        # (스칼라 답처럼 차트가 부적합한 정당한 케이스가 invalid_chart_hint로 잘못 거부되는 걸 막음.)
+        if isinstance(v, str) and v.strip().lower() in {"null", "none", ""}:
+            return None
+        return v
 
 
 class GateResult(BaseModel):
@@ -105,9 +114,14 @@ def validate_expression(expression: str, allowed_columns: list[str]) -> GateResu
             if attr in _DENY_ATTRS or attr.startswith("read_"):
                 return GateResult(ok=False, reason=f"denied_method: {attr}")
         if isinstance(node, ast.Subscript):
-            for s in _subscript_strings(node):
-                if s not in cols:
-                    return GateResult(ok=False, reason=f"unknown_column: {s}")
+            # 원본 df에서 직접 꺼내는 첨자만 검증한다(df["col"] / df[["a","b"]]).
+            # 중간·파생 결과의 첨자(df.groupby(...).agg(prop=...)["prop"])는 원본에 없는
+            # '계산 컬럼'이라 검증 대상이 아니다 — 파생 컬럼 계산이 codegen의 본질이므로 막으면 안 된다.
+            # (진짜 오타난 원본컬럼은 실행 시 KeyError→out_of_domain으로 걸려 안전은 그대로.)
+            if isinstance(node.value, ast.Name) and node.value.id == "df":
+                for s in _subscript_strings(node):
+                    if s not in cols:
+                        return GateResult(ok=False, reason=f"unknown_column: {s}")
 
     return GateResult(ok=True)
 
@@ -118,8 +132,7 @@ def validate_request(req: CodegenRequest, allowed_columns: list[str]) -> GateRes
         return GateResult(ok=False, reason=f"invalid_expected_shape: {req.expected_shape}")
     if req.chart_hint is not None and req.chart_hint not in _VALID_HINTS:
         return GateResult(ok=False, reason=f"invalid_chart_hint: {req.chart_hint}")
-    cols = set(allowed_columns)
-    unknown = [c for c in req.target_columns if c not in cols]
-    if unknown:
-        return GateResult(ok=False, reason=f"unknown_target_columns: {unknown}")
+    # target_columns는 LLM의 '선언'일 뿐 실행되지 않으므로(오직 expression만 eval) 보안과 무관하다.
+    # 여기엔 파생·중간 컬럼이 섞여 들어올 수 있어(codegen의 본질) 하드 거부하지 않는다.
+    # 실제 컬럼 실존 검증은 expression의 df 직접 첨자에서 수행한다(validate_expression).
     return validate_expression(req.expression, allowed_columns)

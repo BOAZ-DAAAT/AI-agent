@@ -44,6 +44,12 @@ def _generate_prompt(question: str, columns: list) -> str:
         "- df(주어진 데이터프레임)·pd·np 만 사용. import·파일 IO·반복문·lambda 금지\n"
         "- 단일 표현식만(여러 줄·할당 금지)\n"
         "- 아래 목록에 있는 컬럼만 사용\n"
+        # 보안 게이트가 거부하는 관용구를 미리 알려 처음부터 통과하는 코드를 짜게 유도한다(보안 완화 아님).
+        "- 보안 게이트가 거부하니 쓰지 마라: DataFrame.query·DataFrame.eval·pd.eval, "
+        "apply/lambda, merge/join/concat, explode, pivot/pivot_table/unstack/get_dummies, "
+        "파일 입출력(read_*/to_*/save/load 계열), 대형 배열 생성(np.ones/zeros/arange 등)\n"
+        "- 조건 필터링은 query() 문자열이 아니라 반드시 boolean mask와 df.loc[조건식] 형태로 작성하라\n"
+        "- 새 지표가 필요하면 boolean/numeric Series 연산으로 만들고 groupby/agg/transform으로 집계하라\n"
         "- 질문이 그룹별 비교·순위·비율이면, 최종 스칼라(예: idxmax) 대신 "
         "그룹별 값을 담은 시리즈/프레임으로 반환하라(시각화에 쓰인다).\n"
         "- 결과가 시각화에 적합하면 chart_hint를 골라라: "
@@ -140,8 +146,85 @@ def _coerce_result(result: Any):
     return _py(result), "scalar", ""
 
 
-def _out_of_domain(question: str, reason: str) -> Dict[str, Any]:
-    return {"codegen": {"status": "out_of_domain", "reason": reason, "user_question": question}}
+def _out_of_domain(question: str, reason: str, *, attempts: int = 0,
+                   errors: list | None = None) -> Dict[str, Any]:
+    """도메인 밖 판정 시, 그럴듯한 요약을 만들지 않고 정직한 결과를 직접 채운다.
+
+    route_after_codegen이 이걸 보고 insight/hypothesis를 건너뛰고 종료시키므로,
+    df 통계로 만든 일반 요약이 out_of_domain과 섞이지 않는다.
+    attempts=생성 시도 횟수(judge 실패·no_dataframe이면 0), errors=시도별 실패 사유(계측).
+    """
+    msg = f"현재 데이터의 컬럼만으로는 이 질문에 답할 수 없습니다. 사유: {reason}"
+    caution = {
+        "code": "OUT_OF_DOMAIN", "source": "codegen", "severity": "high",
+        "message_ko": f"질문이 현재 데이터 컬럼만으로 계산 불가능합니다: {reason}",
+        "recommended_action": ["route_to_analysis_or_sql", "clarify_data_scope"],
+    }
+    codegen: Dict[str, Any] = {
+        "status": "out_of_domain", "reason": reason, "user_question": question,
+        "attempts": attempts,
+    }
+    if errors:
+        codegen["errors"] = errors                       # attempt별 실패 사유(있을 때만)
+    return {
+        "codegen": codegen,
+        "insight_result": msg,
+        "final_summary": msg,
+        "hypotheses": "",
+        # 정상 흐름(insight)처럼 cautions를 top-level + statistical_metadata 둘 다에 둔다(소비처 애매성 제거)
+        "statistical_metadata": {"cautions": [caution]},
+        "cautions": [caution],
+    }
+
+
+# 재생성으로 회복 가능한 실패 종류(1회 retry 대상). memory_error는 다시 짜도 위험/무의미 → 제외.
+_RETRYABLE_KINDS = {"generate_error", "gate_rejected", "execution_error"}
+
+
+def _generate_gate_eval(prompt: str, columns: list, df: pd.DataFrame):
+    """생성→게이트→실행 한 번. 성공 시 ("ok", req, result, wall_ms),
+    실패 시 (kind, reason, prev_expression)를 돌려준다(prev_expression은 재시도 프롬프트용)."""
+    try:
+        raw = get_llm("CODE_GENERATOR_MODEL").invoke(prompt).content
+        req = CodegenRequest.model_validate(safe_json_parse(raw, {}))
+    except Exception as exc:  # noqa: BLE001
+        return "generate_error", f"generate_error: {exc}", None
+
+    gate = validate_request(req, columns)
+    if not gate.ok:
+        return "gate_rejected", f"gate_rejected: {gate.reason}", req.expression
+
+    t0 = time.perf_counter()
+    try:
+        code = compile(ast.parse(req.expression, mode="eval"), "<codegen>", "eval")
+        result = eval(code, {"__builtins__": {}}, {"df": df.copy(), "pd": pd, "np": np})  # noqa: S307
+    except MemoryError:
+        return "memory_error", "resource_memory_error", req.expression
+    except Exception as exc:  # noqa: BLE001
+        return "execution_error", f"execution_error: {type(exc).__name__}: {exc}", req.expression
+    wall_ms = round((time.perf_counter() - t0) * 1000, 1)
+    return "ok", req, result, wall_ms
+
+
+def _retry_prompt(question: str, columns: list, prev_expression: str, error_reason: str) -> str:
+    """직전 실패(expression + 사유)를 넣어 다시 짜게 하는 프롬프트. 기존 생성 규칙을 그대로 이어붙인다."""
+    return (
+        "직전에 작성한 pandas 표현식이 실패했다. 아래 실패 원인을 반영해 다시 작성하라.\n"
+        f"[이전 expression] {prev_expression}\n"
+        f"[실패 사유] {error_reason}\n"
+        "수정 지시:\n"
+        "- 날짜/시간 컬럼은 pd.to_datetime(df[\"컬럼\"])로 변환한 뒤 .dt 접근자를 사용하라\n"
+        "- query·eval·apply·lambda·merge·join·concat·파일 IO·대형 배열 생성 금지\n"
+        "- df·pd·np 만, 단일 표현식만(할당·여러 줄 금지)\n\n"
+        + _generate_prompt(question, columns)
+    )
+
+
+def route_after_codegen(state: EDAState):
+    """codegen 성공 → insight(정상 파이프라인) / 도메인 밖 → 종료(그럴듯한 요약 생성 방지)."""
+    if (state.get("codegen") or {}).get("status") == "out_of_domain":
+        return "end"
+    return "insight"
 
 
 def codegen_node(state: EDAState) -> dict:
@@ -162,29 +245,24 @@ def codegen_node(state: EDAState) -> dict:
     if not judged.get("computable"):
         return _out_of_domain(q, str(judged.get("reason", "not_computable")))
 
-    # ② 생성 (gpt-5) — CodegenRequest 발행
-    try:
-        raw = get_llm("CODE_GENERATOR_MODEL").invoke(_generate_prompt(q, columns)).content
-        req = CodegenRequest.model_validate(safe_json_parse(raw, {}))
-    except Exception as exc:  # noqa: BLE001
-        return _out_of_domain(q, f"generate_error: {exc}")
+    # ②③④ 생성→게이트→실행 (attempt 1). 회복 가능한 실패면 에러 피드백을 넣어 1회만 재시도.
+    #   judge는 이미 통과했으므로 다시 돌리지 않는다(생성만 다시 짠다).
+    errors: list = []
+    outcome = _generate_gate_eval(_generate_prompt(q, columns), columns, df)
+    if outcome[0] != "ok":
+        kind, reason, prev_expr = outcome
+        errors.append(f"attempt1: {reason}")
+        if kind not in _RETRYABLE_KINDS:                 # memory_error 등 → 재시도 안 함
+            return _out_of_domain(q, reason, attempts=1, errors=errors)
+        # attempt 2 — 실패 expression + 사유를 넣어 재생성
+        outcome = _generate_gate_eval(_retry_prompt(q, columns, prev_expr or "", reason), columns, df)
+        if outcome[0] != "ok":
+            reason2 = outcome[1]
+            errors.append(f"attempt2: {reason2}")
+            return _out_of_domain(q, f"retry_failed: {reason2}", attempts=2, errors=errors)
 
-    # ③ 게이트 (코드) — 통과해야 실행
-    gate = validate_request(req, columns)
-    if not gate.ok:
-        return _out_of_domain(q, f"gate_rejected: {gate.reason}")
-
-    # ④ 실행 — df/pd/np 만 노출, builtins 제거(게이트가 이미 이름 제한하지만 방어 심층)
-    t0 = time.perf_counter()
-    try:
-        code = compile(ast.parse(req.expression, mode="eval"), "<codegen>", "eval")
-        result = eval(code, {"__builtins__": {}}, {"df": df.copy(), "pd": pd, "np": np})  # noqa: S307
-    except MemoryError:
-        return _out_of_domain(q, "resource_memory_error")
-    except Exception as exc:  # noqa: BLE001
-        return _out_of_domain(q, f"execution_error: {type(exc).__name__}: {exc}")
-    wall_ms = round((time.perf_counter() - t0) * 1000, 1)
-
+    _, req, result, wall_ms = outcome
+    attempts = 2 if errors else 1                          # errors가 있으면 재시도로 회복된 것
     value, out_shape, note = _coerce_result(result)
     chart_file = _render_from_hint(result, req.chart_hint)   # LLM 힌트→기존 함수, key_charts로 흘러감
     return {
@@ -201,6 +279,8 @@ def codegen_node(state: EDAState) -> dict:
                 "input_shape": list(df.shape),
                 "output_shape": out_shape,
                 "wall_ms": wall_ms,
+                "attempts": attempts,               # 1=첫 시도 성공, 2=재시도로 회복
+                "recovered_by_retry": bool(errors), # 재시도가 첫 실패를 건졌는지
             },
             "cautions": ["llm_generated"],
         }
