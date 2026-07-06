@@ -62,6 +62,15 @@ class ResultValidationDecision(BaseModel):
     final_answer: str = ""
 
 
+class SemanticValidationAdvisoryDecision(BaseModel):
+    semantic_valid: bool
+    severity: Literal["info", "warning", "error"] = "info"
+    recommended_next_action: NextAction | Literal[""] = ""
+    reason: str = ""
+    missing_evidence: list[str] = Field(default_factory=list)
+    alignment_notes: list[str] = Field(default_factory=list)
+
+
 class StepSummaryDecision(BaseModel):
     step: str
     agent: AgentName | None = None
@@ -166,11 +175,12 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
             "failed_agents": list(state.get("failed_agents", [])),
             "artifacts": artifact_ids_by_agent(state),
             "validation_results": list(state.get("validation_results", []))[-3:],
+            "semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
             "pending_approval": state.get("pending_approval"),
             "terminal_state": state.get("terminal_state", ""),
         },
-        max_text=120,
+        max_text=80,
         max_items=8,
         depth=3,
     )
@@ -203,9 +213,15 @@ def build_execution_guard_context(state: SupervisorState) -> dict[str, Any]:
 def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
     return _bounded_context(
         {
+            "query": state.get("clarified_query") or state.get("latest_user_query", ""),
+            "latest_user_query": state.get("latest_user_query", ""),
+            "clarified_query": state.get("clarified_query", ""),
             "last_agent_result": state.get("last_agent_result") or {},
             "analysis_plan": state.get("analysis_plan") or {},
             "artifacts": artifact_ids_by_agent(state),
+            "validation_results": list(state.get("validation_results", []))[-3:],
+            "recent_semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
+            "step_summaries": list(state.get("step_summaries", []))[-3:],
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
             "pending_approval": state.get("pending_approval"),
@@ -225,6 +241,7 @@ def build_step_summary_context(state: SupervisorState) -> dict[str, Any]:
             "current_step": state.get("current_step", ""),
             "last_agent_result": state.get("last_agent_result") or {},
             "latest_validation_result": (state.get("validation_results") or [{}])[-1],
+            "latest_semantic_validation_result": (state.get("semantic_validation_results") or [{}])[-1],
             "next_action": state.get("next_action", ""),
             "existing_step_summaries": list(state.get("step_summaries", []))[-3:],
         },
@@ -248,6 +265,7 @@ def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
             "validation_results": list(state.get("validation_results", []))[-3:],
+            "semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
             "llm_decisions": list(state.get("llm_decisions", []))[-5:],
             "decision_errors": list(state.get("decision_errors", []))[-3:],
