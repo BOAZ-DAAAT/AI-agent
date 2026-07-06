@@ -13,6 +13,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     ExecutionGuardDecision,
     FinalizationDecision,
     ResultValidationDecision,
+    SemanticValidationAdvisoryDecision,
     StepSummaryDecision,
     SupervisorDecision,
     build_clarification_context,
@@ -141,6 +142,17 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
             },
         ),
         (
+            SemanticValidationAdvisoryDecision,
+            {
+                "semantic_valid": True,
+                "severity": "info",
+                "recommended_next_action": "",
+                "reason": "사용자 요청과 결과가 정렬되어 있습니다.",
+                "missing_evidence": [],
+                "alignment_notes": ["계획의 SQL 단계가 충족되었습니다."],
+            },
+        ),
+        (
             StepSummaryDecision,
             {
                 "step": "validate_subagent_result",
@@ -266,6 +278,18 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         {"agent": "sql_agent", "message": "검증 메시지" * 500, "nested": {"detail": "중첩" * 500}}
         for _ in range(20)
     ]
+    state["semantic_validation_results"] = [
+        {
+            "agent": "sql_agent",
+            "semantic_valid": False,
+            "severity": "warning",
+            "recommended_next_action": "call_eda_agent",
+            "reason": "의미 검증 메시지" * 500,
+            "missing_evidence": ["근거" * 200 for _ in range(20)],
+            "alignment_notes": ["정렬 메모" * 200 for _ in range(20)],
+        }
+        for _ in range(20)
+    ]
     state["step_summaries"] = [
         {"step": "execute_subagent", "summary": "요약" * 500, "items": ["항목" * 200 for _ in range(20)]}
         for _ in range(20)
@@ -323,6 +347,17 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         summary="SQL 완료" * 500,
         artifact_ids=["artifact_sql"],
     ).model_dump(mode="json")
+    state["semantic_validation_results"] = [
+        {
+            "agent": "sql_agent",
+            "semantic_valid": True,
+            "severity": "info",
+            "recommended_next_action": "",
+            "reason": "정렬됨",
+            "missing_evidence": [],
+            "alignment_notes": ["월별 매출 계획과 SQL 결과가 맞습니다."],
+        }
+    ]
 
     contexts = [
         build_clarification_context(state),
@@ -339,8 +374,13 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
     assert "available_next_actions" in contexts[2]
     assert "requested_next_action" in contexts[3]
     assert "last_agent_result" in contexts[4]
+    assert "query" in contexts[4]
+    assert "recent_semantic_validation_results" in contexts[4]
     assert "latest_validation_result" in contexts[5]
+    assert "latest_semantic_validation_result" in contexts[5]
     assert "terminal_state" in contexts[6]
+    assert "semantic_validation_results" in contexts[2]
+    assert "semantic_validation_results" in contexts[6]
     assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
 
 

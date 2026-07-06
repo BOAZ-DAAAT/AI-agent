@@ -12,6 +12,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     ClarificationDecision,
     ExecutionGuardDecision,
     FinalizationDecision,
+    SemanticValidationAdvisoryDecision,
     StepSummaryDecision,
     SupervisorDecision,
     build_clarification_context,
@@ -19,6 +20,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     build_finalization_context,
     build_next_action_context,
     build_plan_context,
+    build_result_validation_context,
     build_step_summary_context,
     invoke_supervisor_decision,
 )
@@ -28,6 +30,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     EXECUTION_GUARD_DECISION_PROMPT,
     FINALIZE_DECISION_PROMPT,
     PLAN_DECISION_PROMPT,
+    SEMANTIC_VALIDATION_ADVISORY_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -308,6 +311,66 @@ def make_validate_subagent_result_node(model: Any | None):
     return validate_subagent_result_node
 
 
+def make_semantic_validate_subagent_result_node(model: Any | None):
+    def semantic_validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
+        latest_validation = (state.get("validation_results") or [{}])[-1]
+        if state.get("terminal_state") in TERMINAL_STATES or latest_validation.get("valid") is not True:
+            return {
+                "semantic_validation_results": list(state.get("semantic_validation_results", [])),
+                "llm_decisions": list(state.get("llm_decisions", [])),
+                "current_step": "semantic_validate_subagent_result",
+            }
+
+        payload = state.get("last_agent_result") or {}
+        agent = str(payload.get("agent") or latest_validation.get("agent") or "")
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                SEMANTIC_VALIDATION_ADVISORY_PROMPT,
+                SemanticValidationAdvisoryDecision,
+                extra=build_result_validation_context(state),
+            )
+        except Exception as exc:
+            advisory_results = list(state.get("semantic_validation_results", []))
+            advisory_results.append(
+                {
+                    "agent": agent,
+                    "semantic_valid": True,
+                    "severity": "warning",
+                    "recommended_next_action": "",
+                    "reason": f"semantic validation advisory를 생략했습니다: {exc}",
+                    "missing_evidence": [],
+                    "alignment_notes": [],
+                }
+            )
+            return {
+                "semantic_validation_results": advisory_results,
+                "terminal_state": state.get("terminal_state", "running"),
+                "next_action": state.get("next_action", "create_plan"),
+                "current_step": "semantic_validate_subagent_result",
+            }
+
+        advisory_result = decision.model_dump(mode="json")
+        advisory_result["agent"] = agent
+        advisory_result["source_validation_result"] = latest_validation
+        advisory_results = list(state.get("semantic_validation_results", []))
+        advisory_results.append(advisory_result)
+        return {
+            "semantic_validation_results": advisory_results,
+            "next_action": state.get("next_action", "create_plan"),
+            "terminal_state": state.get("terminal_state", "running"),
+            "current_step": "semantic_validate_subagent_result",
+            "llm_decisions": _append_llm_decision(
+                state,
+                "semantic_validate_subagent_result",
+                decision,
+            ),
+        }
+
+    return semantic_validate_subagent_result_node
+
+
 def make_summarize_step_node(model: Any | None):
     def summarize_step_node(state: SupervisorState) -> SupervisorState:
         payload = state.get("last_agent_result") or {}
@@ -404,6 +467,10 @@ def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
     return make_validate_subagent_result_node(None)(state)
 
 
+def semantic_validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
+    return make_semantic_validate_subagent_result_node(None)(state)
+
+
 def summarize_step_node(state: SupervisorState) -> SupervisorState:
     return make_summarize_step_node(None)(state)
 
@@ -424,6 +491,10 @@ def build_graph(
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
     graph.add_node("validate_subagent_result", make_validate_subagent_result_node(model))
+    graph.add_node(
+        "semantic_validate_subagent_result",
+        make_semantic_validate_subagent_result_node(model),
+    )
     graph.add_node("summarize_step", make_summarize_step_node(model))
     graph.add_node("finalize", make_finalize_node(model))
 
@@ -456,6 +527,15 @@ def build_graph(
     graph.add_conditional_edges(
         "validate_subagent_result",
         _route_after_validate,
+        {
+            "semantic_validate_subagent_result": "semantic_validate_subagent_result",
+            "summarize_step": "summarize_step",
+            "finalize": "finalize",
+        },
+    )
+    graph.add_conditional_edges(
+        "semantic_validate_subagent_result",
+        _route_after_semantic_validate,
         {"summarize_step": "summarize_step", "finalize": "finalize"},
     )
     graph.add_conditional_edges(
@@ -599,6 +679,15 @@ def _route_after_execute(state: SupervisorState) -> str:
 
 
 def _route_after_validate(state: SupervisorState) -> str:
+    if state.get("terminal_state") in TERMINAL_STATES:
+        return "finalize"
+    latest_validation = (state.get("validation_results") or [{}])[-1]
+    if latest_validation.get("valid") is True:
+        return "semantic_validate_subagent_result"
+    return "summarize_step"
+
+
+def _route_after_semantic_validate(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
     return "summarize_step"

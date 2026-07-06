@@ -31,6 +31,7 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["agent_results"] == []
     assert state["artifacts"] == {}
     assert state["last_agent_result"] == {}
+    assert state["semantic_validation_results"] == []
     assert state["terminal_state"] == "running"
 
 

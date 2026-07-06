@@ -146,6 +146,44 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 """.strip()
 
 
+SEMANTIC_VALIDATION_ADVISORY_PROMPT = """
+당신은 데이터 분석 에이전트의 semantic validation advisory 노드를 담당하는 슈퍼바이저입니다.
+입력 JSON만 근거로 사용자 질문, clarified_query, analysis_plan, last_agent_result가 의미적으로 정렬되어 있는지 검토하세요.
+이 노드는 advisory만 반환합니다. 라우팅을 확정하거나 강제하지 마세요.
+hard validation 결과를 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
+사용자 쿼리와 analysis_plan 기준으로 직전 하위 에이전트 결과가 충분한 근거를 제공하는지 판단하세요.
+recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확신이 낮거나 별도 권고가 없으면 빈 문자열로 두세요.
+
+허용 severity:
+- info
+- warning
+- error
+
+허용 recommended_next_action:
+- clarify
+- create_plan
+- call_sql_agent
+- call_eda_agent
+- call_analysis_agent
+- call_report_agent
+- finalize
+- fail
+- 빈 문자열
+
+반드시 JSON 객체만 반환하세요.
+허용 필드:
+- semantic_valid: boolean
+- severity: "info", "warning", "error" 중 하나
+- recommended_next_action: 허용 action 중 하나 또는 빈 문자열
+- reason: string
+- missing_evidence: string 배열
+- alignment_notes: string 배열
+
+예시:
+{"semantic_valid":true,"severity":"info","recommended_next_action":"","reason":"SQL 결과가 월별 매출 추이 계획과 정렬되어 있습니다.","missing_evidence":[],"alignment_notes":["사용자 요청의 월별 집계 요구가 충족되었습니다."]}
+""".strip()
+
+
 STEP_SUMMARY_DECISION_PROMPT = """
 당신은 데이터 분석 에이전트의 step summary 노드를 담당하는 슈퍼바이저입니다.
 입력 JSON의 실행 결과와 검증 결과를 근거로 다음 노드가 사용할 간결한 단계 요약을 작성하세요.

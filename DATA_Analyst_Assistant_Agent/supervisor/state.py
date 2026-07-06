@@ -85,6 +85,7 @@ class SupervisorState(TypedDict, total=False):
     last_agent_result: dict[str, Any]
     artifacts: dict[str, list[dict[str, Any]]]
     validation_results: list[dict[str, Any]]
+    semantic_validation_results: list[dict[str, Any]]
     step_summaries: list[dict[str, Any]]
     completed_agents: list[str]
     failed_agents: list[str]
@@ -135,6 +136,7 @@ def empty_supervisor_state(
         "last_agent_result": {},
         "artifacts": {},
         "validation_results": [],
+        "semantic_validation_results": [],
         "step_summaries": [],
         "completed_agents": [],
         "failed_agents": [],
