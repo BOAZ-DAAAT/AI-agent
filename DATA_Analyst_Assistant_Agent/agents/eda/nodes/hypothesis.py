@@ -23,8 +23,10 @@ def _resolve_target(state: EDAState) -> str:
     candidates += list(getattr(ctx, "measure_cols", None) or [])
 
     for c in candidates:
-        if c and c in cols:
-            return c
+        # priority_metrics는 {"metric": ...} dict, plan/measure는 문자열 — 둘 다 컬럼명으로 정규화
+        name = c.get("metric") if isinstance(c, dict) else c
+        if name and name in cols:
+            return name
     return ""
 
 

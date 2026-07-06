@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from DATA_Analyst_Assistant_Agent.agents.eda import nodes
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import ANALYSIS_NAMES, planner_node, route_after_planner
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import route_after_validator, validator_node
 
@@ -33,6 +34,7 @@ def build_app():
     graph.add_node("planner",         planner_node)
     for name, fn in _ANALYSIS_NODE_FN.items():
         graph.add_node(name, fn)
+    graph.add_node("codegen",         nodes.codegen_node)
     graph.add_node("insight",         nodes.insight_node)
     graph.add_node("hypothesis",      nodes.hypothesis_node)
     graph.add_node("validator",       validator_node)
@@ -42,15 +44,20 @@ def build_app():
     graph.add_edge("load_mart", "inspect")
     graph.add_edge("inspect",   "planner")
 
-    # 플래너 → 고른 분석 노드 (또는 종료 시 insight)
+    # 플래너 → 고른 분석 노드 / 정상 종료 시 insight / 도구 소진(도메인 밖) 시 codegen
     graph.add_conditional_edges(
         "planner",
         route_after_planner,
-        {**{name: name for name in ANALYSIS_NAMES}, "insight": "insight"},
+        {**{name: name for name in ANALYSIS_NAMES}, "insight": "insight", "codegen": "codegen"},
     )
     # 각 분석 노드 → 플래너로 복귀 (루프)
     for name in _ANALYSIS_NODE_FN:
         graph.add_edge(name, "planner")
+
+    # codegen 성공 → insight(정상 파이프라인) / 도메인 밖 → 종료
+    # (out_of_domain인데 insight·hypothesis가 계속 돌면 그럴듯한 요약이 섞이므로 바로 END)
+    graph.add_conditional_edges(
+        "codegen", route_after_codegen, {"insight": "insight", "end": END})
 
     graph.add_edge("insight",        "hypothesis")
     graph.add_edge("hypothesis",     "validator")

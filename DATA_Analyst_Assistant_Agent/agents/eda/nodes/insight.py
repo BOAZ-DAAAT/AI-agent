@@ -515,6 +515,13 @@ def insight_node(state: EDAState) -> dict:
             } if (clustering and not clustering.get("skip")) else {"skip": True},
         }
 
+        # codegen 탈출구 성공 결과를 수치 계약에 편입(도구로 답 못 낸 질문에만 채워짐).
+        # 생성코드 원문(provenance)·계측·llm_generated caution 포함. 실패(out_of_domain)는
+        # 여기 안 넣고 agent.py payload의 top-level 플래그로 노출한다.
+        codegen = state.get("codegen") or {}
+        if codegen.get("status") == "success":
+            statistical_metadata["adhoc_analysis"] = codegen
+
     all_results = f"""
 [구조 탐색] {state.get('inspect_result', '해당 없음')}
 [품질 점검] {state.get('quality_result', '해당 없음')}
