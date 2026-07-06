@@ -13,7 +13,6 @@ from typing import Any
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import (
-    first_dataframe,
     generated_sql_from_artifacts,
     read_json_artifact,
     read_sql_result_csvs,
@@ -37,7 +36,7 @@ class EvidencePack:
 def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> EvidencePack:
     """상류 아티팩트를 읽어 증거팩을 조립한다. 없는 재료는 빈 채로 둔다(루프가 알아서 판단)."""
     csvs = read_sql_result_csvs(state, runtime)
-    df = first_dataframe(csvs)
+    df = _best_dataframe(csvs)
     source_ids = [c.artifact_id for c in csvs if c.error is None]
 
     eda = _read_first_json(state, runtime, "eda_agent", source_ids)
@@ -53,6 +52,18 @@ def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> Evi
         analysis=_slim_analysis(analysis),
         source_artifact_ids=source_ids,
     )
+
+
+def _best_dataframe(csvs) -> pd.DataFrame:
+    """sql_result 가 여러 개일 때 가장 실질적인(행 많은) 프레임을 고른다.
+
+    mart 경로에서는 '마트 생성 완료' 1행짜리 상태 메시지 CSV 가 먼저 오고 실제 데이터가
+    뒤에 오는데, '첫 번째' 선택은 상태 메시지를 집어 분석 불능이 된다 (E2E 에서 실측).
+    """
+    frames = [c.dataframe for c in csvs if c.error is None and not c.dataframe.empty]
+    if not frames:
+        return pd.DataFrame()
+    return max(frames, key=len)
 
 
 def _read_first_json(state: OrchestrationState, runtime: AgentRuntime,

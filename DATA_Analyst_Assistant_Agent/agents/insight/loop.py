@@ -193,6 +193,8 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
 - 상관을 인과로 단정하지 마라("~때문에" 대신 "~와 연관").
 - action_plan 은 증거로 뒷받침될 때만 채워라. 억지로 만들지 마라.
 - answer 가 비교·순위·추세라면 finish 전에 그것을 증명하는 chart 를 1개 만들어라. 그 외엔 생략 가능.
+- 차트는 answer 의 핵심 주장과 1:1 로 대응해야 한다: answer 가 여러 지표(평균·중앙값·건수·비율 등)의
+  '특성'을 말하면 단일 지표 bar 가 아니라 **다지표 table 또는 grouped 형태**로 그 특성이 보이게 하라.
 - 남은 라운드: {MAX_ROUNDS - round_idx}. 증거가 충분하면 바로 finish 하라.{pressure}
 
 JSON 만 출력하라: {{"tool":"look|compute|chart|finish","args":{{...}},"reason":"한 문장"}}"""

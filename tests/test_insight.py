@@ -105,6 +105,16 @@ def test_evidence_pack_simple_csv_only():
     assert pack.source_artifact_ids == ["s1"]
 
 
+def test_evidence_pack_picks_largest_sql_result():
+    # mart 경로: '마트 생성 완료' 1행 상태 CSV 가 먼저 와도 실제 데이터(행 많은 쪽)를 골라야 함
+    status_csv = "col_1,col_2\n마트 생성 완료,analytics.mart\n"
+    adapter = FakeAdapter({"s0": (ArtifactType.sql_result, status_csv),
+                           "s1": (ArtifactType.sql_result, _CSV)})
+    pack = build_evidence_pack(_state(sql_agent=["s0", "s1"]), _runtime(adapter))
+    assert list(pack.df.columns) == ["category", "total_sales"]
+    assert pack.table_summary["row_count"] == 4
+
+
 def test_evidence_pack_comprehensive():
     adapter = FakeAdapter({
         "s1": (ArtifactType.sql_result, _CSV),
