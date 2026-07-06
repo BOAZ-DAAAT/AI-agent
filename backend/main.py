@@ -10,7 +10,7 @@ from backend.mysql.routes import router as mysql_router
 def create_app() -> FastAPI:
     app = FastAPI(title="DAAAT Backend API")
 
-    #지금은 CORS 열어둠 추후에 프론트엔드 주소로 지정
+    #지금은 일단 개발을 위해 CORS 열어둠 추후에 프론트엔드 주소로 지정
     origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
     allow_origins = ["*"] if origins == "*" else [o.strip() for o in origins.split(",")]
     app.add_middleware(

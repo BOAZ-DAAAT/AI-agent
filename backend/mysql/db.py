@@ -7,7 +7,8 @@ import pymysql
 # 사용자에게 보여줄 필요 없는 MySQL 내부 시스템 DB들
 SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
 
-SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# DB/테이블 이름 검증: 글자(한글 포함)/숫자/언더스코어만 허용
+SAFE_IDENTIFIER = re.compile(r"^\w+$")
 
 def quote_identifier(name: str) -> str:
     if not SAFE_IDENTIFIER.fullmatch(name):
@@ -42,6 +43,17 @@ def list_tables(host: str, port: int, user: str, password: str, database: str) -
     try:
         with conn.cursor() as cur:
             cur.execute("SHOW TABLES")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+# 선택한 DB 안의 뷰를 제외한 실제 테이블 목록
+def list_base_tables(host: str, port: int, user: str, password: str, database: str) -> list[str]:
+    quote_identifier(database)
+    conn = connect(host, port, user, password, database=database)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
             return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
