@@ -1056,3 +1056,125 @@ def test_insight_does_not_fold_out_of_domain(monkeypatch):
     finally:
         reset_context()
     assert "adhoc_analysis" not in update["statistical_metadata"]  # 실패는 편입 안 함(플래그로만)
+
+
+# ─────────────────────────────
+# _resolve_target: priority_metrics dict 정규화 (커밋5, codegen 경로가 노출한 기존 버그 회귀)
+# ─────────────────────────────
+def test_resolve_target_handles_priority_metrics_dicts():
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis import _resolve_target
+    df = pd.DataFrame({"review_score": [1, 2, 3], "region": ["a", "b", "c"]})
+    reset_context()
+    set_context(EdaContext(df=df))
+    try:  # priority_metrics는 {"metric":...} dict — 컬럼명 정규화돼 매칭 (예전엔 unhashable TypeError)
+        target = _resolve_target({"plan_metric": "",
+                                  "analysis_plan": {"priority_metrics": [{"metric": "review_score"}]}})
+    finally:
+        reset_context()
+    assert target == "review_score"
+
+
+def test_resolve_target_empty_when_no_candidate_matches():
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis import _resolve_target
+    df = pd.DataFrame({"region": ["a", "b"]})
+    reset_context()
+    set_context(EdaContext(df=df))
+    try:
+        target = _resolve_target({"plan_metric": "ghost",
+                                  "analysis_plan": {"priority_metrics": [{"metric": "also_ghost"}]}})
+    finally:
+        reset_context()
+    assert target == ""
+
+
+# ─────────────────────────────
+# codegen 게이트 numpy IO 우회 차단 (보안 회귀 — 리뷰 발견 벡터)
+# ─────────────────────────────
+def test_gate_rejects_numpy_fromfile():
+    r = validate_expression('np.fromfile("/etc/passwd")', _COLS)     # 파일 읽기
+    assert not r.ok and "denied_method: fromfile" in r.reason
+
+
+def test_gate_rejects_numpy_loadtxt():
+    r = validate_expression('np.loadtxt("/etc/passwd")', _COLS)
+    assert not r.ok and "denied_method: loadtxt" in r.reason
+
+
+def test_gate_rejects_numpy_load_pickle_rce():
+    r = validate_expression('np.load("x.npy", allow_pickle=True)', _COLS)  # pickle RCE 경로
+    assert not r.ok and "denied_method: load" in r.reason
+
+
+def test_gate_rejects_numpy_genfromtxt():
+    r = validate_expression('np.genfromtxt("x.csv")', _COLS)
+    assert not r.ok and "denied_method: genfromtxt" in r.reason
+
+
+def test_gate_rejects_tofile_write():
+    r = validate_expression('df.to_numpy().tofile("/tmp/leak.bin")', _COLS)  # 파일 쓰기
+    assert not r.ok and "denied_method: tofile" in r.reason
+
+
+def test_gate_rejects_numpy_save():
+    r = validate_expression('np.save("out.npy", df.to_numpy())', _COLS)
+    assert not r.ok and "denied_method: save" in r.reason
+
+
+def test_gate_rejects_submodule_traversal_to_io():
+    r = validate_expression('np.lib.npyio.zipfile_factory', _COLS)   # 서브모듈 순회 우회
+    assert not r.ok and "denied_method: lib" in r.reason
+
+
+def test_gate_still_allows_legit_numpy_compute():
+    r = validate_expression('np.sqrt(df["order_price"]).mean()', _COLS)  # 정상 numpy 계산은 허용
+    assert r.ok, r.reason
+
+
+# ─────────────────────────────
+# codegen 결과 차트화 (LLM chart_hint → 기존 함수 재사용) — 토큰 0
+# ─────────────────────────────
+def test_codegen_chart_hint_bar_renders(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize as V
+    monkeypatch.setattr(V, "plot_top_n_barplot",
+                        lambda *a, **k: {"chart_paths": ["/x/bar_top_success_rate.png"], "stats": {}})
+    df = pd.DataFrame({"region": ["a", "a", "b", "b"], "status": ["ok", "fail", "ok", "ok"]})
+    gen = _json.dumps({"intent": "지역별 성공률", "target_columns": ["region", "status"],
+                       "expression": "df['status'].eq('ok').groupby(df['region']).mean()",
+                       "expected_shape": "series", "chart_hint": "bar"})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
+    assert out["status"] == "success"
+    assert out["chart"] == "bar_top_success_rate.png"    # LLM이 bar 골라 → 기존 함수 렌더
+
+
+def test_codegen_chart_hint_null_no_chart(monkeypatch):
+    df = pd.DataFrame({"region": ["a", "a", "b", "b"], "status": ["ok", "fail", "ok", "ok"]})
+    gen = _json.dumps({"intent": "지역별 성공률", "target_columns": ["region", "status"],
+                       "expression": "df['status'].eq('ok').groupby(df['region']).mean()",
+                       "expected_shape": "series", "chart_hint": None})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
+    assert out["status"] == "success"
+    assert out["chart"] is None                          # LLM이 차트 부적합 판단 → 차트 없음
+
+
+def test_codegen_scalar_no_chart_even_with_hint(monkeypatch):
+    df = pd.DataFrame({"region": ["a", "a", "b"], "status": ["ok", "fail", "ok"]})
+    gen = _json.dumps({"intent": "최고 지역", "target_columns": ["region", "status"],
+                       "expression": "df['status'].eq('ok').groupby(df['region']).mean().idxmax()",
+                       "expected_shape": "scalar", "chart_hint": "bar"})
+    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
+    assert out["status"] == "success"
+    assert out["chart"] is None                          # 스칼라 → 그릴 범주 축 없음(힌트 있어도)
+
+
+def test_bar_value_col_filters_bool_flag():
+    # 값 컬럼 선택이 bool 플래그(is_top)를 제외하고 실제 값(0/1 비율 포함)을 고르는가
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import _first_value_col
+    df = pd.DataFrame({"region": ["a", "b"], "success_rate": [1.0, 0.0], "is_top": [True, False]})
+    assert _first_value_col(df) == "success_rate"        # 0/1 비율값은 유지, bool 플래그만 제외
+
+
+def test_gate_rejects_invalid_chart_hint():
+    req = CodegenRequest(intent="x", target_columns=["order_price"],
+                         expression='df["order_price"].mean()', chart_hint="pie")
+    r = validate_request(req, _COLS)
+    assert not r.ok and "invalid_chart_hint" in r.reason

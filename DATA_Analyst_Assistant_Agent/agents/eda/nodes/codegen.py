@@ -14,6 +14,7 @@ LLM은 제안만 하고, 실행 허가는 게이트가 결정한다(레포 공�
 from __future__ import annotations
 
 import ast
+import os
 import time
 from typing import Any, Dict
 
@@ -43,10 +44,67 @@ def _generate_prompt(question: str, columns: list) -> str:
         "- df(주어진 데이터프레임)·pd·np 만 사용. import·파일 IO·반복문·lambda 금지\n"
         "- 단일 표현식만(여러 줄·할당 금지)\n"
         "- 아래 목록에 있는 컬럼만 사용\n"
+        "- 질문이 그룹별 비교·순위·비율이면, 최종 스칼라(예: idxmax) 대신 "
+        "그룹별 값을 담은 시리즈/프레임으로 반환하라(시각화에 쓰인다).\n"
+        "- 결과가 시각화에 적합하면 chart_hint를 골라라: "
+        "bar(카테고리별 값)·line(시간 추세)·grouped_bar(다지표 비교). 부적합하면 null.\n"
         f"[질문] {question}\n[df 컬럼] {columns}\n"
         '반드시 JSON만 출력: {"intent": "무엇을 계산하는지", "target_columns": ["사용 컬럼"], '
-        '"expression": "df...", "expected_shape": "scalar|series|frame"}'
+        '"expression": "df...", "expected_shape": "scalar|series|frame", '
+        '"chart_hint": "bar|line|grouped_bar|null"}'
     )
+
+
+def _to_frame(result: Any):
+    """codegen 결과(series/frame)를 카테고리 축이 컬럼인 df로. 스칼라·기본인덱스 프레임은 None."""
+    if isinstance(result, pd.Series):
+        df_r = result.to_frame("value").reset_index()
+    elif isinstance(result, pd.DataFrame) and not isinstance(result.index, pd.RangeIndex):
+        df_r = result.reset_index()
+    else:
+        return None  # 스칼라·기본인덱스 프레임은 그릴 범주 축이 없음
+    df_r.columns = [str(c) for c in df_r.columns]
+    return df_r
+
+
+def _first_value_col(df_r) -> str | None:
+    """차트에 쓸 값 컬럼 하나 선택: bool 플래그(is_top 등) 제외한 첫 수치 컬럼.
+    → plot 함수가 모든 수치 컬럼을 그려 잡차트 내는 걸 방지.
+    (실제 0/1 비율값을 잘못 스킵하지 않도록 dtype이 bool인 것만 제외.)"""
+    for col in df_r.columns:
+        s = df_r[col]
+        if pd.api.types.is_bool_dtype(s):
+            continue  # 진짜 플래그(is_top 등)만 스킵
+        if pd.api.types.is_numeric_dtype(s):
+            return col
+    return None
+
+
+def _render_from_hint(result: Any, chart_hint):
+    """LLM이 고른 chart_hint에 따라 기존 visualize 함수를 재사용해 렌더한다.
+
+    판단(어떤 차트)=LLM, 연결=lookup, 렌더=기존 함수, 값컬럼 필터=잡차트 방지.
+    OUTPUT_DIR에 PNG를 그리면 chart_selector가 자동으로 주워 key_charts에 넣는다.
+    반환: 파일명(provenance 링크) or None. 차트 실패해도 데이터 답은 유지.
+    """
+    if chart_hint not in {"bar", "line", "grouped_bar"}:
+        return None
+    df_r = _to_frame(result)
+    if df_r is None:
+        return None
+    try:
+        from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
+        if chart_hint == "bar":
+            vcol = _first_value_col(df_r)                      # 값 1개만 → 잡차트 방지
+            out = visualize.plot_top_n_barplot(df_r, measure_cols=[vcol] if vcol else None)
+        elif chart_hint == "grouped_bar":
+            out = visualize.plot_grouped_bar(df_r)
+        else:  # line — 결과에 시간축 있어야, 없으면 함수가 빈 결과 반환(우아하게)
+            out = visualize.plot_multiline_timeseries(df_r)
+        paths = out.get("chart_paths", []) if isinstance(out, dict) else []
+        return os.path.basename(paths[0]) if paths else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _py(v: Any) -> Any:
@@ -68,6 +126,9 @@ def _coerce_result(result: Any):
         if result.shape[0] * result.shape[1] > _MAX_RESULT_CELLS:
             r = result.head(max(1, _MAX_RESULT_CELLS // max(1, result.shape[1])))
             note = f"truncated (원래 shape {list(result.shape)})"
+        # groupby 등 의미있는 인덱스(지역명 등)는 답 자체라 컬럼으로 보존한다(records가 인덱스를 버림)
+        if not isinstance(r.index, pd.RangeIndex):
+            r = r.reset_index()
         return r.where(pd.notna(r), None).to_dict(orient="records"), f"frame{list(result.shape)}", note
     if isinstance(result, pd.Series):
         note = ""
@@ -125,6 +186,7 @@ def codegen_node(state: EDAState) -> dict:
     wall_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     value, out_shape, note = _coerce_result(result)
+    chart_file = _render_from_hint(result, req.chart_hint)   # LLM 힌트→기존 함수, key_charts로 흘러감
     return {
         "codegen": {
             "status": "success",
@@ -133,6 +195,8 @@ def codegen_node(state: EDAState) -> dict:
             "expected_shape": req.expected_shape,
             "result": value,
             "result_note": note,
+            "chart_hint": req.chart_hint,           # LLM이 고른 차트 종류(provenance)
+            "chart": chart_file,                    # 렌더된 차트 파일명(그림은 key_charts에 섞여 나감)
             "telemetry": {                          # v2 승격 판단용 계측
                 "input_shape": list(df.shape),
                 "output_shape": out_shape,
