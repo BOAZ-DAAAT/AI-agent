@@ -189,7 +189,13 @@ def test_validation_flags_row_count_quality_and_missing_report_evidence(adapter:
         filename="eda_summary.json",
         created_by_tool="test.eda",
     )
-    report_ref = adapter.save_workspace_file(run.run_id, "# Report\n\n## Evidence\n- nothing useful")
+    report_ref = adapter.register_artifact(
+        run.run_id,
+        ArtifactType.report,
+        content_text="# Report\n\n## Evidence\n- nothing useful",
+        filename="report.md",
+        created_by_tool="test.report",
+    )
     state = OrchestrationState(
         run_id=run.run_id,
         user_query="validate",

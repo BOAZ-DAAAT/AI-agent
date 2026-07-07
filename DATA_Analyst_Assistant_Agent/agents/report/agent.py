@@ -4,6 +4,7 @@ from DATA_Analyst_Assistant_Agent.agents.artifact_data import generated_sql_from
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.report.builder import build_report
 from DATA_Analyst_Assistant_Agent.agents.report.self_check import run_report_self_check
+from data_agent_backend.models.artifacts import ArtifactType
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, OrchestrationState, ValidationBlock
 
 
@@ -26,9 +27,11 @@ class ReportAgent:
             eda_profile=eda_profile,
             analysis_result=analysis_result,
         )
-        ref = runtime.adapter.save_workspace_file(
+        ref = runtime.adapter.register_artifact(
             state.run_id,
-            report,
+            ArtifactType.report,
+            content_text=report,
+            created_by_tool="report_agent.final_report",
             context=context,
             filename="final_report.md",
             metadata={
@@ -36,6 +39,8 @@ class ReportAgent:
                 "source_artifact_count": len(parent_ids),
                 "source_artifact_ids": parent_ids,
             },
+            parent_ids=parent_ids,
+            preview={"report_sections": ["summary", "key_findings", "evidence", "visuals", "limitations", "next_actions"]},
         )
         return AgentEnvelope(
             agent_name=self.name,

@@ -14,12 +14,12 @@ def _services(tmp_path):
 def test_create_core_services_excludes_optional_services(tmp_path) -> None:
     services = create_core_services(BackendConfig(base_data_dir=tmp_path / ".data_agent"))
 
-    assert hasattr(services, "datasource_service")
-    assert hasattr(services, "sql_executor")
-    assert hasattr(services, "sandbox_executor")
     assert hasattr(services, "artifact_registry")
     assert hasattr(services, "run_service")
     assert hasattr(services, "policy_engine")
+    assert not hasattr(services, "datasource_service")
+    assert not hasattr(services, "sql_executor")
+    assert not hasattr(services, "sandbox_executor")
     assert not hasattr(services, "memory_store")
     assert not hasattr(services, "approval_store")
     assert not hasattr(services, "workspace_backend")
@@ -39,26 +39,13 @@ def test_runs_api_uses_tool_result_envelope(tmp_path) -> None:
     assert listed["ok"] is True
     assert [item["run_id"] for item in listed["data"]] == [created["data"]["run_id"]]
 
-
-def test_execution_python_api_calls_sandbox_service_without_mcp(tmp_path) -> None:
-    services = _services(tmp_path)
-    client = TestClient(create_app(services))
-    run_id = services.run_service.create_run().run_id
-
-    result = client.post(
-        "/execution/python",
-        json={"run_id": run_id, "code": "print('hello')", "context": {"approval_id": "appr_test"}},
-    ).json()
-
-    assert result["ok"] is True
-    assert result["data"]["status"] == "sandbox_not_configured"
-    assert result["data"]["error_message"] == "Python sandbox execution is disabled in this MVP."
-
-
 def test_default_app_excludes_optional_routes(tmp_path) -> None:
     client = TestClient(create_app(_services(tmp_path)))
 
     optional_paths = [
+        "/datasources",
+        "/execution/sql",
+        "/execution/python",
         "/workspace/read-text",
         "/memory/list",
         "/approvals/pending",
