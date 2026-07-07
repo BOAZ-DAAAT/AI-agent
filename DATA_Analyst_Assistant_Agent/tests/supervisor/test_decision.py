@@ -315,6 +315,12 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "finalize",
         "fail",
     ]
+    assert {capability["agent"] for capability in snapshot["agent_capabilities"]} == {
+        "sql_agent",
+        "eda_agent",
+        "analysis_agent",
+        "report_agent",
+    }
 
 
 def test_invoke_supervisor_decision_requires_model() -> None:
@@ -372,15 +378,29 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
     assert "latest_user_query" in contexts[0]
     assert "query" in contexts[1]
     assert "available_next_actions" in contexts[2]
+    assert "agent_capabilities" in contexts[2]
     assert "requested_next_action" in contexts[3]
+    assert "agent_capabilities" in contexts[3]
     assert "last_agent_result" in contexts[4]
     assert "query" in contexts[4]
+    assert "agent_capabilities" in contexts[4]
     assert "recent_semantic_validation_results" in contexts[4]
     assert "latest_validation_result" in contexts[5]
     assert "latest_semantic_validation_result" in contexts[5]
     assert "terminal_state" in contexts[6]
     assert "semantic_validation_results" in contexts[2]
     assert "semantic_validation_results" in contexts[6]
+    next_action_capabilities = contexts[2]["agent_capabilities"]
+    guard_capabilities = contexts[3]["agent_capabilities"]
+    validation_capabilities = contexts[4]["agent_capabilities"]
+    assert next_action_capabilities[0]["agent"] == "sql_agent"
+    assert next_action_capabilities[0]["action"] == "call_sql_agent"
+    assert guard_capabilities[2]["requires_any_artifacts_from"] == ["sql_agent", "eda_agent"]
+    assert validation_capabilities[3]["requires_any_artifacts_from"] == [
+        "sql_agent",
+        "eda_agent",
+        "analysis_agent",
+    ]
     assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
 
 

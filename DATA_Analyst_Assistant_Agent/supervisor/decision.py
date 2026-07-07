@@ -6,6 +6,7 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
+from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentName, NextAction, SupervisorState, artifact_ids_by_agent
 
@@ -177,10 +178,11 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
             "validation_results": list(state.get("validation_results", []))[-3:],
             "semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
+            "agent_capabilities": agent_capabilities_context(),
             "pending_approval": state.get("pending_approval"),
             "terminal_state": state.get("terminal_state", ""),
         },
-        max_text=80,
+        max_text=70,
         max_items=8,
         depth=3,
     )
@@ -203,6 +205,7 @@ def build_execution_guard_context(state: SupervisorState) -> dict[str, Any]:
                 "call_analysis_agent",
                 "call_report_agent",
             ],
+            "agent_capabilities": agent_capabilities_context(),
         },
         max_text=400,
         max_items=8,
@@ -228,6 +231,7 @@ def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
             "retry_counts": state.get("retry_counts", {}),
             "max_retry_per_agent": state.get("max_retry_per_agent", 1),
             "terminal_state": state.get("terminal_state", "running"),
+            "agent_capabilities": agent_capabilities_context(),
         },
         max_text=500,
         max_items=8,

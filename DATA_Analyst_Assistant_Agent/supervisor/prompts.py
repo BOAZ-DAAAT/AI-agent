@@ -64,6 +64,9 @@ planner_mode는 코드가 "llm"으로 기록하므로 응답에 포함하지 않
 DECIDE_NEXT_ACTION_PROMPT = """
 당신은 데이터 분석 에이전트의 다음 행동을 결정하는 슈퍼바이저입니다.
 입력으로 제공되는 compact JSON snapshot만 근거로 판단하세요.
+available_next_actions만 보지 말고 agent_capabilities도 참고해 선택하세요.
+agent_capabilities는 선택을 강제하지 않는 참고 정보입니다.
+선행 artifact가 없거나 avoid_when에 해당하면 다른 action을 고려하세요.
 
 허용되는 next_action:
 - clarify
@@ -83,6 +86,7 @@ DECIDE_NEXT_ACTION_PROMPT = """
 EXECUTION_GUARD_DECISION_PROMPT = """
 당신은 데이터 분석 에이전트의 execute guard 노드를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 requested_next_action을 지금 실행해도 되는지 판단하세요.
+agent_capabilities의 requires_artifacts_from과 requires_any_artifacts_from을 참고해 실행 가능성을 판단하세요.
 allowed=true인 경우 next_action은 반드시 실행할 하위 에이전트 action이어야 합니다.
 allowed=false인 경우 next_action은 필요한 대체 action, finalize, fail 중 하나를 선택하세요.
 하위 에이전트 실제 호출은 코드가 수행합니다.
