@@ -20,6 +20,7 @@ from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, Sup
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.validation.agent import CentralValidationAgent
 from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
+from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_sql_identifiers
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     AgentStatus,
@@ -393,6 +394,45 @@ class TestSQLLangGraphSmoke:
         assert result["validation"]["result"] == "invalid"
         assert any(item["category"] == "missing_table" for item in result["validation"]["findings"])
         assert result["retry_hint"]["reason_code"] == "missing_table"
+
+    def test_validate_sql_identifiers_allows_cte_references(self):
+        schema_text = '{"orders": {"columns": [{"name": "order_id"}]}}'
+        sql_draft = {
+            "sql": """
+            WITH customer_orders AS (
+                SELECT order_id FROM orders
+            )
+            SELECT * FROM customer_orders;
+            """,
+            "sql_type": "select",
+            "source_tables": ["orders"],
+            "columns_used": ["orders.order_id"],
+        }
+
+        findings = validate_sql_identifiers({}, sql_draft, schema_text)
+
+        assert not any(item["category"] == "missing_table" for item in findings)
+
+    def test_validate_sql_identifiers_still_rejects_unknown_non_cte_table(self):
+        schema_text = '{"orders": {"columns": [{"name": "order_id"}]}}'
+        sql_draft = {
+            "sql": """
+            WITH customer_orders AS (
+                SELECT order_id FROM orders
+            )
+            SELECT * FROM not_existing_table;
+            """,
+            "sql_type": "select",
+            "source_tables": ["orders"],
+            "columns_used": ["orders.order_id"],
+        }
+
+        findings = validate_sql_identifiers({}, sql_draft, schema_text)
+
+        assert any(
+            item["category"] == "missing_table" and "not_existing_table" in item["detail"]
+            for item in findings
+        )
 
     def test_build_app_comprehensive_path_generates_datamart_sql(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
