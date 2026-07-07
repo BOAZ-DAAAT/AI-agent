@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.mysql.routes import router as mysql_router
+from backend.storage.routes import router as storage_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="DAAAT Backend API")
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(mysql_router)
+    app.include_router(storage_router)
 
     return app
 
