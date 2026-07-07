@@ -14,12 +14,12 @@ def _services(tmp_path):
 def test_create_core_services_excludes_optional_services(tmp_path) -> None:
     services = create_core_services(BackendConfig(base_data_dir=tmp_path / ".data_agent"))
 
-    assert hasattr(services, "datasource_service")
-    assert hasattr(services, "sql_executor")
     assert hasattr(services, "sandbox_executor")
     assert hasattr(services, "artifact_registry")
     assert hasattr(services, "run_service")
     assert hasattr(services, "policy_engine")
+    assert not hasattr(services, "datasource_service")
+    assert not hasattr(services, "sql_executor")
     assert not hasattr(services, "memory_store")
     assert not hasattr(services, "approval_store")
     assert not hasattr(services, "workspace_backend")
@@ -59,6 +59,8 @@ def test_default_app_excludes_optional_routes(tmp_path) -> None:
     client = TestClient(create_app(_services(tmp_path)))
 
     optional_paths = [
+        "/datasources",
+        "/execution/sql",
         "/workspace/read-text",
         "/memory/list",
         "/approvals/pending",

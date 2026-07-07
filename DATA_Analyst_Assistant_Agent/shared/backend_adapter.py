@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import csv
 import json
+import sqlite3
 from pathlib import Path
+from io import StringIO
 from typing import Any
 
 from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.approvals import ApprovalRequest
 from data_agent_backend.models.artifacts import ArtifactRecord, ArtifactRef, ArtifactRegisterRequest, ArtifactType
+from data_agent_backend.models.common import BackendError
 from data_agent_backend.models.contexts import PolicyContext
 from data_agent_backend.models.policy import PolicyDecision
 from data_agent_backend.models.runs import RunEvent, RunRecord, RunStatus
@@ -110,33 +114,92 @@ class BackendAdapter:
         row_limit: int | None = None,
         context: PolicyContext | None = None,
     ) -> ArtifactRef:
-        if datasource_id and self.services.datasource_service:
-            return self._run_via_datasource(run_id, query, datasource_id, row_limit, context)
-        return self.services.sql_executor.run_sql_query(query, run_id, context=context, row_limit=row_limit)
+        if datasource_id is not None:
+            raise BackendError(
+                "UNSUPPORTED_OPERATION",
+                "Datasource-backed SQL execution no longer belongs to the backend core. Execute SQL in the agent runtime and register artifacts through the backend.",
+                {"datasource_id": datasource_id},
+            )
+        return self._run_local_sql_preview(run_id, query, row_limit=row_limit, context=context)
 
-    def _run_via_datasource(
-        self, run_id: str, query: str, datasource_id: str, row_limit: int | None, context: PolicyContext | None,
+    def _run_local_sql_preview(
+        self,
+        run_id: str,
+        query: str,
+        *,
+        row_limit: int | None,
+        context: PolicyContext | None,
     ) -> ArtifactRef:
         context = context or PolicyContext(run_id=run_id)
         row_limit = row_limit or self.services.config.default_sql_row_limit
-        validation = self.services.sql_executor.validate_sql(query, row_limit)
-        if validation.get("blocked"):
-            from data_agent_backend.models.common import BackendError
-            raise BackendError("POLICY_BLOCKED", validation["reason"])
-
+        self._validate_local_preview_sql(query, row_limit)
         query_ref = self.register_artifact(
-            run_id, "sql_query", content_text=query, filename="query.sql",
-            created_by_tool="sql_agent.preview", context=context,
-            metadata={"datasource_id": datasource_id, "row_limit": row_limit},
+            run_id,
+            "sql_query",
+            content_text=query,
+            filename="query.sql",
+            created_by_tool="sql_agent.preview",
+            context=context,
+            metadata={"row_limit": row_limit},
         )
-        rows, columns, csv_text = self.services.datasource_service.query_datasource(datasource_id, query, row_limit)
+        rows, columns = self._execute_local_preview_query(query, row_limit)
+        csv_text = self._rows_to_csv(columns, rows)
         return self.register_artifact(
-            run_id, "sql_result", content_text=csv_text, filename="result.csv",
-            created_by_tool="sql_agent.preview", context=context,
-            parent_ids=[query_ref.artifact_id], lineage_edge_type="query_result_of",
-            metadata={"datasource_id": datasource_id, "row_limit": row_limit, "returned_rows": len(rows)},
+            run_id,
+            "sql_result",
+            content_text=csv_text,
+            filename="result.csv",
+            created_by_tool="sql_agent.preview",
+            context=context,
+            parent_ids=[query_ref.artifact_id],
+            lineage_edge_type="query_result_of",
+            metadata={"row_limit": row_limit, "returned_rows": len(rows), "execution_owner": "agent_runtime_preview"},
             preview={"row_count": len(rows), "columns": columns, "sample_rows": [dict(zip(columns, r)) for r in rows[:5]]},
         )
+
+    @staticmethod
+    def _validate_local_preview_sql(query: str, row_limit: int) -> None:
+        stripped = query.strip()
+        if not stripped:
+            raise BackendError("POLICY_BLOCKED", "SQL query is empty.")
+        if row_limit <= 0:
+            raise BackendError("POLICY_BLOCKED", "row_limit must be positive.")
+        normalized = stripped.rstrip().rstrip(";")
+        if ";" in normalized:
+            raise BackendError("POLICY_BLOCKED", "Multiple-statement SQL is blocked.")
+        first = stripped.lstrip().split(maxsplit=1)[0].upper()
+        if first not in {"SELECT", "WITH"}:
+            raise BackendError("POLICY_BLOCKED", "Only read-only SELECT queries are allowed.")
+        blocked = {
+            "INSERT", "UPDATE", "DELETE", "MERGE", "DROP", "ALTER",
+            "CREATE", "TRUNCATE", "PRAGMA", "ATTACH", "DETACH",
+            "INSTALL", "LOAD", "COPY", "EXPORT", "CALL",
+        }
+        tokens = {token.upper() for token in stripped.replace(";", " ").replace("\n", " ").split()}
+        forbidden = sorted(tokens & blocked)
+        if forbidden:
+            raise BackendError("POLICY_BLOCKED", f"Blocked SQL keyword(s): {', '.join(forbidden)}.")
+
+    @staticmethod
+    def _execute_local_preview_query(query: str, row_limit: int) -> tuple[list[tuple[Any, ...]], list[str]]:
+        try:
+            with sqlite3.connect(":memory:") as conn:
+                cursor = conn.execute(query)
+                rows = cursor.fetchmany(row_limit)
+                columns = [description[0] for description in (cursor.description or [])]
+        except sqlite3.Error as exc:
+            raise BackendError("POLICY_BLOCKED", f"Local SQL preview failed: {exc}") from exc
+        return [tuple(row) for row in rows], columns
+
+    @staticmethod
+    def _rows_to_csv(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
+        if not columns:
+            return ""
+        buffer = StringIO()
+        writer = csv.writer(buffer, lineterminator="\r\n")
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return buffer.getvalue()
 
     def check_policy(
         self,
@@ -277,19 +340,17 @@ class BackendAdapter:
     # ── Datasource orchestration methods ──
 
     def get_default_datasource_id(self) -> str | None:
-        if self.services.datasource_service:
-            return self.services.datasource_service.get_default_id()
         return None
 
     def get_catalog_summary(self, datasource_id: str) -> dict | None:
-        if not self.services.datasource_service:
-            return None
-        cat = self.services.datasource_service.get_catalog_summary(datasource_id)
-        return cat.model_dump(mode="json") if cat else None
+        return None
 
     def refresh_catalog(self, datasource_id: str) -> dict:
-        cat = self.services.datasource_service.refresh_catalog(datasource_id)
-        return cat.model_dump(mode="json")
+        raise BackendError(
+            "UNSUPPORTED_OPERATION",
+            "Catalog refresh is no longer provided by the backend core. Refresh schema/catalog directly from the agent runtime.",
+            {"datasource_id": datasource_id},
+        )
 
     def read_artifact_text(self, artifact_id: str) -> str:
         return self.services.artifact_store.read_text(artifact_id)

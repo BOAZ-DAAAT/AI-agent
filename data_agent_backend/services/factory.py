@@ -10,8 +10,6 @@ from data_agent_backend.services.artifact_store import ArtifactStore
 from data_agent_backend.services.policy_engine import PolicyEngine
 from data_agent_backend.services.run_service import RunService
 from data_agent_backend.services.sandbox_executor import DisabledSandboxExecutor, DockerSandboxExecutor, SandboxExecutor
-from data_agent_backend.services.datasource_service import DatasourceService
-from data_agent_backend.services.sql_executor import SQLExecutor
 from data_agent_backend.storage.sqlite import SQLiteStore
 
 
@@ -22,8 +20,6 @@ class CoreBackendServices:
     policy_engine: PolicyEngine
     artifact_store: ArtifactStore
     artifact_registry: ArtifactRegistry
-    datasource_service: DatasourceService
-    sql_executor: SQLExecutor
     sandbox_executor: SandboxExecutor
     run_service: RunService
 
@@ -40,8 +36,6 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
     policy_engine = PolicyEngine(sqlite)
     artifact_store = ArtifactStore(config.artifact_dir)
     artifact_registry = ArtifactRegistry(sqlite, artifact_store, policy_engine)
-    datasource_service = DatasourceService(sqlite)
-    sql_executor = SQLExecutor(config, artifact_registry, policy_engine, datasource_service)
     if config.sandbox_enabled:
         sandbox_executor = DockerSandboxExecutor(config, policy_engine, artifact_registry, artifact_store)
     else:
@@ -54,8 +48,6 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
         policy_engine=policy_engine,
         artifact_store=artifact_store,
         artifact_registry=artifact_registry,
-        datasource_service=datasource_service,
-        sql_executor=sql_executor,
         sandbox_executor=sandbox_executor,
         run_service=run_service,
     )

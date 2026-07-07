@@ -5,7 +5,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from data_agent_backend.api.routes_artifacts import router as artifacts_router
-from data_agent_backend.api.routes_datasources import router as datasources_router
 from data_agent_backend.api.routes_execution import router as execution_router
 from data_agent_backend.api.routes_policy import router as policy_router
 from data_agent_backend.api.routes_runs import router as runs_router
@@ -41,7 +40,6 @@ def create_app(services: BackendServices | None = None) -> FastAPI:
     app.include_router(runs_router)
     app.include_router(artifacts_router)
     app.include_router(policy_router)
-    app.include_router(datasources_router)
     app.include_router(execution_router)
     return app
 
