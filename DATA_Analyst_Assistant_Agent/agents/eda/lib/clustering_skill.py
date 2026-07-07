@@ -4,7 +4,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_clustering_skill
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import plot_cluster_profile, plot_cluster_scatter
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
+    _is_binary_flag,
+    _is_id_like_numeric,
+    plot_cluster_profile,
+    plot_cluster_scatter,
+)
 
 
 def _select_k(X_scaled: np.ndarray, k_range: range) -> int:
@@ -48,9 +53,16 @@ def run_clustering_skill(
     if df is None or df.empty:
         return {"skip": True, "reason": "데이터 없음"}
 
-    cols = [c for c in (measure_cols or []) if c in df.columns]
+    # semantic 가드(#71 A): ID·일련번호(값 크기 무의미)·0/1 플래그·상수는 군집 피처 부적격
+    # — payment_sequential 로 '번호 큰 군집'이 만들어지던 실측 문제 방지.
+    cols = [c for c in (measure_cols or [])
+            if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    cols = [c for c in cols
+            if not _is_id_like_numeric(c, df[c].dropna())
+            and not _is_binary_flag(df[c].dropna())
+            and df[c].nunique(dropna=True) > 1]
     if len(cols) < 2:
-        return {"skip": True, "reason": "수치형 컬럼 2개 미만 — 클러스터링 불가"}
+        return {"skip": True, "reason": "군집에 쓸 수치형 컬럼 2개 미만(ID·플래그·상수 제외 후)"}
 
     df_clean = df[cols].dropna()
     if len(df_clean) < 6:

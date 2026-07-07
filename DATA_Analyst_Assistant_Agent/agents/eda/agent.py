@@ -119,7 +119,12 @@ class EDAAgent:
         frames = [csv.dataframe for csv in csvs if csv.error is None and not csv.dataframe.empty]
         if not frames:
             raise RuntimeError("No non-empty SQL CSV artifact was available for EDA.")
-        df = pd.concat(frames, ignore_index=True)
+        # mart 경로에선 '마트 생성 완료' 상태 메시지 CSV(1행)가 섞여 온다 — concat 하면
+        # col_1 쓰레기차트·data_level 오판·key_col 오염으로 comparison 이 전멸한다(E2E 실측).
+        # 스키마가 같은 프레임만 합치고, 아니면 실질 데이터(최대 행) 프레임을 쓴다.
+        main = max(frames, key=len)
+        same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
+        df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
 
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.
