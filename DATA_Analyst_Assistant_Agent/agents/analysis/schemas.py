@@ -32,6 +32,62 @@ class AnalysisKind(str, Enum):
     general_task = "general_task"
 
 
+TimeGrain = Literal["D", "W", "M", "Q", "Y"]
+
+
+class AnalysisIntent(BaseModel):
+    """Output of the `classify` node.
+
+    Replaces the fixed question_type catalog with free-form intent plus a
+    deterministic time grain. The LLM fills the intent fields; the node fills
+    `time_grain`/`time_span_days` deterministically from the actual dataframe.
+    Domain is a free-form label used only to pick a domain prompt template — it
+    is NOT a hardcoded enum and is never used for branching logic.
+    """
+
+    objective: str
+    analysis_focus: list[str] = Field(default_factory=list)
+    domain: str = "general"
+    metric_hints: list[str] = Field(default_factory=list)
+    dimension_hints: list[str] = Field(default_factory=list)
+    entity_hints: list[str] = Field(default_factory=list)
+    time_column: str | None = None
+    is_time_based: bool = False
+    time_grain: TimeGrain | None = None
+    time_span_days: int | None = None
+    requires_human_review: bool = False
+    review_reason: str = ""
+    notes: str = ""
+
+
+class GeneratedAnalysisCode(BaseModel):
+    """Output of the `generate` node.
+
+    Structured (pydantic-forced) so we never parse markdown fences by hand.
+    `imports` is separated because import hallucination is the most common
+    codegen failure and is checked in its own node. `code` must set a variable
+    named `result` to a dict with summary/findings/statistics/limitations.
+    """
+
+    rationale: str
+    imports: str = ""
+    code: str
+
+
+class CodeCritique(BaseModel):
+    """Output of the `critic` node (method-validity only).
+
+    Judges whether the generated code applies a statistically sound method to
+    the data (right test, right grain, no leakage). It does NOT judge fit to
+    user intent — that is the supervisor's responsibility. On `fail`, `feedback`
+    is fed back into the next generate attempt.
+    """
+
+    verdict: Literal["pass", "fail"] = "pass"
+    method_issues: list[str] = Field(default_factory=list)
+    feedback: str = ""
+
+
 class AnalysisContext(BaseModel):
     """Bounded context passed to the planner instead of raw orchestration state."""
 
@@ -127,3 +183,9 @@ class AnalysisResult(BaseModel):
     visual_evidence: list[VisualEvidence] = Field(default_factory=list)
     chart_status: str = "not_needed"
     human_review: HumanReview = Field(default_factory=HumanReview)
+
+    # Codegen-path additions (optional; empty on the legacy tool-dispatch path).
+    intent: AnalysisIntent | None = None
+    generated_code: str = ""
+    code_critique: CodeCritique | None = None
+    codegen_attempts: int = 0
