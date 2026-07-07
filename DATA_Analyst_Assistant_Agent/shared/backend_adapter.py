@@ -233,12 +233,10 @@ class BackendAdapter:
         filename: str = "report.md",
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactRef:
-        return self.services.workspace_storage.save_report(
-            run_id,
-            markdown,
-            context=context,
-            filename=filename,
-            metadata=metadata,
+        raise BackendError(
+            "UNSUPPORTED_OPERATION",
+            "Workspace-backed report persistence no longer belongs to the backend core. Register report artifacts directly.",
+            {"run_id": run_id, "filename": filename},
         )
 
     def export_report(
@@ -249,7 +247,11 @@ class BackendAdapter:
         destination: str | None = None,
         context: PolicyContext | None = None,
     ) -> ArtifactRef:
-        return self.services.export_service.create_export(artifact_id, format, destination, context)
+        raise BackendError(
+            "UNSUPPORTED_OPERATION",
+            "Export creation no longer belongs to the backend core. Handle report export outside the backend core.",
+            {"artifact_id": artifact_id, "format": format, "destination": destination},
+        )
 
     def register_ge_validation(
         self,

@@ -1,7 +1,6 @@
 from .approvals import ApprovalDecision, ApprovalRequest, ApprovalStatus
 from .artifacts import ArtifactRecord, ArtifactRef, ArtifactType
 from .contexts import PolicyContext, RunContext
-from .execution import ExecutionLimits, ExecutionResult, ExecutionStatus
 from .memory import MemoryRecord, MemoryStatus, MemoryType
 from .policy import PolicyDecision, RiskLevel
 from .runs import RunEvent, RunRecord, RunStatus, RunSummary
@@ -15,9 +14,6 @@ __all__ = [
     "ArtifactRecord",
     "ArtifactRef",
     "ArtifactType",
-    "ExecutionLimits",
-    "ExecutionResult",
-    "ExecutionStatus",
     "MemoryRecord",
     "MemoryStatus",
     "MemoryType",
