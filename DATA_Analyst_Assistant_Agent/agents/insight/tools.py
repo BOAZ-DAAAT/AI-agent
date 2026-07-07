@@ -31,7 +31,7 @@ _SCOPE_DENY = {"polyfit", "lstsq", "svd", "eig", "eigh", "qr", "cholesky", "corr
 _FABRICATION_DENY = {"Series", "DataFrame", "array", "random"}
 
 _MAX_RESULT_CELLS = 120                                # 관찰/corpus 에 실을 결과 상한
-_VALID_KINDS = {"line", "bar", "table"}
+_VALID_KINDS = {"line", "bar", "grouped_bar", "table"}
 
 try:                                                   # 한글 라벨 (Windows) — 없으면 무시
     plt.rcParams["font.family"] = "Malgun Gothic"
@@ -153,7 +153,7 @@ def run_chart(pack, args: dict, out_dir: str) -> dict:
     kind = str(args.get("kind", "bar"))
     title = str(args.get("title", "")) or "insight_chart"
     if kind not in _VALID_KINDS:
-        return {"ok": False, "error": f"invalid_kind: {kind} (line|bar|table 중 하나)"}
+        return {"ok": False, "error": f"invalid_kind: {kind} (line|bar|grouped_bar|table 중 하나)"}
 
     ok, result = eval_expression(pack.df, expression)
     if not ok:
@@ -164,11 +164,24 @@ def run_chart(pack, args: dict, out_dir: str) -> dict:
         return {"ok": False, "expression": expression,
                 "error": "not_chartable: 결과가 스칼라/빈 값 — 그룹별 값을 담은 표현식으로 다시"}
 
+    # 제목-축 불일치 방지: LLM이 그릴 컬럼(y)·라벨(x)을 명시하면 검증 후 그대로 쓴다
+    # (미지정 시 첫 수치컬럼 — region 실측에서 '제목=금액, 축=건수' 사고가 났던 지점).
+    y_arg = args.get("y")
+    y_cols = [str(c) for c in (y_arg if isinstance(y_arg, list) else [y_arg])] if y_arg else []
+    for c in y_cols:
+        if c not in df_r.columns:
+            return {"ok": False, "expression": expression,
+                    "error": f"y_column_not_found: {c} — 결과 컬럼 {list(df_r.columns)} 중에서 골라라"}
+    x_col = str(args["x"]) if args.get("x") else None
+    if x_col and x_col not in df_r.columns:
+        return {"ok": False, "expression": expression,
+                "error": f"x_column_not_found: {x_col} — 결과 컬럼 {list(df_r.columns)} 중에서 골라라"}
+
     os.makedirs(out_dir, exist_ok=True)
     filename = _safe_filename(title, kind)
     path = os.path.join(out_dir, filename)
     try:
-        _render(df_r, kind, title, path)
+        _render(df_r, kind, title, path, x_col=x_col, y_cols=y_cols)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "expression": expression, "error": f"render_error: {type(exc).__name__}: {exc}"}
     return {"ok": True, "expression": expression, "kind": kind, "title": title,
@@ -193,42 +206,73 @@ def _safe_filename(title: str, kind: str) -> str:
     return f"insight_{kind}_{slug}.png"
 
 
-def _render(df_r: pd.DataFrame, kind: str, title: str, path: str) -> None:
-    """결정론 렌더러. 첫 비수치 컬럼=라벨 축, 수치 컬럼=값."""
+def _fmt_num(v: Any) -> str:
+    """차트 라벨/셀용 숫자 포맷 — 과학표기(2.5e+04) 대신 콤마(25,236)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "" if v is None else str(v)
+    if f != f:                                          # NaN
+        return ""
+    if abs(f) >= 1000:
+        return f"{f:,.0f}"
+    if abs(f) >= 1:
+        return f"{f:,.2f}".rstrip("0").rstrip(".")
+    return f"{f:.4g}"
+
+
+def _render(df_r: pd.DataFrame, kind: str, title: str, path: str,
+            x_col: str | None = None, y_cols: list[str] | None = None) -> None:
+    """결정론 렌더러. x=라벨 축(미지정 시 첫 비수치 컬럼), y=값 컬럼(미지정 시 수치 컬럼)."""
     numeric_cols = [c for c in df_r.columns if pd.api.types.is_numeric_dtype(df_r[c])]
-    label_col = next((c for c in df_r.columns if c not in numeric_cols), None)
+    value_cols = y_cols or numeric_cols                 # LLM 명시가 우선 (제목-축 일치 책임)
+    label_col = x_col or next((c for c in df_r.columns if c not in numeric_cols), None)
 
     if kind == "table":
         show = df_r.head(12)
         fig, ax = plt.subplots(figsize=(min(12, 2 + 1.6 * len(show.columns)), 1 + 0.4 * len(show)))
         ax.axis("off")
-        cells = [[("" if v is None else (f"{v:.4g}" if isinstance(v, float) else str(v)))
+        cells = [[(_fmt_num(v) if isinstance(v, (int, float)) else ("" if v is None else str(v)))
                   for v in row] for row in show.itertuples(index=False)]
         table = ax.table(cellText=cells, colLabels=list(show.columns), loc="center")
         table.auto_set_font_size(False)
         table.set_fontsize(9)
         table.scale(1, 1.3)
     elif kind == "line":
-        if not numeric_cols:
+        if not value_cols:
             raise ValueError("line 차트에 수치 컬럼이 없다")
         fig, ax = plt.subplots(figsize=(9, 5))
         x = df_r[label_col].astype(str) if label_col else df_r.index
-        for col in numeric_cols[:4]:
+        for col in value_cols[:4]:
             ax.plot(x, df_r[col], marker="o", markersize=3, label=col)
         ax.legend(fontsize=8)
         if len(df_r) > 8:
             plt.xticks(rotation=45, ha="right", fontsize=8)
+    elif kind == "grouped_bar":                         # 다지표 비교 — '특성' 질문용
+        if not value_cols:
+            raise ValueError("grouped_bar 차트에 수치 컬럼이 없다")
+        show = df_r.head(10)
+        labels = show[label_col].astype(str) if label_col else show.index.astype(str)
+        cols = value_cols[:4]
+        xpos = np.arange(len(show))
+        width = 0.8 / len(cols)
+        fig, ax = plt.subplots(figsize=(max(8, 1.0 * len(show)), 5))
+        for i, col in enumerate(cols):
+            ax.bar(xpos + i * width, show[col], width, label=col, alpha=0.85, edgecolor="white")
+        ax.set_xticks(xpos + width * (len(cols) - 1) / 2)
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+        ax.legend(fontsize=8)
     else:  # bar — 값 내림차순 가로 막대 (상위 강조)
-        if not numeric_cols:
+        if not value_cols:
             raise ValueError("bar 차트에 수치 컬럼이 없다")
-        vcol = numeric_cols[0]
+        vcol = value_cols[0]
         show = df_r.nlargest(min(15, len(df_r)), vcol)[::-1]
         labels = show[label_col].astype(str) if label_col else show.index.astype(str)
         fig, ax = plt.subplots(figsize=(9, max(3, 0.4 * len(show))))
         ax.barh(labels, show[vcol], color="#4C72B0", alpha=0.85, edgecolor="white")
         vmax = max(abs(float(show[vcol].max())), 1e-9)
         for y, v in enumerate(show[vcol]):
-            ax.text(float(v) + vmax * 0.01, y, f"{float(v):.4g}", va="center", fontsize=8)
+            ax.text(float(v) + vmax * 0.01, y, _fmt_num(v), va="center", fontsize=8)
         ax.set_xlabel(vcol, fontsize=9)
 
     ax.set_title(title, fontsize=11)

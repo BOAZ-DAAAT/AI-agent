@@ -215,6 +215,31 @@ def test_chart_table_renders_png(tmp_path):
     assert os.path.exists(out["local_path"])
 
 
+def test_chart_y_column_selects_metric(tmp_path):
+    # 제목-축 불일치 방지: LLM이 y로 지정한 컬럼을 그린다. 없는 컬럼이면 명확히 거부.
+    expr = "df.groupby('category')['total_sales'].agg(['count','sum'])"
+    ok = run_chart(_pack(), {"expression": expr, "kind": "bar", "title": "합계", "y": "sum"}, str(tmp_path))
+    assert ok["ok"], ok.get("error")
+    bad = run_chart(_pack(), {"expression": expr, "kind": "bar", "title": "x", "y": "amount"}, str(tmp_path))
+    assert not bad["ok"] and "y_column_not_found" in bad["error"]
+
+
+def test_chart_grouped_bar_renders(tmp_path):
+    # 다지표 '특성' 비교용 grouped_bar — 여러 y 컬럼을 나란히
+    out = run_chart(_pack(), {"expression": "df.groupby('category')['total_sales'].agg(['mean','sum'])",
+                              "kind": "grouped_bar", "title": "카테고리 특성",
+                              "y": ["mean", "sum"]}, str(tmp_path))
+    assert out["ok"], out.get("error")
+    assert os.path.exists(out["local_path"])
+
+
+def test_fmt_num_no_scientific_notation():
+    from DATA_Analyst_Assistant_Agent.agents.insight.tools import _fmt_num
+    assert _fmt_num(25236.0) == "25,236"               # 2.524e+04 방지
+    assert _fmt_num(163.567) == "163.57"
+    assert _fmt_num(0.845) == "0.845"
+
+
 def test_chart_scalar_not_chartable(tmp_path):
     out = run_chart(_pack(), {"expression": "df['total_sales'].mean()",
                               "kind": "bar", "title": "x"}, str(tmp_path))
@@ -255,7 +280,8 @@ def test_loop_happy_path(tmp_path):
     assert "900.0" in result.answer
     assert len(result.charts) == 1 and os.path.exists(result.charts[0].local_path)
     assert result.rounds == 3
-    assert [s["tool"] for s in result.steps] == ["compute", "chart", "finish"]
+    # 숫자 게이트 통과 후 내부 validator(품질 심사)까지 자동으로 걸린다
+    assert [s["tool"] for s in result.steps] == ["compute", "chart", "finish", "validate"]
 
 
 def test_loop_verify_failure_feeds_back_then_recovers(tmp_path):
@@ -290,6 +316,18 @@ def test_loop_repeated_identical_call_is_blocked(tmp_path):
     assert len(repeats) == 1
 
 
+def test_loop_validator_retry_then_accept(tmp_path):
+    # 숫자는 맞지만 품질 미달(예: 동문서답) → validator 가 피드백 → 재작성 finish 는 수용(재심사 1회 제한)
+    finish1 = _FINISH_GOOD.replace("900.0", "500.0")
+    retry_verdict = json.dumps({"verdict": "retry", "feedback": "질문에 더 직접적으로 답하라"})
+    finish2 = json.dumps({"tool": "finish", "reason": "재작성", "args": {
+        "answer": "직답: toys가 최대 매출 500.0입니다."}})
+    result = run_insight_loop(_pack(), llm=FakeLLM(finish1, retry_verdict, finish2), out_dir=str(tmp_path))
+    assert not result.fallback_used and result.answer.startswith("직답")
+    v = [s for s in result.steps if s["tool"] == "validate"]
+    assert len(v) == 1 and not v[0]["ok"] and "직접적" in v[0]["note"]
+
+
 def test_loop_fail_streak_exits_early(tmp_path):
     # 연속 실패 3번(거부→반복→반복)이면 남은 라운드를 안 태우고 조기 폴백(토큰 낭비 방지)
     bad = json.dumps({"tool": "compute", "reason": "", "args": {"expression": 'df.query("a>0")'}})
@@ -317,6 +355,18 @@ def _run_agent(monkeypatch, tmp_path, adapter):
     monkeypatch.setenv("INSIGHT_CHART_DIR", str(tmp_path))
     monkeypatch.setattr(L, "get_chat_model", lambda *a, **k: FakeLLM(_COMPUTE, _CHART, _FINISH_GOOD))
     return InsightAgent().run(_state(sql_agent=["s1"]), _runtime(adapter))
+
+
+def test_markdown_embeds_chart_and_labels_sources():
+    from DATA_Analyst_Assistant_Agent.agents.insight.agent import _build_markdown
+    payload = {"answer": "답", "key_insights": [], "action_plan": [], "limitations": [],
+               "charts": [{"title": "차트", "filename": "c.png", "supports": "answer",
+                           "local_path": "/tmp/insight_charts/c.png", "kind": "bar", "artifact_id": None}],
+               "user_question": "질문", "evidence_sources": ["a1"],
+               "evidence_labels": {"a1": "SQL 결과 테이블"}, "fallback_used": False}
+    md = _build_markdown(payload)
+    assert "![차트](insight_charts/c.png)" in md        # 이미지 임베드
+    assert "SQL 결과 테이블 (`a1`)" in md               # 사람이 읽는 출처 라벨
 
 
 def test_agent_run_registers_report_payload_and_chart(monkeypatch, tmp_path):

@@ -114,6 +114,7 @@ def _build_payload(state: OrchestrationState, pack: EvidencePack, result: Insigh
         "limitations": result.limitations,
         "charts": [c.model_dump() for c in result.charts],
         "evidence_sources": pack.source_artifact_ids,
+        "evidence_labels": pack.source_labels,          # id → "SQL 결과 테이블" 등 (사람이 읽는 출처)
         "steps": result.steps,                         # 행동 트레이스(provenance)
         "fallback_used": result.fallback_used,
         "rounds": result.rounds,
@@ -130,16 +131,22 @@ def _build_markdown(payload: dict[str, Any]) -> str:
     if payload["key_insights"]:
         lines += ["## Key Insights", *[f"- {s}" for s in payload["key_insights"]], ""]
     if payload["charts"]:
-        lines += ["## Charts",
-                  *[f"- {c['title'] or c['filename']} (`{c['filename']}`, supports={c['supports']})"
-                    for c in payload["charts"]], ""]
+        lines += ["## Charts"]
+        for c in payload["charts"]:
+            # 이미지 임베드 — md 를 차트 폴더 옆에 두면 바로 렌더된다 (파일명 나열만 하던 것 개선)
+            rel_dir = os.path.basename(os.path.dirname(c.get("local_path") or "")) or "charts"
+            lines += [f"![{c['title'] or c['filename']}]({rel_dir}/{c['filename']})",
+                      f"- {c['title'] or c['filename']} (`{c['filename']}`, supports={c['supports']})"]
+        lines += [""]
     if payload["action_plan"]:
         lines += ["## Action Plan", *[f"- {s}" for s in payload["action_plan"]], ""]
     if payload["limitations"]:
         lines += ["## Limitations", *[f"- {s}" for s in payload["limitations"]], ""]
+    labels = payload.get("evidence_labels") or {}
     lines += ["## User Question", payload["user_question"], "",
               "## Evidence Sources",
-              *([f"- {a}" for a in payload["evidence_sources"]] or ["- (없음)"]), ""]
+              *([f"- {labels.get(a, '상류 아티팩트')} (`{a}`)" for a in payload["evidence_sources"]]
+                or ["- (없음)"]), ""]
     if payload["fallback_used"]:
         lines += ["> ⚠️ 답변 검증 실패로 보수적 요약이 제공되었습니다.", ""]
     return "\n".join(lines)

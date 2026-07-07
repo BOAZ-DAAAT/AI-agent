@@ -31,6 +31,7 @@ class EvidencePack:
     eda: dict[str, Any] = field(default_factory=dict)
     analysis: dict[str, Any] = field(default_factory=dict)
     source_artifact_ids: list[str] = field(default_factory=list)
+    source_labels: dict[str, str] = field(default_factory=dict)   # artifact_id → 사람이 읽는 라벨
 
 
 def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> EvidencePack:
@@ -38,9 +39,14 @@ def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> Evi
     csvs = read_sql_result_csvs(state, runtime)
     df = _best_dataframe(csvs)
     source_ids = [c.artifact_id for c in csvs if c.error is None]
+    labels = {c.artifact_id: "SQL 결과 테이블" for c in csvs if c.error is None}
 
     eda = _read_first_json(state, runtime, "eda_agent", source_ids)
     analysis = _read_first_json(state, runtime, "analysis_agent", source_ids)
+    for aid in source_ids:                             # 사람이 읽는 출처 라벨 (리포트용)
+        labels.setdefault(aid, "EDA 분석 요약" if aid in (state.artifact_ids.get("eda_agent") or [])
+                          else "분석 결과" if aid in (state.artifact_ids.get("analysis_agent") or [])
+                          else "상류 아티팩트")
 
     return EvidencePack(
         user_question=state.user_query,
@@ -51,6 +57,7 @@ def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> Evi
         eda=_slim_eda(eda),
         analysis=_slim_analysis(analysis),
         source_artifact_ids=source_ids,
+        source_labels=labels,
     )
 
 

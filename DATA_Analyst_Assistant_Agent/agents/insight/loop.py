@@ -16,6 +16,7 @@ from typing import Any
 from DATA_Analyst_Assistant_Agent.agents.insight.evidence import EvidencePack
 from DATA_Analyst_Assistant_Agent.agents.insight.schemas import ChartEntry, InsightResult, ToolCall
 from DATA_Analyst_Assistant_Agent.agents.insight.tools import run_chart, run_compute, run_look
+from DATA_Analyst_Assistant_Agent.agents.insight.validator import validate_result
 from DATA_Analyst_Assistant_Agent.agents.insight.verify import build_evidence_corpus, verify_texts
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
@@ -42,6 +43,7 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
     seen_calls: set[str] = set()                      # 동일 호출 반복(배회) 감지용
     verify_fails = 0
     fail_streak = 0                                   # 연속 실패 카운트 (성공 시 리셋)
+    validator_used = False                            # 품질 심사 retry 는 1회만 (배회 방지)
 
     for round_idx in range(MAX_ROUNDS):
         try:
@@ -61,6 +63,17 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
         if call.tool == "finish":
             result, missing = _try_finish(pack, call.args, computes, charts, steps, round_idx)
             if result is not None:
+                # 숫자 게이트 통과 → 내부 validator(품질 심사, 팀 컨벤션): 직답성·차트-답변 대응·인과 과장
+                if not validator_used:
+                    ok_v, feedback = validate_result(llm, pack.user_question, result.answer,
+                                                     result.key_insights, charts, result.action_plan)
+                    steps.append({"round": round_idx, "tool": "validate", "reason": "", "ok": ok_v,
+                                  "note": "" if ok_v else feedback[:150]})
+                    if not ok_v:
+                        validator_used = True          # 재심사는 1회만 — 두 번째 finish 는 그대로 수용
+                        observations.append(f"[품질 심사 지적] {feedback} — 반영해서 다시 finish 하라.")
+                        continue
+                result.steps = list(steps)             # pydantic 이 리스트를 복사하므로 validate 스텝 재반영
                 result.rounds = round_idx + 1
                 return result
             verify_fails += 1
@@ -184,7 +197,11 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
   · 조건 필터는 불리언 마스크 + df.loc[...]. '그룹 N건 이상' 필터는
     df.loc[df.groupby('그룹컬럼')['컬럼'].transform('size')>=N] 패턴을 쓰라.
   · 'X 이상 비율' 류는 lambda 없이 df['수치'].ge(X).groupby(df['그룹컬럼']).mean() 패턴을 쓰라.
-- chart: 답을 뒷받침하는 차트 주문(렌더는 코드가 함). args={{"expression":"차트 데이터 표현식","kind":"line|bar|table","title":"제목"}}
+- chart: 답을 뒷받침하는 차트 주문(렌더는 코드가 함).
+  args={{"expression":"차트 데이터 표현식","kind":"line|bar|grouped_bar|table","title":"제목",
+  "x":"라벨 컬럼(선택)","y":"그릴 값 컬럼명 또는 리스트(선택)"}}
+  · **y는 제목이 말하는 지표와 반드시 일치시켜라** (제목 '총 금액'인데 건수 컬럼을 그리는 사고 방지)
+  · 여러 지표의 '특성' 비교면 grouped_bar 또는 table, 시간 컬럼이 있으면 추세 line 도 고려하라
 - finish: 답 제출. args={{"answer":"질문 직답 1~3문장","key_insights":["핵심 인사이트"],"action_plan":["근거 있는 권고(없으면 빈 배열)"],"limitations":["해석 한계"]}}
 
 [정책 — 어기면 finish 가 거부된다]
