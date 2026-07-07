@@ -176,7 +176,7 @@ def build_analysis_graph():
     builder.add_edge("read_chart", "attach_visual")
     builder.add_edge("attach_visual", "finalize")
     builder.add_edge("finalize", END)
-    return builder.compile()
+    return builder.compile(checkpointer=None)
 
 
 def run_analysis_workflow(
@@ -205,5 +205,5 @@ def run_analysis_workflow(
         "chart_reader": chart_reader,
         "max_attempts": state.max_retry_per_agent + 2,
         "error": "",
-    })
+    }, config={"configurable": {"thread_id": None, "checkpoint_id": None, "checkpoint_ns": ""}})
     return output["result"], output["local_checks"], output["terminal_reason"]

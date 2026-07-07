@@ -246,11 +246,17 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         approval_id = str(pending_approval.get("approval_id") or "")
         if approval_id:
             approval_ids.append(approval_id)
+    _error_state = state.get("error_state") or {}
+    _retry_context: dict = {
+        **(state.get("retry_counts") or {}),
+        "last_error": _error_state.get("message", ""),
+        "retryable": _error_state.get("retryable", False),
+    }
     plan = AnalysisPlan(
         goal=str(plan_payload.get("goal") or state.get("latest_user_query") or ""),
         datasource_id=state.get("datasource_id"),
         catalog_summary=state.get("catalog_summary"),
-        retry_context=state.get("retry_counts"),
+        retry_context=_retry_context,
         planner_mode=planner_mode,
         route_kind=str(plan_payload.get("route_kind") or "simple"),
         generated_sql=generated_sql,
@@ -265,7 +271,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         user_query=state.get("clarified_query") or state.get("latest_user_query", ""),
         goal=plan.goal,
         plan=plan,
-        retry_context=state.get("retry_counts"),
+        retry_context=_retry_context,
         current_step=state.get("current_step", "created"),
         artifact_ids=artifact_ids_by_agent(state),
         approval_ids=approval_ids,
