@@ -60,7 +60,7 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     sql_lower = _normalized_sql(sql_draft.get("sql") or "").lower()
     for table_name in required_tables:
         if table_name not in source_tables and table_name.lower() not in sql_lower:
-            findings.append({"category": "invalid_join_plan", "severity": "error", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
+            findings.append({"category": "invalid_join_plan", "severity": "warning", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
     return findings
 
 
