@@ -563,7 +563,6 @@ class TestSQLLangGraphSmoke:
         assert any("FROM analytics.category_performance_analysis" in query for query in executed_queries)
         assert committed
 
-
 # ── mart detection tests ──
 
 class TestMartDetection:

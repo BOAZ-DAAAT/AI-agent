@@ -5,6 +5,7 @@ from __future__ import annotations
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import (
     can_use_live_db,
     drop_table_if_exists,
+    ensure_target_schema_exists,
     offline_mart_rows,
     offline_select_rows,
     is_safe_mart_sql,
@@ -67,6 +68,7 @@ def execute_sql(state: AgentState):
 
         if can_use_live_db():
             try:
+                ensure_target_schema_exists(target_table)
                 run_sql_commit(sql)
             except Exception as e:
                 error_text = str(e)
