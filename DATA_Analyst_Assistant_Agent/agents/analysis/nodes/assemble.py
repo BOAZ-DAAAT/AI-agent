@@ -1,0 +1,154 @@
+"""Bridge the analysis loop's AnalysisOutcome to the stable AnalysisResult.
+
+The output contract (AnalysisResult) is consumed by chart/finalize/report and by
+agent.py's preview, so it must stay shape-compatible. This module packs the
+generated-code outcome into that contract and fills the new codegen fields
+(intent/generated_code/code_critique/codegen_attempts) additively.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.analyze import AnalysisOutcome
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
+    AnalysisEvidence,
+    AnalysisExecutionPlan,
+    AnalysisIntent,
+    AnalysisKind,
+    AnalysisResult,
+    HumanReview,
+)
+from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
+
+GENERATED_TOOL_NAME = "generated_analysis"
+
+
+def _plan_from_intent(intent: AnalysisIntent) -> AnalysisExecutionPlan:
+    """Minimal plan so downstream readers of result.plan keep working."""
+
+    return AnalysisExecutionPlan(
+        objective=intent.objective,
+        question_type="general_task",
+        analysis_kind=AnalysisKind.general_task,
+        analysis_subtype=f"generated::{intent.domain}",
+        tool_names=[GENERATED_TOOL_NAME],
+        metric=intent.metric_hints[0] if intent.metric_hints else None,
+        dimension=intent.dimension_hints[0] if intent.dimension_hints else None,
+        time_column=intent.time_column,
+        feature_columns=list(intent.metric_hints),
+        requires_human_review=intent.requires_human_review,
+        review_reason=intent.review_reason,
+        planner_mode="llm",
+    )
+
+
+def _evidence_from_outcome(outcome: AnalysisOutcome) -> AnalysisEvidence:
+    result = outcome.result or {}
+    findings = result.get("findings") or []
+    finding = findings[0] if findings else (result.get("summary") or "No finding produced.")
+    return AnalysisEvidence(
+        tool_name=GENERATED_TOOL_NAME,
+        status="success" if outcome.status == "passed" else "failed",
+        method="LLM-generated analysis code",
+        inputs={},
+        statistics=result.get("statistics") or {},
+        finding=str(finding),
+        caveats=[str(item) for item in (result.get("limitations") or [])],
+    )
+
+
+def build_result_from_outcome(
+    state: OrchestrationState,
+    context: AnalysisContext,
+    intent: AnalysisIntent,
+    outcome: AnalysisOutcome,
+    dataframe: pd.DataFrame,
+    profiles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result_payload = outcome.result or {}
+    evidence = _evidence_from_outcome(outcome)
+
+    findings: list[str] = []
+    if not dataframe.empty:
+        findings.append(
+            f"SQL result contains {len(dataframe)} rows and {len(dataframe.columns)} columns."
+        )
+    findings.extend(str(item) for item in (result_payload.get("findings") or []))
+
+    limitations = [str(item) for item in (result_payload.get("limitations") or [])]
+    if outcome.status == "failed":
+        reason = outcome.critique.feedback if outcome.critique else "did not pass method review"
+        limitations.append(f"Analysis did not pass method review after {outcome.attempts} attempts: {reason}")
+    limitations.extend(_eda_limitations(profiles))
+
+    review_required = intent.requires_human_review or outcome.status == "failed"
+    review_reason = intent.review_reason or (
+        "Generated analysis failed method review; human check recommended."
+        if outcome.status == "failed"
+        else ""
+    )
+
+    result = AnalysisResult(
+        run_id=state.run_id,
+        goal=context.goal,
+        plan=_plan_from_intent(intent),
+        method_summary=(
+            result_payload.get("summary")
+            or f"Generated analysis for a {intent.domain} question ({outcome.status})."
+        ),
+        key_findings=findings or ["No usable findings were produced."],
+        evidence=[evidence],
+        limitations=list(dict.fromkeys(limitations)) or ["No limitations were recorded."],
+        source_artifacts={
+            "sql": state.artifact_ids.get("sql_agent", []),
+            "eda": state.artifact_ids.get("eda_agent", []),
+        },
+        data_quality_notes=_quality_notes(dataframe, profiles),
+        eda_profile_summaries=profiles,
+        human_review=HumanReview(required=review_required, reason=review_reason),
+        intent=intent,
+        generated_code=(outcome.code.code if outcome.code else ""),
+        code_critique=outcome.critique,
+        codegen_attempts=outcome.attempts,
+    )
+    return result.model_dump(mode="json")
+
+
+def _quality_notes(df: pd.DataFrame, profiles: list[dict[str, Any]]) -> list[str]:
+    notes: list[str] = []
+    for profile in profiles:
+        profile_block = profile.get("profile", profile)
+        status = profile_block.get("quality_status")
+        if status:
+            notes.append(f"EDA quality status: {status}.")
+        notes.extend(str(item) for item in profile_block.get("key_issues", []) or [])
+        for caution in profile.get("cautions", []) or []:
+            if isinstance(caution, dict) and caution.get("message_ko"):
+                notes.append(f"EDA caution ({caution.get('severity', 'unknown')}): {caution['message_ko']}")
+    for column, count in df.isna().sum().items():
+        if int(count) > 0:
+            notes.append(f"Column {column} contains {int(count)} missing values.")
+    return list(dict.fromkeys(notes))
+
+
+def _eda_limitations(profiles: list[dict[str, Any]]) -> list[str]:
+    limitations: list[str] = []
+    for profile in profiles:
+        data_level = profile.get("data_level", {}) or {}
+        if data_level.get("is_aggregated"):
+            limitations.append(
+                "EDA indicates aggregated data; avoid individual customer/order/product-level interpretation."
+            )
+        for constraint in profile.get("analysis_constraints", []) or []:
+            blocked = ", ".join(str(item) for item in constraint.get("blocked_operations", []) or [])
+            reason = constraint.get("reason_ko") or "EDA analysis constraint applies."
+            if blocked:
+                limitations.append(f"{reason} Blocked operations: {blocked}.")
+        for caution in profile.get("cautions", []) or []:
+            if isinstance(caution, dict) and caution.get("implication") == "avoid_causal_claims":
+                limitations.append("Observed associations should not be phrased as causal effects.")
+    return list(dict.fromkeys(limitations))
