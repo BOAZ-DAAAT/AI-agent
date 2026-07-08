@@ -623,6 +623,44 @@ def _print_text_summary(
     print(Path(adapter.base_data_dir).resolve())
 
 
+def _handle_result(
+    adapter: BackendAdapter,
+    result: Any,
+    args: argparse.Namespace,
+    *,
+    query_for_summary: str,
+) -> None:
+    if not isinstance(result, SupervisorRunResult):
+        raise RuntimeError("Supervisor resume result is not a CLI-compatible result.")
+
+    if result.kind == "interrupt":
+        if args.json:
+            print(json.dumps(_interrupt_summary(result), ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_interrupt_summary(result)
+        return
+
+    if result.state is None:
+        raise RuntimeError("Supervisor state result is missing state payload.")
+
+    state = result.state
+    summary_query = state.user_query or query_for_summary
+    outputs = None
+    if not args.no_output:
+        outputs = _write_outputs(adapter, state, summary_query, Path(args.output_dir))
+
+    if args.json:
+        payload = _state_summary(state)
+        if outputs:
+            payload["outputs"] = {key: str(value) for key, value in outputs.items()}
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    else:
+        _print_text_summary(state, adapter, outputs=outputs, show_sql=args.show_sql)
+
+    if outputs and not args.no_open and not args.json and hasattr(os, "startfile"):
+        os.startfile(outputs["index_html"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run DATA_Analyst_Assistant_Agent through the LangGraph Supervisor.",
@@ -630,6 +668,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("query", nargs="?", help="User analysis question. If omitted, stdin prompt is used.")
     parser.add_argument("--thread-id", default="daaa-manual-run", help="Thread id for the backend run.")
     parser.add_argument("--datasource-id", default=None, help="Optional backend datasource id.")
+    parser.add_argument(
+        "--resume-answer",
+        default=None,
+        help=(
+            "Resume a clarification interrupt with this answer. "
+            "Use the same --thread-id from the interrupted run."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary.")
     parser.add_argument("--show-sql", action="store_true", help="Print generated SQL in text output.")
     parser.add_argument("--dotenv", default=".env", help="Path to dotenv file. Defaults to .env.")
@@ -647,41 +693,33 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    resume_answer = None
+    if args.resume_answer is not None:
+        resume_answer = str(args.resume_answer).strip()
+        if not resume_answer:
+            raise SystemExit("--resume-answer cannot be empty.")
+        if args.query:
+            raise SystemExit("--resume-answer cannot be used with a positional query.")
+        if args.datasource_id is not None:
+            raise SystemExit("--resume-answer cannot be used with --datasource-id.")
+
     load_dotenv(args.dotenv)
     _normalize_env_aliases()
     _ensure_sql_agent_metadata()
+
+    adapter = BackendAdapter()
+    supervisor = SupervisorAgent(adapter)
+    if resume_answer is not None:
+        result = supervisor.resume(args.thread_id, {"answer": resume_answer})
+        _handle_result(adapter, result, args, query_for_summary=f"[resume] {resume_answer}")
+        return
 
     query = args.query or input("Query: ").strip()
     if not query:
         raise SystemExit("Query is empty.")
 
-    adapter = BackendAdapter()
-    supervisor = SupervisorAgent(adapter)
     result = supervisor.run(query, thread_id=args.thread_id, datasource_id=args.datasource_id)
-    if result.kind == "interrupt":
-        if args.json:
-            print(json.dumps(_interrupt_summary(result), ensure_ascii=False, indent=2, default=str))
-        else:
-            _print_interrupt_summary(result)
-        return
-
-    if result.state is None:
-        raise RuntimeError("Supervisor state result is missing state payload.")
-    state = result.state
-    outputs = None
-    if not args.no_output:
-        outputs = _write_outputs(adapter, state, query, Path(args.output_dir))
-
-    if args.json:
-        payload = _state_summary(state)
-        if outputs:
-            payload["outputs"] = {key: str(value) for key, value in outputs.items()}
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    else:
-        _print_text_summary(state, adapter, outputs=outputs, show_sql=args.show_sql)
-
-    if outputs and not args.no_open and not args.json and hasattr(os, "startfile"):
-        os.startfile(outputs["index_html"])
+    _handle_result(adapter, result, args, query_for_summary=query)
 
 
 if __name__ == "__main__":
