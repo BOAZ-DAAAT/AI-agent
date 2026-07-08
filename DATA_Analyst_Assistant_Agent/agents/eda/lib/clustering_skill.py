@@ -67,6 +67,10 @@ def run_clustering_skill(
     df_clean = df[cols].dropna()
     if len(df_clean) < 6:
         return {"skip": True, "reason": "유효 행 수 부족 (6행 미만)"}
+    # 대용량 가드: k탐색(KMeans×여러 k×n_init)+실루엣이 행수에 민감 — 샘플로 군집 구조 파악
+    # (센트로이드·실루엣은 1만 표본이면 충분히 안정, 96k 전량은 분 단위 낭비였음)
+    if len(df_clean) > 10000:
+        df_clean = df_clean.sample(10000, random_state=42)
 
     # 정규화
     scaler = StandardScaler()

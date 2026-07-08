@@ -14,7 +14,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_c
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
 
 
-def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context):
+def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context, captions=None):
     """key 차트 PNG를 아티팩트로 등록한다 — **이상적 형태(content_bytes)** 로 호출.
 
     adapter가 아직 바이너리(content_bytes)를 지원하지 않으면 가드로 잡아 artifact_id=None 폴백한다
@@ -22,9 +22,11 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
     분석 에이전트는 경로 대신 artifact_id로 차트를 로드(멀티모달)한다.
     반환: [{"filename": str, "artifact_id": str | None}, ...]
     """
+    captions = captions or {}
     entries: list[dict[str, Any]] = []
     for path in chart_paths or []:
         filename = os.path.basename(path)
+        caption = captions.get(filename, "")
         artifact_id = None
         try:
             with open(path, "rb") as fh:
@@ -37,11 +39,12 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
                 created_by_tool="DATA_Analyst_Assistant_Agent.eda.lang_graph",
                 context=context,
                 parent_ids=parent_ids,
+                metadata={"caption": caption},   # 선정 이유 — 분석 멀티모달 읽기의 설명서(#71 B)
             )
             artifact_id = ref.artifact_id
         except Exception:  # noqa: BLE001  # adapter 미지원/파일 없음 등 → 폴백
             artifact_id = None
-        entries.append({"filename": filename, "artifact_id": artifact_id})
+        entries.append({"filename": filename, "artifact_id": artifact_id, "caption": caption})
     return entries
 
 
@@ -59,7 +62,8 @@ class EDAAgent:
 
         # key 차트 PNG를 아티팩트로 등록(이상형+가드) → 경로 대신 {filename, artifact_id}로 전달
         key_chart_refs = register_key_chart_artifacts(
-            runtime, state, eda_result.get("key_charts", []), source_ids, context)
+            runtime, state, eda_result.get("key_charts", []), source_ids, context,
+            captions=eda_result.get("key_chart_captions", {}))
 
         # codegen 탈출구가 도메인 밖으로 판정하면 top-level 플래그로 정직하게 노출한다
         # (성공 결과는 statistical_metadata.adhoc_analysis에 편입됨). 분석 에이전트가 라우팅에 씀.

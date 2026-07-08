@@ -41,6 +41,14 @@ PALETTE_SEQ    = "Blues"
 # ─────────────────────────────
 _ID_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|seq|sequential|idx|index)($|_)", re.IGNORECASE)
 _KEY_MAX_CARDINALITY = 50            # 이보다 범주가 많으면 차트 라벨 축으로 부적합(ID급)
+_MAX_PLOT_POINTS = 8000              # raw 포인트 차트(violin·scatter·box) 렌더 샘플 상한 — 96k행 렌더 폭증 방지
+
+
+def _plot_sample(data, cap: int = _MAX_PLOT_POINTS):
+    """그리기 전용 샘플 — 통계는 전체로 계산하고 렌더만 줄인다(시각 차이 무시 가능, 재현 고정)."""
+    if len(data) <= cap:
+        return data
+    return data.sample(cap, random_state=42)
 
 
 def _is_binary_flag(s: pd.Series) -> bool:
@@ -155,18 +163,19 @@ def plot_distributions(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "max": round(float(s.max()), 4),
             "skewness": round(float(s.skew()), 4),
         }
-        # 왜도 큰 분포는 선형축에서 막대 하나로 뭉개진다 — 자기 통계의 log_transform 처방을 차트가 소비
-        log_x = stats[col]["skewness"] > 2 and float(s.min()) > 0
+        # 왜도 큰 분포는 선형축에서 막대 하나로 뭉개진다 — 자기 통계의 log_transform 처방을 차트가 소비.
+        # 0을 포함할 수 있어 log1p 변환을 쓴다(순수 log는 0원 고객 몇 명에 무력화되는 실측 있음).
+        log_x = stats[col]["skewness"] > 2 and float(s.min()) >= 0
+        plot_s = np.log1p(s) if log_x else s
         fig, ax = plt.subplots(figsize=(7, 4))
-        bins = (np.logspace(np.log10(float(s.min())), np.log10(float(s.max())), 25)
-                if log_x and float(s.min()) < float(s.max()) else 25)
-        ax.hist(s, bins=bins, color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.85)
-        if log_x:
-            ax.set_xscale("log")
-        ax.axvline(float(s.mean()),   color=PALETTE_ACCENT, linestyle="--", linewidth=1.4, label=f"mean={stats[col]['mean']}")
-        ax.axvline(float(s.median()), color=PALETTE_NEG,    linestyle=":",  linewidth=1.4, label=f"median={stats[col]['median']}")
+        ax.hist(plot_s, bins=25, color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.85)
+        mean_v = np.log1p(float(s.mean())) if log_x else float(s.mean())
+        med_v = np.log1p(float(s.median())) if log_x else float(s.median())
+        ax.axvline(mean_v, color=PALETTE_ACCENT, linestyle="--", linewidth=1.4, label=f"mean={stats[col]['mean']}")
+        ax.axvline(med_v,  color=PALETTE_NEG,    linestyle=":",  linewidth=1.4, label=f"median={stats[col]['median']}")
         ax.legend(fontsize=8, frameon=False)
-        _apply_style(ax, f"Distribution: {col}" + (" (log)" if log_x else ""), xlabel=col, ylabel="Count")
+        _apply_style(ax, f"Distribution: {col}" + (" (log1p)" if log_x else ""),
+                     xlabel=(f"log1p({col})" if log_x else col), ylabel="Count")
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"dist_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -190,10 +199,11 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "lower_fence": round(q1 - 1.5 * (q3 - q1), 4),
             "upper_fence": round(q3 + 1.5 * (q3 - q1), 4),
         }
-        log_y = float(s.skew()) > 2 and float(s.min()) > 0   # 왜도 처방 소비 — 이상치에 짓눌린 박스 방지
+        log_y = float(s.skew()) > 2 and float(s.min()) >= 0  # 왜도 처방 소비 — 이상치에 짓눌린 박스 방지
         fig, ax = plt.subplots(figsize=(5, 5))
+        s_plot = _plot_sample(np.log1p(s) if log_y else s)
         bp = ax.boxplot(
-            s, vert=True, patch_artist=True,
+            s_plot, vert=True, patch_artist=True,
             boxprops=dict(facecolor=PALETTE_MAIN, alpha=0.6, linewidth=1.2),
             medianprops=dict(color=PALETTE_ACCENT, linewidth=2),
             whiskerprops=dict(linewidth=1.2),
@@ -201,9 +211,8 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
             flierprops=dict(marker="o", color=PALETTE_NEG, alpha=0.5, markersize=4),
         )
         ax.set_xticks([])
-        if log_y:
-            ax.set_yscale("log")
-        _apply_style(ax, f"Boxplot: {col}" + (" (log)" if log_y else ""), ylabel=col)
+        _apply_style(ax, f"Boxplot: {col}" + (" (log1p)" if log_y else ""),
+                     ylabel=(f"log1p({col})" if log_y else col))
         ax.grid(axis="x", visible=False)
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"box_{col}.png")
@@ -232,9 +241,10 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "iqr":      round(q3 - q1, 4),
             "skewness": round(float(s.skew()), 4),
         }
-        log_y = stats[col]["skewness"] > 2 and float(s.min()) > 0   # 왜도 처방 소비
+        log_y = stats[col]["skewness"] > 2 and float(s.min()) >= 0  # 왜도 처방 소비
         fig, ax = plt.subplots(figsize=(5, 6))
-        parts = ax.violinplot(s.values, vert=True, showmedians=True, showextrema=True)
+        parts = ax.violinplot(_plot_sample(np.log1p(s) if log_y else s).values,
+                              vert=True, showmedians=True, showextrema=True)
         parts["cmedians"].set_color(PALETTE_ACCENT)
         parts["cmedians"].set_linewidth(2)
         for pc in parts["bodies"]:
@@ -242,9 +252,8 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
             pc.set_alpha(0.6)
             pc.set_edgecolor("white")
         ax.set_xticks([])
-        if log_y:
-            ax.set_yscale("log")
-        _apply_style(ax, f"Violin: {col}" + (" (log)" if log_y else ""), ylabel=col)
+        _apply_style(ax, f"Violin: {col}" + (" (log1p)" if log_y else ""),
+                     ylabel=(f"log1p({col})" if log_y else col))
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"violin_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -664,8 +673,9 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
         stats[f"{x_col} vs {y_col}"] = {"pearson_r": corr_val}
 
         color = PALETTE_POS if corr_val >= 0 else PALETTE_NEG
+        draw_df = _plot_sample(pair_df)                 # 렌더 샘플 — 상관은 전체로 계산됨
         fig, ax = plt.subplots(figsize=(6, 5))
-        ax.scatter(pair_df[x_col], pair_df[y_col],
+        ax.scatter(draw_df[x_col], draw_df[y_col],
                    alpha=0.45, s=20, color=color, edgecolors="none")
         try:
             z = np.polyfit(pair_df[x_col], pair_df[y_col], 1)
@@ -866,7 +876,7 @@ def plot_grouped_box(df: pd.DataFrame, key_col: str = None, measure_cols: list =
             if len(s) < min_rows_per_group:
                 continue
             q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
-            groups.append(s.values)
+            groups.append(_plot_sample(s).values)        # 렌더 샘플 (통계 per는 전체 기준)
             labels.append(str(cat)[:18])
             per[str(cat)] = {"median": round(float(s.median()), 2), "q1": round(q1, 2),
                              "q3": round(q3, 2), "iqr": round(q3 - q1, 2), "n": int(len(s))}
@@ -944,7 +954,7 @@ def plot_distribution_by_target(df: pd.DataFrame, target_col: str = None, measur
             s = work.loc[work["_bucket"] == lv, metric].dropna()
             if len(s) < min_rows:
                 continue
-            groups.append(s.values)
+            groups.append(_plot_sample(s).values)        # 렌더 샘플 (통계는 전체 기준)
             labels.append(label[lv])
             per[label[lv]] = {"median": round(float(s.median()), 2), "n": int(len(s))}
         if len(groups) < 2:

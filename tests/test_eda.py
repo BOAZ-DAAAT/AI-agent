@@ -1005,6 +1005,57 @@ def test_gate_allows_df_empty_property():
 
 
 # ─────────────────────────────
+# 차트 셀렉터 (#71 B) — 가설 연계 + 선정 이유 캡션
+# ─────────────────────────────
+def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    # 후보 차트 파일 3개 생성
+    paths = []
+    for name in ("bar_top_a.png", "dist_b.png", "violin_b.png"):
+        p = tmp_path / name
+        p.write_bytes(b"png")
+        paths.append(str(p))
+
+    seen_prompts = []
+
+    class _FakeSelLLM:
+        def invoke(self, prompt):
+            seen_prompts.append(prompt)
+            return _FakeResp(_json.dumps({
+                "remove": ["violin_b.png"],
+                "reason": {"violin_b.png": "dist와 중복"},
+                "keep_captions": {"bar_top_a.png": "a 순위 — 가설1 근거",
+                                  "dist_b.png": "b 분포",
+                                  "violin_b.png": "(제거됨)"},
+            }))
+
+    monkeypatch.setattr(CS, "_load_llm", lambda: _FakeSelLLM())
+    selected, captions = CS.run_chart_selector_skill(
+        chart_paths=paths, user_question="a 상위는?", analysis_results={},
+        statistical_metadata={}, hypotheses="[가설 1] a는 그룹별로 다르다")
+    names = [os.path.basename(p) for p in selected]
+    assert "violin_b.png" not in names and "bar_top_a.png" in names
+    assert captions == {"bar_top_a.png": "a 순위 — 가설1 근거", "dist_b.png": "b 분포"}  # 생존 차트만
+    assert "[가설 1]" in seen_prompts[0]                 # 가설이 프롬프트에 들어감
+
+
+def test_selector_node_exposes_captions(monkeypatch, tmp_path):
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.chart_selector as N
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    chart = os.path.join(V.OUTPUT_DIR, "bar_top_x.png")
+    open(chart, "wb").write(b"png")
+    monkeypatch.setattr(N, "run_chart_selector_skill",
+                        lambda **kw: ([chart], {"bar_top_x.png": "x 순위 근거"}))
+    out = N.chart_selector_node({"user_question": "x?", "hypotheses": "[가설 1] x"})
+    assert out["key_charts"] == [chart]
+    assert out["key_chart_captions"] == {"bar_top_x.png": "x 순위 근거"}
+    assert os.path.exists(os.path.join(V.KEY_DIR, "bar_top_x.png"))   # key/ 복사됨
+
+
+# ─────────────────────────────
 # 차트 semantic 가드 (#71 A) — E2E 실측 잡차트 방지
 # ─────────────────────────────
 def _guard_df(n=200):

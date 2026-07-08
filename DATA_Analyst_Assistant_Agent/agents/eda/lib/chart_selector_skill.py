@@ -57,12 +57,19 @@ def _call_llm_remove(
     statistical_metadata: dict,
     extra_instruction: str = "",
     priority_metrics: list = None,
+    hypotheses: str = "",
 ) -> dict:
-    """LLM에게 '이상적 차트 구성'을 그리게 하고, 거기 부합하지 않는 차트를 제거시킨다."""
+    """LLM에게 '이상적 차트 구성'을 그리게 하고, 거기 부합하지 않는 차트를 제거시킨다.
+
+    유지 차트에는 선정 이유 캡션(keep_captions)을 함께 받는다 — key 차트는 아티팩트로 남아
+    분석 에이전트가 멀티모달로 읽으므로 '무엇을 보여주는 차트인지'가 따라가야 한다(#71 B).
+    """
     priority_info = ""
     if priority_metrics:
         names = ", ".join(m.get("metric", "") for m in priority_metrics if m.get("metric"))
         priority_info = f"\n[우선 지표]\n{names}\n"
+    hypotheses_info = (f"\n[검증 예정 가설 — 각 가설의 근거가 되는 차트를 최소 1장 유지하라]\n{hypotheses}\n"
+                       if hypotheses else "")
 
     # 클러스터링 품질 평가 — 실루엣 점수 기반 판단 지침 생성
     clustering = statistical_metadata.get("clustering", {})
@@ -101,7 +108,7 @@ def _call_llm_remove(
 
 [question_type]
 {question_type}
-{priority_info}
+{priority_info}{hypotheses_info}
 [분석 결과 요약]
 {json.dumps(analysis_results, ensure_ascii=False, indent=2)}
 
@@ -114,6 +121,9 @@ def _call_llm_remove(
 {extra_instruction}
 
 ── 이상적 차트 구성 가이드 (유지) ──
+- **질문에 직답하는 차트가 최우선이다** — 예: 질문이 특정 target(재구매 여부 등)의 차이를 물으면
+  distbytarget_*(target별 분포 비교)가 그 직답 차트다. 종합 차트보다 먼저 유지하라.
+- 가설이 주어졌으면 각 가설의 근거 차트를 최소 1장 유지하라(가설-차트 대응).
 - 비교/순위/"성과 좋은 ~" 류 질문이면: 여러 지표를 종합 비교하는 차트(heatmap_matrix, grouped_bar, radar)를
   핵심으로 반드시 1~2개 유지하라. 이게 '어느 것이 종합적으로 우수한가'에 직접 답하는 차트다.
 - 각 핵심 지표의 순위를 보여주는 bar_top(낮을수록 좋은 지표는 bar_bottom)을 유지하라.
@@ -131,11 +141,16 @@ def _call_llm_remove(
 
 최대 {TOTAL_MAX}개 이하로 남겨라.
 
-반드시 아래 JSON만 출력하라.
+반드시 아래 JSON만 출력하라. keep_captions에는 **남기는 모든 차트**에 대해
+'이 차트가 무엇을 보여주고, 질문/어느 가설의 근거인지' 한 줄 캡션을 적어라
+(이 캡션은 아티팩트 메타데이터로 남아 다음 에이전트가 차트를 읽을 때 참고한다).
 {{
   "remove": ["파일명1.png", "파일명2.png"],
   "reason": {{
     "파일명1.png": "제거 이유"
+  }},
+  "keep_captions": {{
+    "파일명3.png": "state별 재구매율 순위 — 가설1(지역별 차이)의 근거"
   }}
 }}
 """
@@ -155,15 +170,18 @@ def run_chart_selector_skill(
     question_type: str = "",
     statistical_metadata: dict = None,
     priority_metrics: list = None,
-) -> list:
+    hypotheses: str = "",
+) -> tuple:
     """
     1단계: 기계적 품질 필터 (파일 존재 여부, 중복 경로 제거)
     1.5단계: 약한 상관 scatter 결정론 제거 (가드레일)
-    2단계: LLM이 '이상적 구성'에 부합하지 않는 차트 제거
+    2단계: LLM이 '이상적 구성'에 부합하지 않는 차트 제거 (+유지 차트 캡션 수집)
     3단계: 8개 초과 시 LLM이 추가 제거
+
+    반환: (선별된 경로 리스트, {파일명: 선정 이유 캡션})
     """
     if not chart_paths:
-        return []
+        return [], {}
 
     stat = statistical_metadata or {}
     correlation_pairs = stat.get("correlation_pairs", {})
@@ -181,7 +199,7 @@ def run_chart_selector_skill(
         valid_paths.append(p)
 
     if not valid_paths:
-        return []
+        return [], {}
 
     # ── 1.5단계: 약한 상관 scatter 결정론 제거 ──
     valid_paths = _drop_weak_scatters(valid_paths, correlation_pairs)
@@ -189,7 +207,7 @@ def run_chart_selector_skill(
     name_to_path = {os.path.basename(p): p for p in valid_paths}
     filenames = list(name_to_path.keys())
 
-    # ── 2단계: LLM이 불필요 차트 제거 ──
+    # ── 2단계: LLM이 불필요 차트 제거 (+유지 캡션 수집) ──
     result = _call_llm_remove(
         filenames=filenames,
         user_question=user_question,
@@ -197,9 +215,11 @@ def run_chart_selector_skill(
         analysis_results=analysis_results,
         statistical_metadata=stat,
         priority_metrics=priority_metrics,
+        hypotheses=hypotheses,
     )
 
     to_remove = set(result.get("remove", []))
+    captions = {k: str(v) for k, v in (result.get("keep_captions") or {}).items()}
     filtered = [p for p in valid_paths if os.path.basename(p) not in to_remove]
 
     # ── 3단계: 8개 초과 시 LLM이 추가 제거 ──
@@ -215,11 +235,16 @@ def run_chart_selector_skill(
             statistical_metadata=stat,
             extra_instruction=f"현재 차트가 {len(filtered)}개로 {TOTAL_MAX}개를 초과한다. "
                               f"가장 중복되거나 임팩트가 낮은 {excess}개를 추가로 제거하되, "
+                              f"질문 직답 차트(distbytarget 등)·가설 근거 차트·"
                               f"종합 비교 차트(heatmap_matrix/grouped_bar/radar)는 우선 보존하라.",
             priority_metrics=priority_metrics,
+            hypotheses=hypotheses,
         )
 
         to_remove2 = set(result2.get("remove", []))
+        captions.update({k: str(v) for k, v in (result2.get("keep_captions") or {}).items()})
         filtered = [p for p in filtered if os.path.basename(p) not in to_remove2]
 
-    return filtered[:TOTAL_MAX]
+    final = filtered[:TOTAL_MAX]
+    final_names = {os.path.basename(p) for p in final}
+    return final, {k: v for k, v in captions.items() if k in final_names}
