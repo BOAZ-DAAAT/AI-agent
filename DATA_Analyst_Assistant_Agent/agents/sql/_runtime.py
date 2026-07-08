@@ -124,6 +124,26 @@ def run_sql_commit(sql: str):
         conn.execute(text(sql))
 
 
+def extract_target_schema(target_table: Optional[str]) -> Optional[str]:
+    if not target_table:
+        return None
+    normalized = target_table.strip().strip("`")
+    if "." not in normalized:
+        return None
+    schema, _table = normalized.split(".", 1)
+    schema = schema.strip().strip("`")
+    return schema or None
+
+
+def ensure_target_schema_exists(target_table: Optional[str]) -> Optional[str]:
+    schema = extract_target_schema(target_table)
+    if not schema:
+        return None
+    with get_engine().begin() as conn:
+        conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{schema}`"))
+    return schema
+
+
 def offline_select_rows(sql: str):
     return [("offline_dry_run", sql[:120])]
 

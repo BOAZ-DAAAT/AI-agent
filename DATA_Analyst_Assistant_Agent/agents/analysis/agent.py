@@ -27,6 +27,7 @@ class AnalysisAgent:
         question_type: str | None = None,
         planner_model: Any | None = None,
         code_generator_model: Any | None = None,
+        critic_model: Any | None = None,
         chart_artifact_loader: Any | None = None,
         chart_reader: Any | None = None,
     ) -> AgentEnvelope:
@@ -44,6 +45,7 @@ class AnalysisAgent:
             question_type=question_type,
             planner_model=planner_model,
             code_generator_model=code_generator_model,
+            critic_model=critic_model,
             chart_artifact_loader=chart_artifact_loader,
             chart_reader=chart_reader,
         )

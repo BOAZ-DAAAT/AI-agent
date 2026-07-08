@@ -60,7 +60,7 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     sql_lower = _normalized_sql(sql_draft.get("sql") or "").lower()
     for table_name in required_tables:
         if table_name not in source_tables and table_name.lower() not in sql_lower:
-            findings.append({"category": "invalid_join_plan", "severity": "error", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
+            findings.append({"category": "invalid_join_plan", "severity": "warning", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
     return findings
 
 
@@ -93,6 +93,7 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
     available_tables = set(str(name) for name in tables.keys())
     available_columns = {str(table_name): _extract_table_columns(table_info) for table_name, table_info in tables.items()}
     sql = _normalized_sql(sql_draft.get("sql") or "")
+    cte_names = _extract_cte_names(sql)
     source_tables = [str(t) for t in sql_draft.get("source_tables", []) if t]
     required_tables = [str(t) for t in build_intent_contract(plan).get("required_tables", []) if t]
     candidate_tables = list(dict.fromkeys(source_tables + required_tables))
@@ -107,6 +108,8 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
     sql_lower = sql.lower()
     for ref in re.findall(r"(?:from|join|into|table)\s+([a-zA-Z_][a-zA-Z0-9_\\.]*)", sql_lower):
         bare_name = ref.split(".")[-1]
+        if bare_name in cte_names:
+            continue
         if bare_name not in available_tables and not ref.startswith("analytics."):
             findings.append({"category": "missing_table", "severity": "error", "retryable": True, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
     return _dedupe_findings(findings)
@@ -178,6 +181,14 @@ def retry_feedback_from_findings(findings: list[dict[str, Any]]) -> str:
     if not findings:
         return ""
     return "검증 실패 유형을 반영해 SQL을 다시 작성하세요. " + " / ".join(str(item.get("detail", "")) for item in findings[:3])
+
+
+def _extract_cte_names(sql: str) -> set[str]:
+    cte_names: set[str] = set()
+    sql_lower = _normalized_sql(sql).lower()
+    for match in re.finditer(r"(?:with|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+as\s*\(", sql_lower):
+        cte_names.add(match.group(1))
+    return cte_names
 
 
 def _extract_table_columns(table_info: Any) -> set[str]:
