@@ -1,46 +1,58 @@
-# 상자(컨테이너)들을 함께 정의하고 실행하는 파일.
-# 서버에서  `docker compose up -d`  한 줄로 아래 서비스가 전부 뜬다.
-# 비밀값(비번/키)은 여기 직접 쓰지 않고 같은 폴더의 .env 에서 읽어온다.
+# 서버에서 `docker compose up -d` 한 줄로 mysql + backend + frontend가 뜬다.
+# 비밀값은 같은 폴더의 .env 에서 읽는다 (${...} 부분).
 
 services:
-  # ── MySQL 8: 추출한 테이블 + SQL 에이전트가 만든 analytics 마트를 저장 ──
+  # ── 저장소 MySQL ──
   mysql:
     image: mysql:8.0
-    restart: unless-stopped          # 서버 재부팅/충돌 시 자동 재시작
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${DATAMART_DB_NAME:-analytics}   # 없으면 analytics로 기본값
-      MYSQL_USER: ${DATAMART_DB_USER}
-      MYSQL_PASSWORD: ${DATAMART_DB_PASSWORD}
+      MYSQL_DATABASE: analytics          # 미래 SQL 에이전트 마트용 스키마 미리 생성
     volumes:
-      - mysql_data:/var/lib/mysql     # DB 데이터를 볼륨에 영속화(컨테이너 지워도 유지)
+      - mysql_data:/var/lib/mysql        # 재시작해도 데이터 유지 (영속의 핵심)
     ports:
-      - "127.0.0.1:3306:3306"         # 서버 내부에서만 접근(외부 노출 X). 로컬 디버깅용
-    healthcheck:                      # "MySQL이 진짜 준비됐는지" 확인
+      - "127.0.0.1:3306:3306"            # 서버 내부 디버깅용, 외부 비공개
+    healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  # ── FastAPI 백엔드: 위 Dockerfile로 빌드 ──
+  # ── 경량 backend ──
   backend:
-    build: .                          # 현재 폴더의 Dockerfile로 이미지 빌드
+    build: .
     restart: unless-stopped
-    env_file: .env                    # .env의 모든 값을 컨테이너 환경변수로 주입
     environment:
-      # backend는 MySQL을 "mysql"이라는 서비스 이름(=호스트명)으로 접속한다.
-      # .env에 다른 값이 있어도 여기 값이 우선 적용된다.
-      DATAMART_DB_HOST: mysql
-      DATAMART_DB_PORT: "3306"
-    volumes:
-      - agent_data:/app/.data_agent   # CSV·artifacts·backend.sqlite 영속화
+      # 저장소 = 위 mysql 컨테이너. compose 안에서는 "서비스 이름 = 호스트명"
+      STORAGE_MYSQL_HOST: mysql
+      STORAGE_MYSQL_PORT: "3306"
+      STORAGE_MYSQL_USER: root           # ingest가 DB DROP/CREATE를 하므로 root 필요
+      STORAGE_MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
     ports:
-      - "8000:8000"                   # 외부:컨테이너 → 밖에서 8000으로 접속 가능
+      - "8000:8000"                      # 외부 공개 (프론트가 브라우저에서 직접 호출)
     depends_on:
       mysql:
-        condition: service_healthy    # MySQL이 healthy 된 뒤에 backend 시작
+        condition: service_healthy       # MySQL 준비된 뒤에 기동
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
-# 컨테이너 밖에 데이터를 보관하는 창고. 컨테이너 재생성과 무관하게 유지된다.
+  # ── 프론트: React 빌드 → nginx 서빙 ──
+  frontend:
+    build:
+      context: ../Frontend               # 서버에 형제 폴더로 clone된 Frontend 레포
+      args:
+        # Vite는 "빌드 시점"에 API 주소가 결과물에 박힌다 → 빌드 인자로 주입
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "80:80"                          # http://<서버IP> 로 접속
+    depends_on:
+      - backend
+
 volumes:
   mysql_data:
-  agent_data:
