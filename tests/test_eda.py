@@ -1004,6 +1004,137 @@ def test_gate_allows_df_empty_property():
     assert r.ok, r.reason
 
 
+# ─────────────────────────────
+# 차트 셀렉터 (#71 B) — 가설 연계 + 선정 이유 캡션
+# ─────────────────────────────
+def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    # 후보 차트 파일 3개 생성
+    paths = []
+    for name in ("bar_top_a.png", "dist_b.png", "violin_b.png"):
+        p = tmp_path / name
+        p.write_bytes(b"png")
+        paths.append(str(p))
+
+    seen_prompts = []
+
+    class _FakeSelLLM:
+        def invoke(self, prompt):
+            seen_prompts.append(prompt)
+            return _FakeResp(_json.dumps({
+                "remove": ["violin_b.png"],
+                "reason": {"violin_b.png": "dist와 중복"},
+                "keep_captions": {"bar_top_a.png": "a 순위 — 가설1 근거",
+                                  "dist_b.png": "b 분포",
+                                  "violin_b.png": "(제거됨)"},
+            }))
+
+    monkeypatch.setattr(CS, "_load_llm", lambda: _FakeSelLLM())
+    selected, captions = CS.run_chart_selector_skill(
+        chart_paths=paths, user_question="a 상위는?", analysis_results={},
+        statistical_metadata={}, hypotheses="[가설 1] a는 그룹별로 다르다")
+    names = [os.path.basename(p) for p in selected]
+    assert "violin_b.png" not in names and "bar_top_a.png" in names
+    assert captions == {"bar_top_a.png": "a 순위 — 가설1 근거", "dist_b.png": "b 분포"}  # 생존 차트만
+    assert "[가설 1]" in seen_prompts[0]                 # 가설이 프롬프트에 들어감
+
+
+def test_selector_node_exposes_captions(monkeypatch, tmp_path):
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.chart_selector as N
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    chart = os.path.join(V.OUTPUT_DIR, "bar_top_x.png")
+    open(chart, "wb").write(b"png")
+    monkeypatch.setattr(N, "run_chart_selector_skill",
+                        lambda **kw: ([chart], {"bar_top_x.png": "x 순위 근거"}))
+    out = N.chart_selector_node({"user_question": "x?", "hypotheses": "[가설 1] x"})
+    assert out["key_charts"] == [chart]
+    assert out["key_chart_captions"] == {"bar_top_x.png": "x 순위 근거"}
+    assert os.path.exists(os.path.join(V.KEY_DIR, "bar_top_x.png"))   # key/ 복사됨
+
+
+# ─────────────────────────────
+# 차트 semantic 가드 (#71 A) — E2E 실측 잡차트 방지
+# ─────────────────────────────
+def _guard_df(n=200):
+    import numpy as _np
+    rng = _np.random.default_rng(0)
+    return pd.DataFrame({
+        "customer_uid": [f"id{i:05d}" for i in range(n)],          # 고카디널리티(ID급) 범주
+        "state": rng.choice(list("ABC"), n),                        # 정상 범주
+        "payment_seq": range(1, n + 1),                             # 일련번호(정수, 전부 유니크)
+        "is_flag": rng.integers(0, 2, n).astype(float),             # 0/1 플래그
+        "value": _np.exp(rng.normal(3, 1.5, n)),                    # 왜도 큰 양수
+        "score": rng.normal(50, 10, n),                             # 평범한 수치
+    })
+
+
+def test_numeric_cols_exclude_id_and_flags():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    df = _guard_df()
+    base = V._get_numeric_cols(df)                       # ID·일련번호는 항상 제외
+    assert "payment_seq" not in base and "value" in base
+    strict = V._get_numeric_cols(df, allow_flags=False)  # 분포·산점류: 플래그도 제외
+    assert "is_flag" not in strict and "is_flag" in base
+
+
+def test_distribution_charts_skip_flags_and_use_log(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    out = V.plot_distributions(df)
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "dist_is_flag.png" not in names               # 0/1 히스토그램 사라짐
+    assert "dist_payment_seq.png" not in names           # 일련번호 분포 사라짐
+    assert out["stats"]["value"]["skewness"] > 2         # 왜도 큰 컬럼은 log축으로 그려짐(스모크)
+
+
+def test_key_charts_reject_high_cardinality_key(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    # 고객ID를 key로 강제해도 저카디널리티 state 로 폴백 (해시 라벨 bar 방지)
+    out = V.plot_top_n_barplot(df, key_col="customer_uid", measure_cols=["score"])
+    assert out["chart_paths"], "폴백 key(state)로 차트가 나와야 함"
+    assert all("customer_uid" not in p for p in out["chart_paths"])
+    # 범주 컬럼이 ID뿐이면 스킵
+    df_id_only = df[["customer_uid", "score"]]
+    out2 = V.plot_top_n_barplot(df_id_only, key_col="customer_uid", measure_cols=["score"])
+    assert out2["chart_paths"] == []
+
+
+def test_scatter_skips_flags_and_tautology(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    df["value_copy"] = df["value"] * 2                   # 완전상관(동어반복) 쌍
+    out = V.plot_scatter_pairs(df, measure_cols=["value", "value_copy", "score", "is_flag"])
+    pairs = list(out["stats"].keys())
+    assert not any("is_flag" in p for p in pairs)        # 플래그 산점도 없음
+    assert "value vs value_copy" not in pairs            # |r|≈1 동어반복 쌍만 정확히 스킵
+    assert all(abs(v["pearson_r"]) < 0.98 for v in out["stats"].values())
+
+
+def test_crosstab_rejects_id_grade_column(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    out = V.plot_crosstab_heatmap(df, cat_a="customer_uid", cat_b="state")
+    assert out["chart_paths"] == [] and "ID급" in out.get("skipped", "")
+
+
+def test_clustering_excludes_id_and_flag_features():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.clustering_skill import run_clustering_skill
+    df = _guard_df()
+    out = run_clustering_skill(df, measure_cols=["payment_seq", "is_flag", "value", "score"],
+                               key_col="state", question_type="comparison")
+    assert not out.get("skip"), out.get("reason")
+    used = set(next(iter(out["cluster_centroids"].values())).keys())
+    assert used == {"value", "score"}                    # 일련번호·플래그 피처 제외됨
+
+
 def test_plot_top_n_barplot_top_only_skips_bottom(tmp_path):
     # top_only=True면 하위 잉여차트를 안 그린다(codegen용).
     from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize

@@ -62,6 +62,7 @@ class EDAState(TypedDict, total=False):
     hypotheses: str
     final_summary: str
     key_charts: List[str]
+    key_chart_captions: Dict[str, str]    # {파일명: 선정 이유 캡션} — 아티팩트 메타데이터로 실림(#71 B)
     statistical_metadata: Dict[str, Any]  # downstream 에이전트용 raw 수치
     chart_requests: List[Dict[str, Any]]  # EDA가 발행한 차트 주문서(intent/stats/columns/hint) — chart/ 렌더용
 

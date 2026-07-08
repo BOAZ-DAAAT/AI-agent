@@ -14,7 +14,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_c
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
 
 
-def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context):
+def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context, captions=None):
     """key 차트 PNG를 아티팩트로 등록한다 — **이상적 형태(content_bytes)** 로 호출.
 
     adapter가 아직 바이너리(content_bytes)를 지원하지 않으면 가드로 잡아 artifact_id=None 폴백한다
@@ -22,9 +22,11 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
     분석 에이전트는 경로 대신 artifact_id로 차트를 로드(멀티모달)한다.
     반환: [{"filename": str, "artifact_id": str | None}, ...]
     """
+    captions = captions or {}
     entries: list[dict[str, Any]] = []
     for path in chart_paths or []:
         filename = os.path.basename(path)
+        caption = captions.get(filename, "")
         artifact_id = None
         try:
             with open(path, "rb") as fh:
@@ -37,11 +39,12 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
                 created_by_tool="DATA_Analyst_Assistant_Agent.eda.lang_graph",
                 context=context,
                 parent_ids=parent_ids,
+                metadata={"caption": caption},   # 선정 이유 — 분석 멀티모달 읽기의 설명서(#71 B)
             )
             artifact_id = ref.artifact_id
         except Exception:  # noqa: BLE001  # adapter 미지원/파일 없음 등 → 폴백
             artifact_id = None
-        entries.append({"filename": filename, "artifact_id": artifact_id})
+        entries.append({"filename": filename, "artifact_id": artifact_id, "caption": caption})
     return entries
 
 
@@ -59,7 +62,8 @@ class EDAAgent:
 
         # key 차트 PNG를 아티팩트로 등록(이상형+가드) → 경로 대신 {filename, artifact_id}로 전달
         key_chart_refs = register_key_chart_artifacts(
-            runtime, state, eda_result.get("key_charts", []), source_ids, context)
+            runtime, state, eda_result.get("key_charts", []), source_ids, context,
+            captions=eda_result.get("key_chart_captions", {}))
 
         # codegen 탈출구가 도메인 밖으로 판정하면 top-level 플래그로 정직하게 노출한다
         # (성공 결과는 statistical_metadata.adhoc_analysis에 편입됨). 분석 에이전트가 라우팅에 씀.
@@ -119,7 +123,12 @@ class EDAAgent:
         frames = [csv.dataframe for csv in csvs if csv.error is None and not csv.dataframe.empty]
         if not frames:
             raise RuntimeError("No non-empty SQL CSV artifact was available for EDA.")
-        df = pd.concat(frames, ignore_index=True)
+        # mart 경로에선 '마트 생성 완료' 상태 메시지 CSV(1행)가 섞여 온다 — concat 하면
+        # col_1 쓰레기차트·data_level 오판·key_col 오염으로 comparison 이 전멸한다(E2E 실측).
+        # 스키마가 같은 프레임만 합치고, 아니면 실질 데이터(최대 행) 프레임을 쓴다.
+        main = max(frames, key=len)
+        same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
+        df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
 
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.

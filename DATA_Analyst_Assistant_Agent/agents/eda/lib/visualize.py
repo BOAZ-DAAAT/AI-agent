@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -33,11 +34,78 @@ PALETTE_POS    = "#55A868"
 PALETTE_SEQ    = "Blues"
 
 
-def _get_numeric_cols(df: pd.DataFrame, measure_cols: list = None) -> list:
-    """measure_cols가 있으면 그 중 실제 수치형만, 없으면 전체 수치형 컬럼 반환"""
+# ─────────────────────────────
+# semantic 가드 (#71 A) — E2E 실측 잡차트 방지:
+#   ID·일련번호(값 크기에 의미 없음)는 모든 차트에서, 0/1 플래그는 분포·산점류에서 제외.
+#   플래그는 '그룹별 비율'(집계 차트의 mean)로만 의미가 있다.
+# ─────────────────────────────
+_ID_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|seq|sequential|idx|index)($|_)", re.IGNORECASE)
+_KEY_MAX_CARDINALITY = 50            # 이보다 범주가 많으면 차트 라벨 축으로 부적합(ID급)
+_MAX_PLOT_POINTS = 8000              # raw 포인트 차트(violin·scatter·box) 렌더 샘플 상한 — 96k행 렌더 폭증 방지
+
+
+def _plot_sample(data, cap: int = _MAX_PLOT_POINTS):
+    """그리기 전용 샘플 — 통계는 전체로 계산하고 렌더만 줄인다(시각 차이 무시 가능, 재현 고정)."""
+    if len(data) <= cap:
+        return data
+    return data.sample(cap, random_state=42)
+
+
+def _is_binary_flag(s: pd.Series) -> bool:
+    """0/1(불리언) 플래그 — 히스토그램·박스·산점도 축은 무의미(두 줄짜리 그림)."""
+    if pd.api.types.is_bool_dtype(s):
+        return True
+    u = pd.unique(s.dropna())
+    try:
+        return 0 < len(u) <= 2 and set(float(v) for v in u).issubset({0.0, 1.0})
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_id_like_numeric(col: str, s: pd.Series) -> bool:
+    """수치형 ID·일련번호 — 이름 신호 또는 거의 전부 유니크한 정수."""
+    if _ID_NAME_RE.search(col):
+        return True
+    n = len(s)
+    return n > 0 and pd.api.types.is_integer_dtype(s) and s.nunique() > 0.9 * n
+
+
+def _valid_cat_col(df: pd.DataFrame, col, max_card: int = _KEY_MAX_CARDINALITY):
+    """차트 라벨 축으로 쓸 범주 컬럼 검증 — 없거나 고카디널리티(고객ID 96k 등)면 None."""
+    if not col or col not in df.columns:
+        return None
+    if df[col].nunique(dropna=True) > max_card:
+        return None
+    return col
+
+
+def _pick_key_col(df: pd.DataFrame, key_col=None, max_card: int = _KEY_MAX_CARDINALITY):
+    """key_col이 유효하면 그대로, 아니면 저카디널리티 범주 컬럼으로 폴백. 없으면 None(차트 스킵)."""
+    valid = _valid_cat_col(df, key_col, max_card)
+    if valid:
+        return valid
+    for c in df.select_dtypes(include=["object"]).columns:
+        if _valid_cat_col(df, c, max_card):
+            return c
+    return None
+
+
+def _get_numeric_cols(df: pd.DataFrame, measure_cols: list = None, allow_flags: bool = True) -> list:
+    """measure_cols가 있으면 그 중 실제 수치형만, 없으면 전체 수치형 컬럼 반환.
+    semantic 가드: ID류는 항상 제외, allow_flags=False면 0/1 플래그도 제외(분포·산점류용)."""
     if measure_cols:
-        return [c for c in measure_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
-    return list(df.select_dtypes(include=["float64", "int64"]).columns)
+        cols = [c for c in measure_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    else:
+        cols = list(df.select_dtypes(include=["float64", "int64"]).columns)
+    out = []
+    for c in cols:
+        s = df[c].dropna()
+        if s.empty or _is_id_like_numeric(c, s):
+            continue
+        if not allow_flags and _is_binary_flag(s):
+            continue
+        out.append(c)
+    return out
 
 
 # 낮을수록 좋은 지표 키워드 — 정규화 시 반전 대상
@@ -85,7 +153,7 @@ def plot_distributions(df: pd.DataFrame, measure_cols: list = None) -> dict:
     """수치형 컬럼 히스토그램 + 분포 통계"""
     paths = []
     stats = {}
-    for col in _get_numeric_cols(df, measure_cols):
+    for col in _get_numeric_cols(df, measure_cols, allow_flags=False):
         s = df[col].dropna()
         stats[col] = {
             "mean": round(float(s.mean()), 4),
@@ -95,12 +163,19 @@ def plot_distributions(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "max": round(float(s.max()), 4),
             "skewness": round(float(s.skew()), 4),
         }
+        # 왜도 큰 분포는 선형축에서 막대 하나로 뭉개진다 — 자기 통계의 log_transform 처방을 차트가 소비.
+        # 0을 포함할 수 있어 log1p 변환을 쓴다(순수 log는 0원 고객 몇 명에 무력화되는 실측 있음).
+        log_x = stats[col]["skewness"] > 2 and float(s.min()) >= 0
+        plot_s = np.log1p(s) if log_x else s
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.hist(s, bins=25, color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.85)
-        ax.axvline(float(s.mean()),   color=PALETTE_ACCENT, linestyle="--", linewidth=1.4, label=f"mean={stats[col]['mean']}")
-        ax.axvline(float(s.median()), color=PALETTE_NEG,    linestyle=":",  linewidth=1.4, label=f"median={stats[col]['median']}")
+        ax.hist(plot_s, bins=25, color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.85)
+        mean_v = np.log1p(float(s.mean())) if log_x else float(s.mean())
+        med_v = np.log1p(float(s.median())) if log_x else float(s.median())
+        ax.axvline(mean_v, color=PALETTE_ACCENT, linestyle="--", linewidth=1.4, label=f"mean={stats[col]['mean']}")
+        ax.axvline(med_v,  color=PALETTE_NEG,    linestyle=":",  linewidth=1.4, label=f"median={stats[col]['median']}")
         ax.legend(fontsize=8, frameon=False)
-        _apply_style(ax, f"Distribution: {col}", xlabel=col, ylabel="Count")
+        _apply_style(ax, f"Distribution: {col}" + (" (log1p)" if log_x else ""),
+                     xlabel=(f"log1p({col})" if log_x else col), ylabel="Count")
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"dist_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -113,7 +188,7 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
     """수치형 컬럼 박스플롯 + IQR 통계"""
     paths = []
     stats = {}
-    for col in _get_numeric_cols(df, measure_cols):
+    for col in _get_numeric_cols(df, measure_cols, allow_flags=False):
         s = df[col].dropna()
         q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
         stats[col] = {
@@ -124,9 +199,11 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "lower_fence": round(q1 - 1.5 * (q3 - q1), 4),
             "upper_fence": round(q3 + 1.5 * (q3 - q1), 4),
         }
+        log_y = float(s.skew()) > 2 and float(s.min()) >= 0  # 왜도 처방 소비 — 이상치에 짓눌린 박스 방지
         fig, ax = plt.subplots(figsize=(5, 5))
+        s_plot = _plot_sample(np.log1p(s) if log_y else s)
         bp = ax.boxplot(
-            s, vert=True, patch_artist=True,
+            s_plot, vert=True, patch_artist=True,
             boxprops=dict(facecolor=PALETTE_MAIN, alpha=0.6, linewidth=1.2),
             medianprops=dict(color=PALETTE_ACCENT, linewidth=2),
             whiskerprops=dict(linewidth=1.2),
@@ -134,7 +211,8 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
             flierprops=dict(marker="o", color=PALETTE_NEG, alpha=0.5, markersize=4),
         )
         ax.set_xticks([])
-        _apply_style(ax, f"Boxplot: {col}", ylabel=col)
+        _apply_style(ax, f"Boxplot: {col}" + (" (log1p)" if log_y else ""),
+                     ylabel=(f"log1p({col})" if log_y else col))
         ax.grid(axis="x", visible=False)
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"box_{col}.png")
@@ -148,7 +226,7 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
     """수치형 컬럼 바이올린 플롯 — 분포 형태(봉우리 수, 밀도)를 박스플롯보다 풍부하게 표현"""
     paths = []
     stats = {}
-    numeric_cols = _get_numeric_cols(df, measure_cols)
+    numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)
     for col in numeric_cols:
         s = df[col].dropna()
         if len(s) < 5:
@@ -163,8 +241,10 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
             "iqr":      round(q3 - q1, 4),
             "skewness": round(float(s.skew()), 4),
         }
+        log_y = stats[col]["skewness"] > 2 and float(s.min()) >= 0  # 왜도 처방 소비
         fig, ax = plt.subplots(figsize=(5, 6))
-        parts = ax.violinplot(s.values, vert=True, showmedians=True, showextrema=True)
+        parts = ax.violinplot(_plot_sample(np.log1p(s) if log_y else s).values,
+                              vert=True, showmedians=True, showextrema=True)
         parts["cmedians"].set_color(PALETTE_ACCENT)
         parts["cmedians"].set_linewidth(2)
         for pc in parts["bodies"]:
@@ -172,7 +252,8 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
             pc.set_alpha(0.6)
             pc.set_edgecolor("white")
         ax.set_xticks([])
-        _apply_style(ax, f"Violin: {col}", ylabel=col)
+        _apply_style(ax, f"Violin: {col}" + (" (log1p)" if log_y else ""),
+                     ylabel=(f"log1p({col})" if log_y else col))
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"violin_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -223,14 +304,10 @@ def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, m
     top_only=True면 상위만 그린다(codegen처럼 이미 정렬·상위추출된 결과에 하위 잉여 방지)."""
     paths = []
     stats = {}
-    cat_cols = df.select_dtypes(include=["object"]).columns
-    numeric_cols = _get_numeric_cols(df, measure_cols)
-
-    if len(cat_cols) == 0 or len(numeric_cols) == 0:
+    numeric_cols = _get_numeric_cols(df, measure_cols)   # 플래그 허용 — 그룹 mean = 비율이라 유의미
+    key_col = _pick_key_col(df, key_col)                 # 고카디널리티(고객ID 등) 라벨축 차단
+    if key_col is None or len(numeric_cols) == 0:
         return {"chart_paths": [], "stats": {}}
-
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0]
     for metric in numeric_cols:
         agg_df    = df[[key_col, metric]].dropna().groupby(key_col)[metric].mean().reset_index()
         sorted_df = agg_df.sort_values(metric, ascending=False)
@@ -274,14 +351,10 @@ def plot_heatmap_matrix(df: pd.DataFrame, key_col: str = None, measure_cols: lis
                         max_rows: int = 40) -> dict:
     """카테고리 × 수치형 지표 정규화 히트맵 + 각 지표 상위 3개.
     행이 max_rows 초과면 첫 번째 measure 기준 상위 max_rows만 표시."""
-    cat_cols     = list(df.select_dtypes(include=["object"]).columns)
     numeric_cols = _get_numeric_cols(df, measure_cols)
-
-    if not cat_cols or not numeric_cols:
+    key_col = _pick_key_col(df, key_col)                 # 고카디널리티 라벨축 차단
+    if key_col is None or not numeric_cols:
         return {"chart_path": None, "stats": {}}
-
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0]
     sub = df[[key_col] + numeric_cols].dropna().groupby(key_col)[numeric_cols].mean()
 
     # 행이 너무 많으면 첫 번째 measure 기준 상위 max_rows만 사용
@@ -317,13 +390,10 @@ def plot_bubble(df: pd.DataFrame, key_col: str = None, measure_cols: list = None
     x=measure[0], y=measure[1], 크기=measure[2], 색=measure[3]
     4개 지표를 한 장에 표현.
     """
-    cat_cols     = list(df.select_dtypes(include=["object"]).columns)
-    numeric_cols = _get_numeric_cols(df, measure_cols)
-
+    numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)  # 플래그 축 버블 방지
     if len(numeric_cols) < 2:
         return {"chart_path": None, "stats": {}}
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+    key_col = _pick_key_col(df, key_col)
     if key_col is None:
         return {"chart_path": None, "stats": {}}
 
@@ -409,13 +479,11 @@ def plot_radar(df: pd.DataFrame, key_col: str = None, measure_cols: list = None,
     상위 N개 카테고리의 레이더(스파이더) 차트.
     정규화된 지표를 다각형으로 표현 — 카테고리별 강점/약점 한눈에 비교.
     """
-    cat_cols     = list(df.select_dtypes(include=["object"]).columns)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if len(numeric_cols) < 3:
         return {"chart_path": None, "stats": {}}
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+    key_col = _pick_key_col(df, key_col)
     if key_col is None:
         return {"chart_path": None, "stats": {}}
 
@@ -473,13 +541,11 @@ def plot_grouped_bar(df: pd.DataFrame, key_col: str = None, measure_cols: list =
     카테고리 × 지표 그룹 바차트 (정규화).
     지표별로 색이 다른 막대를 나란히 배치 — 카테고리 간 종합 성과 비교.
     """
-    cat_cols     = list(df.select_dtypes(include=["object"]).columns)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if not numeric_cols:
         return {"chart_path": None, "stats": {}}
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+    key_col = _pick_key_col(df, key_col)
     if key_col is None:
         return {"chart_path": None, "stats": {}}
 
@@ -532,8 +598,10 @@ def plot_grouped_bar(df: pd.DataFrame, key_col: str = None, measure_cols: list =
 
 def plot_correlation(df: pd.DataFrame, measure_cols: list = None) -> dict:
     """수치형 컬럼 간 상관관계 히트맵 + 상관계수 행렬"""
-    cols = _get_numeric_cols(df, measure_cols)
+    cols = _get_numeric_cols(df, measure_cols, allow_flags=False)   # 플래그 상관은 노이즈
     numeric_df = df[cols] if cols else df.select_dtypes(include=["float64", "int64"])
+    # 상수 컬럼은 상관이 NaN → 히트맵에 빈 행/열로 노출되므로 제거
+    numeric_df = numeric_df.loc[:, numeric_df.std(numeric_only=True) > 0]
     if numeric_df.shape[1] < 2:
         return {"chart_path": None, "stats": {}}
 
@@ -580,7 +648,7 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
     """수치형 컬럼 쌍별 scatter plot + 피어슨 상관계수 (상관 절댓값 상위 N쌍만)"""
     paths = []
     stats = {}
-    numeric_cols = _get_numeric_cols(df, measure_cols)
+    numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)   # 0/1 플래그 산점도 방지
     if len(numeric_cols) < 2:
         return {"chart_paths": [], "stats": {}}
 
@@ -593,6 +661,8 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
             if len(pair_df) < 2:
                 continue
             r = pair_df[x_col].corr(pair_df[y_col])
+            if abs(r) >= 0.98:
+                continue  # 동어반복 — 정의상 종속(파생 컬럼)인 쌍은 '관계 발견'이 아니다
             all_pairs.append((abs(r), x_col, y_col, round(float(r), 3)))
 
     all_pairs.sort(key=lambda x: x[0], reverse=True)
@@ -603,8 +673,9 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
         stats[f"{x_col} vs {y_col}"] = {"pearson_r": corr_val}
 
         color = PALETTE_POS if corr_val >= 0 else PALETTE_NEG
+        draw_df = _plot_sample(pair_df)                 # 렌더 샘플 — 상관은 전체로 계산됨
         fig, ax = plt.subplots(figsize=(6, 5))
-        ax.scatter(pair_df[x_col], pair_df[y_col],
+        ax.scatter(draw_df[x_col], draw_df[y_col],
                    alpha=0.45, s=20, color=color, edgecolors="none")
         try:
             z = np.polyfit(pair_df[x_col], pair_df[y_col], 1)
@@ -779,10 +850,8 @@ def plot_grouped_box(df: pd.DataFrame, key_col: str = None, measure_cols: list =
     평균 막대가 숨기는 것(분산·이상치)을 드러낸다. 그룹당 행이 여러 개인 원본(raw)
     데이터에서만 의미가 있으므로, 그룹당 1행(집계본)이면 그릴 게 없어 스킵한다.
     """
-    cat_cols = list(df.select_dtypes(include=["object"]).columns)
     numeric_cols = _get_numeric_cols(df, measure_cols)
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+    key_col = _pick_key_col(df, key_col)
     if key_col is None or not numeric_cols:
         return {"chart_paths": [], "stats": {}}
 
@@ -807,7 +876,7 @@ def plot_grouped_box(df: pd.DataFrame, key_col: str = None, measure_cols: list =
             if len(s) < min_rows_per_group:
                 continue
             q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
-            groups.append(s.values)
+            groups.append(_plot_sample(s).values)        # 렌더 샘플 (통계 per는 전체 기준)
             labels.append(str(cat)[:18])
             per[str(cat)] = {"median": round(float(s.median()), 2), "q1": round(q1, 2),
                              "q3": round(q3, 2), "iqr": round(q3 - q1, 2), "n": int(len(s))}
@@ -885,7 +954,7 @@ def plot_distribution_by_target(df: pd.DataFrame, target_col: str = None, measur
             s = work.loc[work["_bucket"] == lv, metric].dropna()
             if len(s) < min_rows:
                 continue
-            groups.append(s.values)
+            groups.append(_plot_sample(s).values)        # 렌더 샘플 (통계는 전체 기준)
             labels.append(label[lv])
             per[label[lv]] = {"median": round(float(s.median()), 2), "n": int(len(s))}
         if len(groups) < 2:
@@ -989,6 +1058,10 @@ def plot_crosstab_heatmap(df: pd.DataFrame, cat_a: str = None, cat_b: str = None
         cat_b = min(others, key=lambda c: df[c].nunique())  # 가장 저카디널리티 짝
     if cat_a not in df.columns or cat_b not in df.columns:
         return {"chart_paths": [], "stats": {}, "skipped": "지정 범주 컬럼 없음"}
+    # 명시 컬럼이라도 ID급(거의 전부 유니크)이면 교차가 무의미 — top-N이 전부 count=1인 0/1 벽이 된다
+    for c in (cat_a, cat_b):
+        if df[c].nunique(dropna=True) > 0.9 * max(1, len(df)):
+            return {"chart_paths": [], "stats": {}, "skipped": f"ID급 컬럼({c}) — 교차표 무의미"}
 
     top_a = df[cat_a].value_counts().nlargest(max_card).index
     top_b = df[cat_b].value_counts().nlargest(max_card).index

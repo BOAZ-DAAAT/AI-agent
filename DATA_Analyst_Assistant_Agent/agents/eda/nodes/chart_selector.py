@@ -20,7 +20,7 @@ except Exception:  # noqa: BLE001
 def chart_selector_node(state: EDAState) -> dict:
     all_charts = sorted(glob.glob(os.path.join(visualize.OUTPUT_DIR, "*.png")))
     if not all_charts:
-        return {"key_charts": []}
+        return {"key_charts": [], "key_chart_captions": {}}
 
     analysis_results = {
         "inspect":      state.get("inspect_result", ""),
@@ -40,16 +40,17 @@ def chart_selector_node(state: EDAState) -> dict:
             question_type=state.get("question_type", ""),
             statistical_metadata=st,
             priority_metrics=state.get("analysis_plan", {}).get("priority_metrics", []),
+            hypotheses=state.get("hypotheses", ""),   # 가설 근거 차트 우선 유지 (#71 B)
         )
 
     try:
-        key_charts = _run(analysis_results, stat)
+        key_charts, captions = _run(analysis_results, stat)
     except RateLimitError:
         truncated = {k: (v[:300] + "...") if isinstance(v, str) and len(v) > 300 else v
                      for k, v in analysis_results.items()}
         clustering = stat.get("clustering", {})
         slim_stat = {"clustering": {k: v for k, v in clustering.items() if k != "cluster_labels"}}
-        key_charts = _run(truncated, slim_stat)
+        key_charts, captions = _run(truncated, slim_stat)
 
     # key/ 폴더 초기화 후 선별 차트 복사
     for f in glob.glob(os.path.join(visualize.KEY_DIR, "*.png")):
@@ -58,4 +59,5 @@ def chart_selector_node(state: EDAState) -> dict:
         if os.path.exists(src):
             shutil.copy(src, os.path.join(visualize.KEY_DIR, os.path.basename(src)))
 
-    return {"key_charts": key_charts}
+    # 캡션(선정 이유)은 아티팩트 메타데이터로 실려 분석 에이전트의 차트 읽기(멀티모달)를 돕는다
+    return {"key_charts": key_charts, "key_chart_captions": captions}
