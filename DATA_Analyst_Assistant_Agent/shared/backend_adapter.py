@@ -72,7 +72,8 @@ class BackendAdapter:
         run_id: str,
         artifact_type: ArtifactType | str,
         *,
-        content_text: str,
+        content_text: str | None = None,
+        content_bytes: bytes | None = None,
         filename: str,
         created_by_tool: str,
         context: PolicyContext | None = None,
@@ -81,12 +82,17 @@ class BackendAdapter:
         metadata: dict[str, Any] | None = None,
         preview: dict[str, Any] | None = None,
     ) -> ArtifactRef:
+        # 차트(PNG) 등 바이너리 아티팩트는 content_bytes 로 등록한다.
+        # (하위 계층 registry/모델은 이미 지원 — 이 어댑터 통로만 열어준다.)
+        if content_text is None and content_bytes is None:
+            raise ValueError("register_artifact requires content_text or content_bytes.")
         artifact_type = ArtifactType(artifact_type)
         record = self.services.artifact_registry.register_artifact(
             ArtifactRegisterRequest(
                 run_id=run_id,
                 type=artifact_type,
                 content_text=content_text,
+                content_bytes=content_bytes,
                 filename=filename,
                 thread_id=context.thread_id if context else None,
                 project_id=context.project_id if context else None,
