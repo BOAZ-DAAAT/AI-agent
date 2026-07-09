@@ -304,7 +304,8 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
     assert "__interrupt__" in paused
     assert resumed["terminal_state"] == "completed"
     assert resumed["analysis_plan"]["goal"] == "월별 매출 추이 분석"
-    assert resumed["clarified_query"] == "매출\n추가 답변: 최근 6개월 월별 매출"
+    assert resumed["clarified_query"] == "최근 6개월 월별 매출"
+    assert "추가 답변:" not in resumed["clarified_query"]
     assert [entry["node"] for entry in resumed["llm_decisions"]] == [
         "clarify_query",
         "create_analysis_plan",

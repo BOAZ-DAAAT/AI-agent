@@ -109,7 +109,7 @@ def make_collect_clarification_node():
         resume_value = interrupt(payload)
         answer = _clarification_answer_from_resume(resume_value)
         base_query = state.get("clarified_query") or state.get("latest_user_query", "")
-        clarified_query = f"{base_query}\n추가 답변: {answer}"
+        clarified_query = _clarified_query_from_answer(base_query, answer)
         return {
             "clarified_query": clarified_query,
             "needs_clarification": False,
@@ -120,6 +120,33 @@ def make_collect_clarification_node():
         }
 
     return collect_clarification_node
+
+
+def _clarified_query_from_answer(base_query: Any, answer: Any) -> str:
+    base = _one_line_text(base_query)
+    refined_answer = _one_line_text(answer)
+    if not refined_answer:
+        return base
+    if not base:
+        return refined_answer
+    if _answer_can_stand_alone(base, refined_answer):
+        return refined_answer
+    return f"{refined_answer} 기준으로 {base}"
+
+
+def _answer_can_stand_alone(base_query: str, answer: str) -> bool:
+    if not answer:
+        return False
+    if base_query and base_query in answer:
+        return True
+    if len(base_query) > 12:
+        return False
+    base_terms = [term.strip() for term in base_query.split() if len(term.strip()) >= 2]
+    return any(term in answer for term in base_terms)
+
+
+def _one_line_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
 
 
 def make_create_analysis_plan_node(model: Any | None):

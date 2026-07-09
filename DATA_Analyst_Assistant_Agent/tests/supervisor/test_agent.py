@@ -415,6 +415,19 @@ def test_resume_with_clarification_answer_uses_command_resume_and_updates_status
     assert adapter.status_updates[-1] == ("run_resumed_001", RunStatus.succeeded, {"terminal_state": "completed"})
 
 
+def test_resume_with_clarification_answer_without_checkpoint_run_id_raises(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    graph = CheckpointResumeGraph({}, {"resumed": True})
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError, match="thread_id"):
+        agent.resume("missing_thread", {"answer": "최근 6개월 월별 매출"})
+
+    assert graph.invocations == []
+    assert adapter.status_updates == []
+
+
 @pytest.mark.parametrize("payload", [{}, {"answer": ""}, {"answer": "   "}])
 def test_resume_with_invalid_clarification_answer_raises_without_invoking_graph(monkeypatch, payload) -> None:
     graph = CapturingGraph()
@@ -518,6 +531,32 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
         RunStatus.succeeded,
         {"terminal_state": "completed"},
     )
+    assert adapter.status_updates[0] == (
+        "run_resumed_001",
+        RunStatus.running,
+        {"resumed_from": "approval"},
+    )
+
+
+def test_resume_approval_without_pending_approval_raises_when_checkpoint_is_readable(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    checkpoint_state = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "월별 매출 추이를 분석해줘",
+        "terminal_state": "completed",
+        "pending_approval": None,
+    }
+    graph = ApprovalResumeGraph(checkpoint_state, {"resumed": True})
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError, match="승인 대기"):
+        agent.resume("thread_sales_001", {"approved": True})
+
+    assert graph.invocations == []
+    assert graph.state_updates == []
+    assert adapter.status_updates == []
 
 
 def test_resume_updates_backend_status_when_graph_returns_terminal_state(monkeypatch) -> None:

@@ -84,9 +84,23 @@ class SupervisorAgent:
         config = {"configurable": {"thread_id": thread_id}}
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
-            result = self._resume_synthetic_approval(graph, config, resume_payload)
-            if result is None:
+            checkpoint_values = self._checkpoint_values_from_graph(graph, config)
+            if checkpoint_values is None:
                 result = graph.invoke(Command(resume=resume_payload), config)
+            else:
+                run_id = self._current_run_id_from_values(checkpoint_values)
+                if not run_id:
+                    raise ValueError(f"thread_id={thread_id!r}에 해당하는 checkpoint를 찾지 못했습니다.")
+                if not isinstance(checkpoint_values.get("pending_approval"), dict):
+                    raise ValueError(f"thread_id={thread_id!r}는 승인 대기 상태가 아닙니다.")
+                self.adapter.update_run_status(
+                    run_id,
+                    RunStatus.running,
+                    metadata={"resumed_from": "approval"},
+                )
+                result = self._resume_synthetic_approval(graph, config, resume_payload, checkpoint_values)
+                if result is None:
+                    raise ValueError(f"thread_id={thread_id!r}의 승인 대기 상태를 재개할 수 없습니다.")
         return self._update_run_status_from_resume_result(result)
 
     def _resume_clarification(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
@@ -94,8 +108,11 @@ class SupervisorAgent:
         config = {"configurable": {"thread_id": thread_id}}
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
-            run_id = self._current_run_id_from_checkpoint(graph, config)
-            if run_id:
+            checkpoint_values = self._checkpoint_values_from_graph(graph, config)
+            if checkpoint_values is not None:
+                run_id = self._current_run_id_from_values(checkpoint_values)
+                if not run_id:
+                    raise ValueError(f"thread_id={thread_id!r}에 해당하는 checkpoint를 찾지 못했습니다.")
                 self.adapter.update_run_status(
                     run_id,
                     RunStatus.running,
@@ -109,14 +126,16 @@ class SupervisorAgent:
         graph: Any,
         config: dict[str, Any],
         resume_payload: dict[str, Any],
+        checkpoint_values: dict[str, Any] | None = None,
     ) -> Any | None:
         if resume_payload.get("approved") is not True:
             return None
         if not hasattr(graph, "get_state") or not hasattr(graph, "update_state"):
             return None
 
-        latest_state = graph.get_state(config)
-        values = getattr(latest_state, "values", None)
+        values = checkpoint_values
+        if values is None:
+            values = self._checkpoint_values_from_graph(graph, config)
         if not isinstance(values, dict):
             return None
 
@@ -254,13 +273,17 @@ class SupervisorAgent:
         return answer
 
     @staticmethod
-    def _current_run_id_from_checkpoint(graph: Any, config: dict[str, Any]) -> str | None:
+    def _checkpoint_values_from_graph(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
         if not hasattr(graph, "get_state"):
             return None
         snapshot = graph.get_state(config)
         values = getattr(snapshot, "values", None)
-        if not isinstance(values, dict):
-            return None
+        if isinstance(values, dict):
+            return values
+        return {}
+
+    @staticmethod
+    def _current_run_id_from_values(values: dict[str, Any]) -> str | None:
         run_id = values.get("current_run_id")
         return run_id if isinstance(run_id, str) and run_id else None
 
