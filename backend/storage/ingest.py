@@ -76,6 +76,7 @@ def _copy_table(host: str, port: int, user: str, password: str, database: str, t
         # 복사 중에는 외래키 검사 끔 (테이블 생성/입력 순서 문제 방지)
         with local.cursor() as cur:
             cur.execute("SET FOREIGN_KEY_CHECKS=0")
+            cur.execute("SET SESSION sql_mode = ''") 
 
         with remote.cursor() as cur:
             cur.execute(f"SHOW CREATE TABLE {quoted}")
