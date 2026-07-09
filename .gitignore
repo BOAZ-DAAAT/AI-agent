@@ -227,3 +227,6 @@ demo_outputs/
 daaa_outputs/
 gx/uncommitted/
 DATA_Analyst_Assistant_Agent/agents/eda/outputs/
+
+# olist CSV (서버에 직접 업로드, git 제외)
+seed/csv/

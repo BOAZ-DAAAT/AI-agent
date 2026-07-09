@@ -5,12 +5,14 @@ services:
   # ── 저장소 MySQL ──
   mysql:
     image: mysql:8.0
+    command: ["--local-infile=1"]
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: analytics          # 미래 SQL 에이전트 마트용 스키마 미리 생성
     volumes:
       - mysql_data:/var/lib/mysql        # 재시작해도 데이터 유지 (영속의 핵심)
+      - ./seed:/docker-entrypoint-initdb.d:ro 
     ports:
       - "127.0.0.1:3306:3306"            # 서버 내부 디버깅용, 외부 비공개
     healthcheck:
