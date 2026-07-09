@@ -7,7 +7,8 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 
-DEFAULT_CHECKPOINT_PATH = Path(".data_agent") / "checkpoints" / "supervisor.sqlite"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CHECKPOINT_PATH = PROJECT_ROOT / ".data_agent" / "checkpoints" / "supervisor.sqlite"
 
 
 @contextmanager

@@ -6,21 +6,24 @@ import html
 import io
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
 
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SupervisorAgent
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorRunResult
+from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorRunResult, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_DIR = ROOT_DIR / "daaa_outputs" / "latest"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -105,17 +108,74 @@ def _state_summary(state: OrchestrationState) -> dict[str, Any]:
     }
 
 
-def _interrupt_summary(result: SupervisorRunResult) -> dict[str, Any]:
-    if result.interrupt is None:
-        return {"kind": result.kind}
+def _new_thread_id() -> str:
+    return f"thread_{uuid4().hex}"
+
+
+def _shell_command(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def _resume_command(args: argparse.Namespace, *, thread_id: str, resume_kind: str) -> str:
+    parts = [
+        sys.executable,
+        "-m",
+        "DATA_Analyst_Assistant_Agent.run",
+        "--thread-id",
+        thread_id,
+    ]
+    if resume_kind == "clarification":
+        parts.extend(["--resume-answer", "..."])
+    elif resume_kind == "approval":
+        parts.append("--approve")
+    else:
+        raise ValueError(f"지원하지 않는 resume_kind입니다: {resume_kind}")
+
+    if args.show_sql:
+        parts.append("--show-sql")
+    if args.no_open:
+        parts.append("--no-open")
+    if args.no_output:
+        parts.append("--no-output")
+    if args.json:
+        parts.append("--json")
+    if args.dotenv != ".env":
+        parts.extend(["--dotenv", str(args.dotenv)])
+    if str(args.output_dir) != str(DEFAULT_OUTPUT_DIR):
+        parts.extend(["--output-dir", str(args.output_dir)])
+    return _shell_command([str(part) for part in parts])
+
+
+def _approval_resume_metadata(state: OrchestrationState, args: argparse.Namespace) -> dict[str, Any]:
+    if state.terminal_state != SupervisorTerminalState.needs_user_approval or not state.thread_id:
+        return {}
     return {
-        "kind": result.kind,
-        "interrupt": result.interrupt.model_dump(mode="json"),
-        "resume_payload": {"answer": "..."},
+        "resume_payload": {"approved": True},
+        "resume_command": _resume_command(args, thread_id=state.thread_id, resume_kind="approval"),
     }
 
 
-def _print_interrupt_summary(result: SupervisorRunResult) -> None:
+def _should_run_interactively(args: argparse.Namespace) -> bool:
+    if args.json or args.resume_answer is not None or args.resume_approved:
+        return False
+    if args.interactive is not None:
+        return bool(args.interactive)
+    return bool(sys.stdin.isatty())
+
+
+def _interrupt_summary(result: SupervisorRunResult, args: argparse.Namespace) -> dict[str, Any]:
+    if result.interrupt is None:
+        return {"kind": result.kind}
+    payload = result.interrupt
+    return {
+        "kind": result.kind,
+        "interrupt": payload.model_dump(mode="json"),
+        "resume_payload": {"answer": "..."},
+        "resume_command": _resume_command(args, thread_id=payload.thread_id, resume_kind="clarification"),
+    }
+
+
+def _print_interrupt_summary(result: SupervisorRunResult, args: argparse.Namespace) -> None:
     if result.interrupt is None:
         print("사용자 입력 대기 상태입니다.")
         return
@@ -129,6 +189,8 @@ def _print_interrupt_summary(result: SupervisorRunResult) -> None:
     print(f"question:   {payload.question}")
     print("\nresume payload:")
     print(json.dumps({"answer": "..."}, ensure_ascii=False, indent=2))
+    print("\nresume command:")
+    print(_resume_command(args, thread_id=payload.thread_id, resume_kind="clarification"))
 
 
 def _artifact_preview(adapter: BackendAdapter, artifact_id: str) -> dict[str, Any]:
@@ -587,6 +649,7 @@ def _print_text_summary(
     show_sql: bool,
 ) -> None:
     print("\n=== Orchestration Result ===")
+    print(f"thread_id:      {state.thread_id}")
     print(f"terminal_state: {state.terminal_state}")
     print(f"route_kind:      {state.route_kind}")
     print(f"planner_mode:    {state.planner_mode}")
@@ -623,6 +686,17 @@ def _print_text_summary(
     print(Path(adapter.base_data_dir).resolve())
 
 
+def _print_approval_resume_hint(state: OrchestrationState, args: argparse.Namespace) -> None:
+    metadata = _approval_resume_metadata(state, args)
+    if not metadata:
+        return
+    print("\n=== Approval Resume ===")
+    print("resume payload:")
+    print(json.dumps(metadata["resume_payload"], ensure_ascii=False, indent=2))
+    print("\nresume command:")
+    print(metadata["resume_command"])
+
+
 def _handle_result(
     adapter: BackendAdapter,
     result: Any,
@@ -635,9 +709,9 @@ def _handle_result(
 
     if result.kind == "interrupt":
         if args.json:
-            print(json.dumps(_interrupt_summary(result), ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(_interrupt_summary(result, args), ensure_ascii=False, indent=2, default=str))
         else:
-            _print_interrupt_summary(result)
+            _print_interrupt_summary(result, args)
         return
 
     if result.state is None:
@@ -651,14 +725,53 @@ def _handle_result(
 
     if args.json:
         payload = _state_summary(state)
+        payload.update(_approval_resume_metadata(state, args))
         if outputs:
             payload["outputs"] = {key: str(value) for key, value in outputs.items()}
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
         _print_text_summary(state, adapter, outputs=outputs, show_sql=args.show_sql)
+        _print_approval_resume_hint(state, args)
 
     if outputs and not args.no_open and not args.json and hasattr(os, "startfile"):
         os.startfile(outputs["index_html"])
+
+
+def _handle_interactive_result(
+    adapter: BackendAdapter,
+    supervisor: SupervisorAgent,
+    result: SupervisorRunResult,
+    args: argparse.Namespace,
+    *,
+    query_for_summary: str,
+) -> None:
+    while True:
+        if result.kind == "interrupt":
+            if result.interrupt is None:
+                raise RuntimeError("interrupt 결과에 payload가 없습니다.")
+            _print_interrupt_summary(result, args)
+            answer = input("\n답변: ").strip()
+            if not answer:
+                raise SystemExit("답변이 비어 있습니다.")
+            result = supervisor.resume(result.interrupt.thread_id, {"answer": answer})
+            query_for_summary = f"[resume] {answer}"
+            continue
+
+        if result.state is None:
+            raise RuntimeError("Supervisor state result is missing state payload.")
+
+        state = result.state
+        if state.terminal_state == SupervisorTerminalState.needs_user_approval and state.thread_id:
+            _handle_result(adapter, result, args, query_for_summary=query_for_summary)
+            approval_answer = input("\n승인 후 계속할까요? [y/N]: ").strip().lower()
+            if approval_answer not in {"y", "yes", "예", "ㅇ"}:
+                return
+            result = supervisor.resume(state.thread_id, {"approved": True})
+            query_for_summary = "[resume approved]"
+            continue
+
+        _handle_result(adapter, result, args, query_for_summary=query_for_summary)
+        return
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -666,7 +779,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run DATA_Analyst_Assistant_Agent through the LangGraph Supervisor.",
     )
     parser.add_argument("query", nargs="?", help="User analysis question. If omitted, stdin prompt is used.")
-    parser.add_argument("--thread-id", default="daaa-manual-run", help="Thread id for the backend run.")
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help=(
+            "Thread id for the backend run. "
+            "New runs generate one automatically; resume commands must pass the interrupted thread id."
+        ),
+    )
     parser.add_argument("--datasource-id", default=None, help="Optional backend datasource id.")
     parser.add_argument(
         "--resume-answer",
@@ -676,12 +796,33 @@ def build_parser() -> argparse.ArgumentParser:
             "Use the same --thread-id from the interrupted run."
         ),
     )
+    parser.add_argument(
+        "--approve",
+        "--resume-approved",
+        dest="resume_approved",
+        action="store_true",
+        help="Resume a pending approval state. Use the same --thread-id from the waiting run.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary.")
     parser.add_argument("--show-sql", action="store_true", help="Print generated SQL in text output.")
     parser.add_argument("--dotenv", default=".env", help="Path to dotenv file. Defaults to .env.")
+    interactive_group = parser.add_mutually_exclusive_group()
+    interactive_group.add_argument(
+        "--interactive",
+        dest="interactive",
+        action="store_true",
+        help="Ask for clarification and approval input in the same terminal session.",
+    )
+    interactive_group.add_argument(
+        "--no-interactive",
+        dest="interactive",
+        action="store_false",
+        help="Do not prompt in the current process; print resume commands instead.",
+    )
+    parser.set_defaults(interactive=None)
     parser.add_argument(
         "--output-dir",
-        default=str(ROOT_DIR / "daaa_outputs" / "latest"),
+        default=str(DEFAULT_OUTPUT_DIR),
         help="Directory for run_summary.json, generated_sql.sql, and copied artifacts.",
     )
     parser.add_argument("--no-output", action="store_true", help="Do not write output files.")
@@ -698,10 +839,20 @@ def main() -> None:
         resume_answer = str(args.resume_answer).strip()
         if not resume_answer:
             raise SystemExit("--resume-answer cannot be empty.")
+
+    resume_approved = bool(args.resume_approved)
+    is_resume_mode = resume_answer is not None or resume_approved
+    if resume_answer is not None and resume_approved:
+        raise SystemExit("--resume-answer and --approve cannot be used together.")
+    if args.interactive is True and args.json:
+        raise SystemExit("--interactive cannot be used with --json.")
+    if is_resume_mode:
+        if not args.thread_id:
+            raise SystemExit("--thread-id is required when using --resume-answer or --approve.")
         if args.query:
-            raise SystemExit("--resume-answer cannot be used with a positional query.")
+            raise SystemExit("--resume-answer/--approve cannot be used with a positional query.")
         if args.datasource_id is not None:
-            raise SystemExit("--resume-answer cannot be used with --datasource-id.")
+            raise SystemExit("--resume-answer/--approve cannot be used with --datasource-id.")
 
     load_dotenv(args.dotenv)
     _normalize_env_aliases()
@@ -713,12 +864,20 @@ def main() -> None:
         result = supervisor.resume(args.thread_id, {"answer": resume_answer})
         _handle_result(adapter, result, args, query_for_summary=f"[resume] {resume_answer}")
         return
+    if resume_approved:
+        result = supervisor.resume(args.thread_id, {"approved": True})
+        _handle_result(adapter, result, args, query_for_summary="[resume approved]")
+        return
 
     query = args.query or input("Query: ").strip()
     if not query:
         raise SystemExit("Query is empty.")
 
-    result = supervisor.run(query, thread_id=args.thread_id, datasource_id=args.datasource_id)
+    thread_id = args.thread_id or _new_thread_id()
+    result = supervisor.run(query, thread_id=thread_id, datasource_id=args.datasource_id)
+    if _should_run_interactively(args):
+        _handle_interactive_result(adapter, supervisor, result, args, query_for_summary=query)
+        return
     _handle_result(adapter, result, args, query_for_summary=query)
 
 
