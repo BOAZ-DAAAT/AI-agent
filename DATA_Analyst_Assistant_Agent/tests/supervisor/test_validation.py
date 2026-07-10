@@ -5,6 +5,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     empty_supervisor_state,
     merge_agent_result,
 )
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    ApprovalRequirement,
+    ValidationFinding,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     guard_agent_preconditions,
     validate_subagent_result,
@@ -148,7 +152,7 @@ def test_validate_fallback_success_without_retry_fails() -> None:
     assert "fallback" in decision.reason.lower()
 
 
-def test_validate_success_with_only_validation_warnings_is_valid() -> None:
+def test_validate_success_with_only_validation_warnings_requests_supervisor_redecision() -> None:
     state = _state()
     result = AgentCompactResult(
         agent="eda_agent",
@@ -160,7 +164,23 @@ def test_validate_success_with_only_validation_warnings_is_valid() -> None:
     decision = validate_subagent_result(state, result)
 
     assert decision.valid is True
-    assert decision.next_action == "create_plan"
+    assert decision.next_action == "decide_next_action"
+    assert "다음 행동 재판단" in decision.reason
+
+
+def test_validate_success_requests_supervisor_redecision() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="SQL 실행 완료",
+        artifact_ids=["artifact_sql"],
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.valid is True
+    assert decision.next_action == "decide_next_action"
 
 
 def test_validate_retry_boundary_allows_before_limit_and_fails_at_limit() -> None:
@@ -231,3 +251,51 @@ def test_validate_report_success_without_artifact_is_invalid() -> None:
 
     assert decision.valid is False
     assert decision.next_action == "fail"
+
+
+def test_blocking_finding_takes_priority_over_approval() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="승인과 오류가 함께 존재",
+        findings=[
+            ValidationFinding(
+                code="invalid_schema",
+                source="local_check",
+                severity="error",
+                disposition="blocking",
+                message="스키마가 잘못되었습니다.",
+            )
+        ],
+        approval=ApprovalRequirement(required=True, reason="실행 승인 필요"),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "reject"
+    assert decision.next_action == "fail"
+
+
+def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="조인 재검증 필요",
+        findings=[
+            ValidationFinding(
+                code="invalid_join_plan",
+                source="sql_langgraph",
+                severity="warning",
+                disposition="retry_required",
+                message="조인 계획을 다시 생성해야 합니다.",
+                retryable=True,
+            )
+        ],
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "retry"
+    assert decision.next_action == "call_sql_agent"

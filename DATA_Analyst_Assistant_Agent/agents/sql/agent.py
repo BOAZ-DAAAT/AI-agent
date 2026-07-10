@@ -8,7 +8,14 @@ import json
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    AgentStatus,
+    LocalCheck,
+    OrchestrationState,
+    ValidationBlock,
+    ValidationFinding,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_artifact import build_validation_summary_payload
 
 
@@ -82,10 +89,14 @@ class SQLAgent:
         generated_sql = sql_draft.get("sql") or ""
         state.generated_sql = generated_sql
         state.planner_mode = "llm"
+        # comprehensive(마트) 경로면 마트 테이블 참조를 plan에 실어 하류로 넘긴다.
+        # 하류(EDA/분석)는 이 이름으로 DB에서 마트를 직접 조회한다. simple 경로면 target_table 없음.
+        target_table = sql_draft.get("target_table") if sql_draft.get("sql_type") != "select" else None
         if state.plan is not None:
             state.plan.generated_sql = generated_sql
             state.plan.source_sql = generated_sql
             state.plan.planner_mode = "llm"
+            state.plan.target_table = target_table or None
 
         plan_payload = {
             "plan": result.get("plan") or {},
@@ -235,19 +246,43 @@ class SQLAgent:
             )
 
         has_error = any(not check.passed and check.severity == "error" for check in checks)
+        findings = [self._validation_finding(item) for item in result.get("validation_findings") or []]
         return AgentEnvelope(
             status=AgentStatus.failed if has_error else AgentStatus.success,
             agent_name=self.name,
             summary=result.get("final_answer") or "SQL LangGraph agent completed.",
             artifact_refs=[result_ref, plan_ref, sql_plan_ref, sql_ref, validation_ref],
-            validation=ValidationBlock(local_checks=checks),
+            validation=ValidationBlock(local_checks=checks, findings=findings),
             retry_hint={
-                "retryable": has_error,
+                "retryable": bool(retry_hint.get("retryable", has_error)),
                 "suggested_action": retry_hint.get("suggested_action", "fix_sql"),
                 "reason_code": retry_hint.get("reason_code", "main_sql_agent_validation" if has_error else "none"),
                 "details": retry_hint.get("details", {}),
             },
             fallback_used=fallback_used,
+        )
+
+    @staticmethod
+    def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
+        severity = str(item.get("severity") or "info")
+        retryable = bool(item.get("retryable", False))
+        if retryable:
+            disposition = "retry_required"
+        elif severity == "error":
+            disposition = "blocking"
+        elif severity == "warning":
+            disposition = "limitation"
+        else:
+            disposition = "advisory"
+        return ValidationFinding(
+            code=str(item.get("code") or item.get("category") or "sql_validation"),
+            source=str(item.get("source") or "sql_langgraph"),
+            severity=severity,
+            disposition=disposition,
+            message=str(item.get("message") or item.get("detail") or "SQL validation finding"),
+            retryable=retryable,
+            suggested_action=str(item.get("suggested_action") or ""),
+            details=dict(item.get("details") or {}),
         )
 
     @staticmethod

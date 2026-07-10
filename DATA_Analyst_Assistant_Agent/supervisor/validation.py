@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -20,7 +22,10 @@ class GuardDecision(BaseModel):
 class ResultValidationDecision(BaseModel):
     valid: bool
     next_action: NextAction
-    reason: str
+    reason: str = ""
+    decision: Literal["accept", "accept_with_limitations", "retry", "await_approval", "reject"] = "accept"
+    terminal_state: str = "running"
+    final_answer: str = ""
 
 
 _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
@@ -101,22 +106,49 @@ def validate_subagent_result(
     state: SupervisorState,
     result: AgentCompactResult,
 ) -> ResultValidationDecision:
-    if result.status == "approval_required":
-        return ResultValidationDecision(
-            valid=False,
-            next_action="finalize",
-            reason=f"{result.agent} 실행 결과에 승인 대기가 필요합니다: {result.summary}",
-        )
-
     fallback_used = result.fallback_used
-    has_validation_errors = bool(result.validation_errors)
+    blocking_findings = [finding for finding in result.findings if finding.disposition == "blocking"]
+    retry_findings = [finding for finding in result.findings if finding.disposition == "retry_required"]
+    limitation_findings = [finding for finding in result.findings if finding.disposition == "limitation"]
+    has_validation_errors = bool(result.validation_errors or blocking_findings)
     has_failure = result.status == "failed" or has_validation_errors or fallback_used
     if has_failure:
-        return _route_invalid_result(
+        routed = _route_invalid_result(
             state,
             result,
             has_validation_errors=has_validation_errors,
             fallback_used=fallback_used,
+        )
+        if blocking_findings:
+            routed.next_action = "fail"
+            routed.decision = "reject"
+            routed.reason = "; ".join(finding.message for finding in blocking_findings)
+        return routed
+
+    if retry_findings:
+        retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
+        max_retry = int(state.get("max_retry_per_agent", 0))
+        if retry_count < max_retry:
+            return ResultValidationDecision(
+                valid=False,
+                next_action=_AGENT_CALL_ACTIONS[result.agent],
+                reason="; ".join(finding.message for finding in retry_findings),
+                decision="retry",
+            )
+        return ResultValidationDecision(
+            valid=False,
+            next_action="fail",
+            reason=f"retry-required finding의 재시도 한도 {max_retry}회에 도달했습니다.",
+            decision="reject",
+        )
+
+    approval_required = result.approval.required or result.status == "approval_required"
+    if approval_required:
+        return ResultValidationDecision(
+            valid=False,
+            next_action="finalize",
+            reason=result.approval.reason or f"{result.agent} 실행 결과에 승인이 필요합니다: {result.summary}",
+            decision="await_approval",
         )
 
     if result.status in {"success", "warning"}:
@@ -131,22 +163,25 @@ def validate_subagent_result(
                 valid=True,
                 next_action="finalize",
                 reason="리포트 에이전트가 유효한 결과를 반환해 종료할 수 있습니다.",
+                decision="accept_with_limitations" if limitation_findings else "accept",
             )
         return ResultValidationDecision(
             valid=True,
-            next_action="create_plan",
-            reason=f"{result.agent} 결과가 유효해 다음 계획 수립으로 이동합니다.",
+            next_action="decide_next_action",
+            reason=f"{result.agent} 결과가 유효해 Supervisor의 다음 행동 재판단으로 이동합니다.",
+            decision="accept_with_limitations" if limitation_findings else "accept",
         )
 
     return ResultValidationDecision(
         valid=False,
         next_action="fail",
         reason=f"{result.agent} 결과 상태를 처리할 수 없습니다: {result.status}",
+        decision="reject",
     )
 
 
 def _result_has_artifact(result: AgentCompactResult) -> bool:
-    if result.artifact_ids:
+    if any(bool(artifact_id) for artifact_id in result.artifact_ids):
         return True
     return any(bool(artifact.artifact_id) for artifact in result.artifacts)
 
@@ -171,13 +206,14 @@ def _route_invalid_result(
             valid=False,
             next_action=_AGENT_CALL_ACTIONS[result.agent],
             reason=f"{detail} 재시도 가능하며 현재 재시도 횟수는 {retry_count}/{max_retry}입니다.",
+            decision="retry",
         )
 
     if result.retryable:
         reason = f"{detail} 재시도 한도 {max_retry}회에 도달해 실패로 종료합니다."
     else:
         reason = f"{detail} 재시도할 수 없어 실패로 종료합니다."
-    return ResultValidationDecision(valid=False, next_action="fail", reason=reason)
+    return ResultValidationDecision(valid=False, next_action="fail", reason=reason, decision="reject")
 
 
 def _invalid_reason_detail(

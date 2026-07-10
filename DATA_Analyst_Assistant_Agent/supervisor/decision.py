@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentName, NextAction, SupervisorState, artifact_ids_by_agent
+from DATA_Analyst_Assistant_Agent.supervisor.validation import ResultValidationDecision
 
 
 _SNAPSHOT_MAX_TEXT = 400
@@ -23,11 +24,21 @@ TerminalStateValue = Literal[
     "failed_with_recoverable_context",
     "failed_terminal",
 ]
+LLMSelectableNextAction = Literal[
+    "clarify",
+    "create_plan",
+    "call_sql_agent",
+    "call_eda_agent",
+    "call_analysis_agent",
+    "call_report_agent",
+    "finalize",
+    "fail",
+]
 DecisionModelT = TypeVar("DecisionModelT", bound=BaseModel)
 
 
 class SupervisorDecision(BaseModel):
-    next_action: NextAction
+    next_action: LLMSelectableNextAction
     reason: str = ""
 
 
@@ -51,22 +62,14 @@ class AnalysisPlanDecision(BaseModel):
 
 class ExecutionGuardDecision(BaseModel):
     allowed: bool
-    next_action: NextAction
+    next_action: LLMSelectableNextAction
     reason: str = ""
-
-
-class ResultValidationDecision(BaseModel):
-    valid: bool
-    next_action: NextAction
-    reason: str = ""
-    terminal_state: TerminalStateValue | Literal["running"] = "running"
-    final_answer: str = ""
 
 
 class SemanticValidationAdvisoryDecision(BaseModel):
     semantic_valid: bool
     severity: Literal["info", "warning", "error"] = "info"
-    recommended_next_action: NextAction | Literal[""] = ""
+    recommended_next_action: LLMSelectableNextAction | Literal[""] = ""
     reason: str = ""
     missing_evidence: list[str] = Field(default_factory=list)
     alignment_notes: list[str] = Field(default_factory=list)

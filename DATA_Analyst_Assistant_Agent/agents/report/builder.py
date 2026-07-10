@@ -43,7 +43,7 @@ def build_report(
             *evidence_lines,
             "",
             "## Limitations",
-            *_limitation_lines(analysis_result),
+            *_limitation_lines(state, analysis_result),
             "",
             "## Next Actions",
             "- 상세 근거가 필요하면 상위 산출물과 SQL 결과 CSV를 확인하세요.",
@@ -103,8 +103,9 @@ def _visual_lines(state: OrchestrationState, visualization: dict[str, Any] | Non
     return lines
 
 
-def _limitation_lines(result: dict[str, Any] | None) -> list[str]:
-    limitations = (result or {}).get("limitations", []) or [
+def _limitation_lines(state: OrchestrationState, result: dict[str, Any] | None) -> list[str]:
+    limitations = [*state.limitations, *((result or {}).get("limitations", []) or [])]
+    limitations = list(dict.fromkeys(str(item) for item in limitations if item)) or [
         "이번 분석은 현재 실행에서 사용 가능한 SQL 결과 산출물에 한정됩니다.",
         "분석 결과는 기술적 해석이며 인과관계로 해석하면 안 됩니다.",
     ]

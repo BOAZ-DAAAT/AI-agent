@@ -8,7 +8,7 @@ import pandas as pd
 
 from data_agent_backend.models.artifacts import ArtifactType
 
-from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, read_sql_result_csvs
+from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, load_analysis_inputs
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
@@ -53,8 +53,10 @@ class EDAAgent:
 
     def run(self, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:
         context = runtime.context(state, node_name=self.name, tool_name="eda_agent.lang_graph")
-        csvs = read_sql_result_csvs(state, runtime)
-        source_ids = [csv.artifact_id for csv in csvs]
+        # comprehensive(마트) 경로면 analytics 스키마에서 마트를 DB 로 직접 조회하고,
+        # simple 경로/조회 실패 시 sql_result CSV 아티팩트로 폴백한다(반환형은 동일).
+        csvs = load_analysis_inputs(state, runtime)
+        source_ids = [csv.artifact_id for csv in csvs if csv.artifact_id]
         profile = profile_from_csv_artifacts(csvs)
 
         # 원본 LangGraph EDA 실행 (planner → 분석 노드 → insight/hypothesis → chart_selector)

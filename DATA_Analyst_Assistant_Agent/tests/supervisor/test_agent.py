@@ -34,6 +34,7 @@ class FakeBackendAdapter:
         self.created_runs: list[dict[str, Any]] = []
         self.status_updates: list[tuple[str, Any, dict[str, Any] | None]] = []
         self.events: list[dict[str, Any]] = []
+        self.artifact_hashes: dict[str, str] = {}
 
     def create_run(self, *, thread_id=None, project_id=None, metadata=None):
         self.created_runs.append(
@@ -72,6 +73,13 @@ class FakeBackendAdapter:
             }
         )
         return {"event_id": f"evt_{len(self.events)}"}
+
+    def get_artifact(self, artifact_id):
+        return type(
+            "FakeArtifact",
+            (),
+            {"artifact_id": artifact_id, "content_hash": self.artifact_hashes[artifact_id]},
+        )()
 
 
 class FakeGraph:
@@ -536,6 +544,110 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
         RunStatus.running,
         {"resumed_from": "approval"},
     )
+
+
+def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rerun(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    adapter.artifact_hashes["artifact_sql"] = "hash_sql"
+    base = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "월별 매출",
+        "analysis_plan": {},
+        "datasource_id": None,
+        "catalog_summary": None,
+        "retry_counts": {},
+        "generated_sql": "",
+        "artifacts": {},
+        "accepted_evidence": {},
+        "agent_results": [],
+        "completed_agents": [],
+        "failed_agents": [],
+        "error_state": {},
+        "max_retry_per_agent": 1,
+        "state_schema_version": 2,
+        "result_history": [],
+        "rejected_results": [],
+        "quarantined_artifacts": [],
+        "semantic_retry_counts": {},
+        "run_events": [],
+        "terminal_state": "needs_user_approval",
+        "next_action": "finalize",
+        "final_answer": "승인 필요",
+        "pending_result": {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "hash_sql"},
+            "state_updates": {"generated_sql": "SELECT 1"},
+            "result": {
+                "agent": "sql_agent",
+                "status": "success",
+                "summary": "SQL 완료",
+                "artifact_ids": ["artifact_sql"],
+                "artifacts": [{"artifact_id": "artifact_sql", "content_hash": "hash_sql"}],
+                "approval": {"required": True, "reason": "승인 필요"},
+            },
+        },
+        "pending_approval": {
+            "approval_id": "approval_001",
+            "agent": "sql_agent",
+            "reason": "승인 필요",
+            "approval_type": "sql.execute",
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "hash_sql"},
+        },
+    }
+    graph = ApprovalResumeGraph(base, _completed_graph_state(base, run_id="run_resumed_001"))
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    agent.resume("thread_sales_001", {"approved": True})
+
+    _, updates, as_node = graph.state_updates[0]
+    assert as_node == "resolve_candidate"
+    assert updates["pending_result"] is None
+    assert updates["completed_agents"] == ["sql_agent"]
+    assert updates["generated_sql"] == "SELECT 1"
+
+
+def test_resume_approval_with_changed_hash_invalidates_and_revalidates(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    adapter.artifact_hashes["artifact_sql"] = "changed_hash"
+    checkpoint = {
+        "current_run_id": "run_resumed_001",
+        "pending_result": {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "old_hash"},
+            "state_updates": {},
+            "result": {"agent": "sql_agent", "status": "success", "summary": "SQL 완료"},
+        },
+        "pending_approval": {
+            "agent": "sql_agent",
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "old_hash"},
+        },
+        "terminal_state": "needs_user_approval",
+        "state_schema_version": 2,
+        "accepted_evidence": {},
+        "result_history": [],
+        "rejected_results": [],
+        "quarantined_artifacts": [],
+        "semantic_retry_counts": {},
+        "run_events": [],
+    }
+    graph = ApprovalResumeGraph(checkpoint, {"current_run_id": "run_resumed_001", "terminal_state": "running"})
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    agent.resume("thread_sales_001", {"approved": True})
+
+    _, updates, as_node = graph.state_updates[0]
+    assert as_node == "stage_candidate"
+    assert updates["pending_approval"] is None
+    assert updates["run_events"][-1]["type"] == "approval.invalidated"
 
 
 def test_resume_approval_without_pending_approval_raises_when_checkpoint_is_readable(monkeypatch) -> None:
