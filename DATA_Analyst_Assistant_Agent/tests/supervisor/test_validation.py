@@ -5,6 +5,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     empty_supervisor_state,
     merge_agent_result,
 )
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    ApprovalRequirement,
+    ValidationFinding,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     guard_agent_preconditions,
     validate_subagent_result,
@@ -247,3 +251,51 @@ def test_validate_report_success_without_artifact_is_invalid() -> None:
 
     assert decision.valid is False
     assert decision.next_action == "fail"
+
+
+def test_blocking_finding_takes_priority_over_approval() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="승인과 오류가 함께 존재",
+        findings=[
+            ValidationFinding(
+                code="invalid_schema",
+                source="local_check",
+                severity="error",
+                disposition="blocking",
+                message="스키마가 잘못되었습니다.",
+            )
+        ],
+        approval=ApprovalRequirement(required=True, reason="실행 승인 필요"),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "reject"
+    assert decision.next_action == "fail"
+
+
+def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="조인 재검증 필요",
+        findings=[
+            ValidationFinding(
+                code="invalid_join_plan",
+                source="sql_langgraph",
+                severity="warning",
+                disposition="retry_required",
+                message="조인 계획을 다시 생성해야 합니다.",
+                retryable=True,
+            )
+        ],
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "retry"
+    assert decision.next_action == "call_sql_agent"

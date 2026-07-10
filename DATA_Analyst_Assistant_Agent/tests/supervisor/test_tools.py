@@ -14,6 +14,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     LocalCheck,
     OrchestrationState,
     RetryHint,
+    ValidationFinding,
     ValidationBlock,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state
@@ -95,7 +96,8 @@ def test_subagent_adapter_promotes_success_with_required_approval() -> None:
 
     result = adapter.call("analysis_agent", _state())
 
-    assert result.agent_result.status == "approval_required"
+    assert result.agent_result.status == "success"
+    assert result.agent_result.approval.required is True
 
 
 class BusinessFlagAgent:
@@ -172,6 +174,57 @@ def test_subagent_adapter_preserves_failed_retry_hint_and_error() -> None:
     assert result.agent_result.retryable is True
     assert "SQL 실행 실패" in result.agent_result.error
     assert "SQL_TIMEOUT" in result.agent_result.error
+
+
+class StructuredFindingAgent:
+    name = "sql_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="sql_agent",
+            summary="재시도가 필요한 SQL 결과",
+            validation=ValidationBlock(
+                findings=[
+                    ValidationFinding(
+                        code="invalid_join_plan",
+                        source="sql_langgraph",
+                        severity="warning",
+                        disposition="retry_required",
+                        message="조인 계획을 다시 생성해야 합니다.",
+                        retryable=True,
+                        suggested_action="fix_sql",
+                    )
+                ]
+            ),
+            retry_hint=RetryHint(
+                retryable=True,
+                suggested_action="fix_sql",
+                reason_code="invalid_join_plan",
+                details={"join": "orders-customers"},
+            ),
+            approval=ApprovalRequirement(
+                required=True,
+                reason="실행 승인 필요",
+                approval_type="sql.execute",
+            ),
+        )
+
+
+def test_subagent_adapter_preserves_structured_findings_retry_hint_and_approval() -> None:
+    adapter = SubAgentAdapter(
+        backend_adapter=FakeAdapter(),
+        agents={"sql_agent": StructuredFindingAgent()},
+    )
+
+    result = adapter.call("sql_agent", _state()).agent_result
+
+    assert result.status == "success"
+    assert result.findings[0].code == "invalid_join_plan"
+    assert result.findings[0].disposition == "retry_required"
+    assert result.retry_hint.reason_code == "invalid_join_plan"
+    assert result.retry_hint.details == {"join": "orders-customers"}
+    assert result.approval.required is True
 
 
 class FallbackAgent:

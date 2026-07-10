@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentName, NextAction, SupervisorState, artifact_ids_by_agent
+from DATA_Analyst_Assistant_Agent.supervisor.validation import ResultValidationDecision
 
 
 _SNAPSHOT_MAX_TEXT = 400
@@ -63,14 +64,6 @@ class ExecutionGuardDecision(BaseModel):
     allowed: bool
     next_action: LLMSelectableNextAction
     reason: str = ""
-
-
-class ResultValidationDecision(BaseModel):
-    valid: bool
-    next_action: NextAction
-    reason: str = ""
-    terminal_state: TerminalStateValue | Literal["running"] = "running"
-    final_answer: str = ""
 
 
 class SemanticValidationAdvisoryDecision(BaseModel):

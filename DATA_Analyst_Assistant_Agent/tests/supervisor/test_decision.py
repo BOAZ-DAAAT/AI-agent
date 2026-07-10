@@ -144,6 +144,7 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "reason": "유효함",
                 "terminal_state": "running",
                 "final_answer": "",
+                "decision": "accept",
             },
         ),
         (

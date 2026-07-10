@@ -205,18 +205,17 @@ def test_generate_report_node_preserves_report_state_contract(adapter: BackendAd
         _supervisor_state(run.run_id, sql_id)
     )
 
-    assert updates["next_action"] == "finalize"
+    assert updates["next_action"] == "call_report_agent"
     assert updates["terminal_state"] == "running"
-    assert updates["completed_agents"] == ["sql_agent", "report_agent"]
+    assert updates["completed_agents"] == ["sql_agent"]
     assert updates["failed_agents"] == []
-    assert updates["agent_results"][-1]["agent"] == "report_agent"
-    assert updates["artifacts"]["report_agent"][0]["artifact_id"]
+    assert updates["agent_results"][-1]["agent"] == "sql_agent"
+    assert "report_agent" not in updates["artifacts"]
     assert updates["last_agent_result"]["agent"] == "report_agent"
-    assert updates["validation_results"][-1]["valid"] is True
-    assert updates["step_summaries"][-1]["step"] == "generate_report"
+    assert updates["pending_result"]["result"]["agent"] == "report_agent"
 
 
-def test_generate_report_node_converts_self_check_failure_to_failed_terminal(
+def test_generate_report_node_stages_self_check_failure_without_polluting_state(
     adapter: BackendAdapter,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,10 +230,11 @@ def test_generate_report_node_converts_self_check_failure_to_failed_terminal(
         _supervisor_state(run.run_id, sql_id)
     )
 
-    assert updates["terminal_state"] == "failed_terminal"
-    assert updates["next_action"] == "finalize"
-    assert "자체 검사" in updates["error_state"]["message"]
-    assert "report_agent" in updates["failed_agents"]
+    assert updates["terminal_state"] == "running"
+    assert updates["next_action"] == "call_report_agent"
+    assert updates["pending_result"]["result"]["status"] == "failed"
+    assert "자체 검사" in updates["pending_result"]["result"]["error"]
+    assert "report_agent" not in updates["failed_agents"]
 
 
 @pytest.mark.parametrize(
@@ -259,7 +259,7 @@ def test_generate_report_node_converts_self_check_failure_to_failed_terminal(
         ),
     ],
 )
-def test_generate_report_node_converges_failures_to_failed_terminal(
+def test_generate_report_node_stages_failures_for_common_validation_pipeline(
     adapter: BackendAdapter,
     state_factory,
     generator: StubReportGenerator,
@@ -270,12 +270,16 @@ def test_generate_report_node_converges_failures_to_failed_terminal(
 
     updates = make_generate_report_node(generator)(state_factory(run.run_id, sql_id))
 
-    assert updates["terminal_state"] == "failed_terminal"
-    assert updates["next_action"] == "finalize"
-    assert "report_agent" in updates["failed_agents"]
+    assert updates["terminal_state"] == "running"
+    assert updates["next_action"] == "call_report_agent"
+    assert "report_agent" not in updates["failed_agents"]
     assert "report_agent" not in updates["completed_agents"]
-    assert expected_message in updates["error_state"]["message"]
-    assert updates["step_summaries"][-1]["step"] == "generate_report"
+    pending_result = updates["pending_result"]["result"]
+    if expected_message == "산출물 ID":
+        assert pending_result["status"] == "success"
+        assert pending_result["artifact_ids"] == []
+    else:
+        assert expected_message in pending_result["error"]
 
 
 class FakeMessage:
@@ -333,8 +337,16 @@ def test_call_report_agent_routes_directly_to_generate_report(adapter: BackendAd
                 "requires_mart_review": False,
                 "reason": "계획 완료",
             },
-            {"next_action": "call_report_agent", "reason": "근거 준비 완료"},
-            {
+                {"next_action": "call_report_agent", "reason": "근거 준비 완료"},
+                {
+                    "semantic_valid": True,
+                    "severity": "info",
+                    "recommended_next_action": "",
+                    "reason": "근거와 리포트가 일치함",
+                    "missing_evidence": [],
+                    "alignment_notes": [],
+                },
+                {
                 "terminal_state": "completed",
                 "final_answer": "리포트 완료",
                 "next_action": "finalize",
@@ -352,7 +364,7 @@ def test_call_report_agent_routes_directly_to_generate_report(adapter: BackendAd
     assert subagents.calls == []
     assert report_generator.calls == 1
     assert result["completed_agents"] == ["sql_agent", "report_agent"]
-    assert result["semantic_validation_results"] == []
+    assert result["semantic_validation_results"][0]["semantic_valid"] is True
     assert result["step_summaries"][-1]["step"] == "generate_report"
 
 
@@ -387,12 +399,20 @@ def test_execution_guard_redirect_to_report_skips_subagent_call(adapter: Backend
                 "reason": "계획 완료",
             },
             {"next_action": "call_sql_agent", "reason": "SQL 검토"},
-            {
-                "allowed": False,
-                "next_action": "call_report_agent",
-                "reason": "기존 근거로 보고서 생성",
-            },
-            {
+                {
+                    "allowed": False,
+                    "next_action": "call_report_agent",
+                    "reason": "기존 근거로 보고서 생성",
+                },
+                {
+                    "semantic_valid": True,
+                    "severity": "info",
+                    "recommended_next_action": "",
+                    "reason": "근거와 리포트가 일치함",
+                    "missing_evidence": [],
+                    "alignment_notes": [],
+                },
+                {
                 "terminal_state": "completed",
                 "final_answer": "리포트 완료",
                 "next_action": "finalize",

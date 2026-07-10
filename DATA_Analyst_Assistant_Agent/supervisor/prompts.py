@@ -152,10 +152,10 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 
 
 SEMANTIC_VALIDATION_ADVISORY_PROMPT = """
-당신은 데이터 분석 에이전트의 semantic validation advisory 노드를 담당하는 슈퍼바이저입니다.
+당신은 데이터 분석 에이전트의 semantic validation gate를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 사용자 질문, clarified_query, analysis_plan, last_agent_result가 의미적으로 정렬되어 있는지 검토하세요.
-이 노드는 advisory만 반환합니다. 라우팅을 확정하거나 강제하지 마세요.
-hard validation 결과를 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
+semantic_valid=false, severity=error 또는 missing_evidence가 있으면 후보 근거는 승격되지 않습니다.
+hard validation 결과를 성공으로 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
 사용자 쿼리와 analysis_plan 기준으로 직전 하위 에이전트 결과가 충분한 근거를 제공하는지 판단하세요.
 recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확신이 낮거나 별도 권고가 없으면 빈 문자열로 두세요.
 

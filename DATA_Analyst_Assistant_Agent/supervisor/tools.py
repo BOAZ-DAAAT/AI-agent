@@ -70,6 +70,9 @@ def compact_agent_envelope(
         artifacts=[_artifact_summary(backend_adapter, artifact_id) for artifact_id in artifact_ids],
         validation_errors=validation_errors,
         validation_warnings=validation_warnings,
+        findings=envelope.validation.normalized_findings(),
+        retry_hint=envelope.retry_hint,
+        approval=envelope.approval,
         fallback_used=envelope.fallback_used,
         retryable=envelope.retry_hint.retryable,
         error=_error_message(envelope),
@@ -90,12 +93,15 @@ def _artifact_summary(backend_adapter: BackendAdapter, artifact_id: str) -> Arti
         kind=str(metadata.get("kind", "")),
         summary=_preview_summary(preview),
         uri=getattr(artifact, "uri", None),
+        run_id=str(getattr(artifact, "run_id", "") or ""),
+        content_hash=getattr(artifact, "content_hash", None),
+        parent_ids=list(getattr(artifact, "parent_ids", None) or []),
+        metadata=dict(metadata),
+        preview=dict(preview) if isinstance(preview, dict) else {},
     )
 
 
 def _status_value(envelope: AgentEnvelope) -> str:
-    if envelope.approval.required:
-        return AgentStatus.approval_required.value
     if isinstance(envelope.status, AgentStatus):
         return envelope.status.value
     status = str(envelope.status)

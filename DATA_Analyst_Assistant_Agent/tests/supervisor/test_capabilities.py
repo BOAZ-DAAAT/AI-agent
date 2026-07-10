@@ -50,3 +50,23 @@ def test_default_capabilities_capture_or_artifact_preconditions() -> None:
         "eda_agent",
         "analysis_agent",
     ]
+
+
+def test_default_capabilities_declare_required_output_evidence_contracts() -> None:
+    capabilities = {item.agent: item for item in DEFAULT_AGENT_CAPABILITIES}
+
+    assert [(item.type, item.kind) for item in capabilities["sql_agent"].output_evidence] == [
+        ("sql_query", "generated_sql"),
+        ("sql_result", "sql_result"),
+    ]
+    assert [(item.type, item.kind) for item in capabilities["eda_agent"].output_evidence] == [
+        ("data_profile", "eda_summary")
+    ]
+    assert [(item.type, item.kind) for item in capabilities["analysis_agent"].output_evidence] == [
+        ("file", "analysis_result")
+    ]
+    assert [(item.type, item.kind) for item in capabilities["report_agent"].output_evidence] == [
+        ("report", "final_report")
+    ]
+    assert capabilities["analysis_agent"].input_evidence_mode == "any"
+    assert capabilities["report_agent"].input_evidence_mode == "any"

@@ -11,6 +11,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     artifact_ids_by_agent,
     empty_supervisor_state,
     merge_agent_result,
+    normalize_supervisor_state,
+    promote_pending_result,
+    stage_candidate_result,
     to_orchestration_state,
 )
 
@@ -143,12 +146,11 @@ def test_merge_agent_result_marks_approval_required_as_pending_not_completed() -
     merged = merge_agent_result(state, result)
 
     assert merged["completed_agents"] == []
-    assert merged["pending_approval"] == {
-        "approval_id": "run_001:sql_agent:approval",
-        "agent": "sql_agent",
-        "reason": "데이터마트 사용 승인이 필요합니다",
-        "approval_type": "agent_approval",
-    }
+    assert merged["pending_approval"]["approval_id"] == "run_001:sql_agent:approval"
+    assert merged["pending_approval"]["agent"] == "sql_agent"
+    assert merged["pending_approval"]["reason"] == "데이터마트 사용 승인이 필요합니다"
+    assert merged["pending_approval"]["candidate_id"]
+    assert merged["pending_approval"]["validation_id"]
     assert merged["terminal_state"] == SupervisorTerminalState.needs_user_approval.value
 
 
@@ -292,3 +294,78 @@ def test_merge_agent_result_rejects_non_json_serializable_existing_state() -> No
                 summary="SQL 실행 완료",
             ),
         )
+
+
+def test_stage_candidate_does_not_pollute_operational_state_until_promotion() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="SQL 완료",
+        artifact_ids=["artifact_sql"],
+        artifacts=[ArtifactSummary(artifact_id="artifact_sql", type="sql_result", kind="sql_result")],
+    )
+
+    staged = stage_candidate_result(
+        state,
+        result,
+        {"generated_sql": "SELECT 42", "error_state": {"warning": "candidate only"}},
+    )
+
+    assert staged["pending_result"]["result"]["summary"] == "SQL 완료"
+    assert staged["artifacts"] == {}
+    assert staged["completed_agents"] == []
+    assert staged["generated_sql"] == ""
+    assert staged["error_state"] == {}
+
+    promoted = promote_pending_result(staged)
+
+    assert promoted["pending_result"] is None
+    assert promoted["completed_agents"] == ["sql_agent"]
+    assert promoted["generated_sql"] == "SELECT 42"
+    assert promoted["accepted_evidence"]["sql_agent"][0]["artifact_id"] == "artifact_sql"
+
+
+def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_them() -> None:
+    legacy = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    legacy.pop("state_schema_version")
+    legacy["artifacts"] = {
+        "sql_agent": [{"artifact_id": "legacy_sql", "type": "sql_result", "kind": "sql_result"}]
+    }
+    legacy["completed_agents"] = ["sql_agent"]
+
+    normalized = normalize_supervisor_state(legacy)
+    normalized_twice = normalize_supervisor_state(normalized)
+
+    assert normalized["state_schema_version"] == 2
+    assert normalized["accepted_evidence"] == {}
+    assert normalized["artifacts"] == {}
+    assert normalized["completed_agents"] == []
+    assert normalized["quarantined_artifacts"][0]["artifact_id"] == "legacy_sql"
+    assert normalized_twice == normalized
+
+
+def test_normalize_v2_rebuilds_compatibility_projections_from_accepted_evidence() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="매출 요약",
+        datasource_id=None,
+    )
+    state["artifacts"] = {"sql_agent": [{"artifact_id": "unvalidated"}]}
+    state["completed_agents"] = ["sql_agent"]
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["artifacts"] == {}
+    assert normalized["completed_agents"] == []
