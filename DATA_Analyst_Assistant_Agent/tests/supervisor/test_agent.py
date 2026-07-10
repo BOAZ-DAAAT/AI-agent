@@ -546,7 +546,11 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
     )
 
 
-def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rerun(monkeypatch) -> None:
+@pytest.mark.parametrize("candidate_status", ["success", "approval_required"])
+def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rerun(
+    monkeypatch,
+    candidate_status: str,
+) -> None:
     adapter = FakeBackendAdapter()
     adapter.artifact_hashes["artifact_sql"] = "hash_sql"
     base = {
@@ -581,7 +585,7 @@ def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rer
             "state_updates": {"generated_sql": "SELECT 1"},
             "result": {
                 "agent": "sql_agent",
-                "status": "success",
+                "status": candidate_status,
                 "summary": "SQL 완료",
                 "artifact_ids": ["artifact_sql"],
                 "artifacts": [{"artifact_id": "artifact_sql", "content_hash": "hash_sql"}],
@@ -608,6 +612,7 @@ def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rer
     assert as_node == "resolve_candidate"
     assert updates["pending_result"] is None
     assert updates["completed_agents"] == ["sql_agent"]
+    assert updates["agent_results"][-1]["status"] == "success"
     assert updates["generated_sql"] == "SELECT 1"
 
 

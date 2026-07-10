@@ -142,10 +142,14 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "valid": True,
                 "next_action": "decide_next_action",
                 "reason": "유효함",
-                "terminal_state": "running",
-                "final_answer": "",
-                "decision": "accept",
-            },
+                    "terminal_state": "running",
+                    "final_answer": "",
+                    "decision": "accept",
+                    "reason_code": "none",
+                    "failure_reason": "",
+                    "repeated_failure": False,
+                    "failure_streak": None,
+                },
         ),
         (
             SemanticValidationAdvisoryDecision,
@@ -455,6 +459,35 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "analysis_agent",
     ]
     assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
+
+
+def test_finalization_context_includes_latest_validation_agent_failure_streak() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    analysis_streak = {
+        "reason_code": "method_review_failed",
+        "failure_reason": "wrong method",
+        "signature": '["method_review_failed", "wrong method"]',
+        "consecutive_count": 2,
+    }
+    state["failure_streaks"] = {
+        "analysis_agent": analysis_streak,
+        "sql_agent": {
+            "reason_code": "timeout",
+            "failure_reason": "timeout",
+            "signature": '["timeout", "timeout"]',
+            "consecutive_count": 1,
+        },
+    }
+    state["validation_results"] = [{"agent": "analysis_agent", "valid": False}]
+
+    context = build_finalization_context(state)
+
+    assert context["recent_failure_streak"] == analysis_streak
 
 
 def test_summarize_agent_step_is_compact() -> None:

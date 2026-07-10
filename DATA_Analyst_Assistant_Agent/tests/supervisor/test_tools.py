@@ -204,7 +204,12 @@ class FailedAgent:
             status=AgentStatus.failed,
             agent_name="sql_agent",
             summary="SQL 실행 실패",
-            retry_hint=RetryHint(retryable=True, reason_code="SQL_TIMEOUT"),
+            retry_hint=RetryHint(
+                retryable=True,
+                reason_code="SQL_TIMEOUT",
+                details={"failure_reason": "database did not respond"},
+            ),
+            error="원본 SQL timeout 오류",
         )
 
 
@@ -215,8 +220,9 @@ def test_subagent_adapter_preserves_failed_retry_hint_and_error() -> None:
 
     assert result.agent_result.status == "failed"
     assert result.agent_result.retryable is True
-    assert "SQL 실행 실패" in result.agent_result.error
-    assert "SQL_TIMEOUT" in result.agent_result.error
+    assert result.agent_result.error == "원본 SQL timeout 오류"
+    assert result.agent_result.retry_hint.reason_code == "SQL_TIMEOUT"
+    assert result.agent_result.retry_hint.details["failure_reason"] == "database did not respond"
 
 
 class StructuredFindingAgent:

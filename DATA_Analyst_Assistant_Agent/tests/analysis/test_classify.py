@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.classify import resolve_time_grain
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.classify import (
+    classify_intent,
+    resolve_time_grain,
+)
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext, AnalysisIntent
+from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 
 def _frame(dates: list[str]) -> pd.DataFrame:
@@ -41,3 +47,39 @@ def test_missing_or_unparseable_time_column_returns_none() -> None:
     assert resolve_time_grain(_frame(["2026-06-01"]), "nope") == (None, None)
     bad = pd.DataFrame({"order_date": ["n/a", "unknown"], "amount": [1, 2]})
     assert resolve_time_grain(bad, "order_date") == (None, None)
+
+
+class _CapturingStructuredModel:
+    def __init__(self, result: AnalysisIntent) -> None:
+        self.result = result
+        self.messages = []
+
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, messages):
+        self.messages = messages
+        return self.result
+
+
+def test_context_builder_copies_last_failure_and_classifier_serializes_it() -> None:
+    failure = {
+        "reason_code": "method_review_failed",
+        "failure_reason": "wrong method",
+    }
+    state = OrchestrationState(
+        run_id="run_001",
+        user_query="매출 합계를 분석해줘",
+        retry_context={"last_failure": failure},
+    )
+    dataframe = pd.DataFrame({"amount": [10, 20]})
+    context = build_analysis_context(state, dataframe, [])
+    model = _CapturingStructuredModel(AnalysisIntent(objective="매출 합계"))
+
+    classify_intent(context, dataframe, model=model)
+
+    assert context.last_failure == failure
+    human_message = model.messages[1].content
+    assert '"last_failure"' in human_message
+    assert "method_review_failed" in human_message
+    assert "wrong method" in human_message

@@ -14,6 +14,7 @@ isolation; hard isolation is the Docker executor follow-up.
 from __future__ import annotations
 
 import builtins
+import json
 from typing import Any, Callable
 
 import pandas as pd
@@ -111,7 +112,7 @@ def _primitives(records: list[dict[str, Any]]) -> dict[str, Callable[..., Any]]:
 
 
 def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
-    return (
+    prompt = (
         f"Objective: {intent.objective}\n"
         f"Analysis focus: {intent.analysis_focus}\n"
         f"Domain framing: {domain_framing(intent.domain)}\n"
@@ -126,6 +127,12 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         f"Temporal: {context.temporal_columns}\n"
         f"Sample rows: {context.sample_rows}\n"
     )
+    if context.last_failure:
+        prompt += (
+            "\nPrevious Supervisor failure:\n"
+            f"{json.dumps(context.last_failure, ensure_ascii=False, sort_keys=True)}\n"
+        )
+    return prompt
 
 
 def generate_analysis_code(

@@ -107,6 +107,7 @@ class AnalysisContext(BaseModel):
     eda_quality_statuses: list[str] = Field(default_factory=list)
     eda_key_issues: list[str] = Field(default_factory=list)
     source_artifact_ids: list[str] = Field(default_factory=list)
+    last_failure: dict[str, str] | None = None
 
 
 class AnalysisExecutionPlan(BaseModel):
