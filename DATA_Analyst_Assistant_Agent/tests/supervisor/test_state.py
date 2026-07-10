@@ -120,7 +120,11 @@ def test_to_orchestration_state_preserves_existing_agent_artifacts() -> None:
     }
     assert orchestration.catalog_summary == catalog_summary
     assert orchestration.completed_agents == ["sql_agent"]
-    assert orchestration.retry_context == {"sql_agent": 1}
+    assert orchestration.retry_context == {
+        "sql_agent": 1,
+        "last_error": "",
+        "retryable": False,
+    }
     assert orchestration.retry_counts == {"sql_agent": 1}
     assert orchestration.max_retry_per_agent == 3
     assert orchestration.generated_sql == "SELECT 1 AS sample_value"

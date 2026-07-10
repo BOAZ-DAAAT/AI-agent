@@ -78,7 +78,7 @@ class SequencedSubAgentAdapter:
         return self.results[agent_name].pop(0)
 
 
-def _state(user_query: str = "월별 매출 추이를 분석해줘") -> dict[str, Any]:
+def _state(user_query: str = "매출") -> dict[str, Any]:
     return empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",

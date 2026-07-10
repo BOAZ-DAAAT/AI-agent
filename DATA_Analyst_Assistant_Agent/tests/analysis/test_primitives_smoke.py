@@ -31,6 +31,10 @@ def test_survival_primitive_runs() -> None:
 
 
 def test_geospatial_primitive_runs() -> None:
+    pytest.importorskip("geopandas")
+    pytest.importorskip("esda")
+    pytest.importorskip("libpysal")
+
     records = [
         {"latitude": 37.50 + i * 0.001, "longitude": 127.00 + i * 0.001, "sales": 100.0 if i < 6 else 10.0}
         for i in range(12)
@@ -48,6 +52,8 @@ def test_geospatial_primitive_runs() -> None:
 
 
 def test_optimization_primitive_runs() -> None:
+    pytest.importorskip("ortools")
+
     out = ANALYSIS_TOOLS["optimize_business_allocation"].invoke({
         "records": [
             {"channel": "search", "value": 12.0, "cost": 4.0},
@@ -64,6 +70,9 @@ def test_optimization_primitive_runs() -> None:
 
 
 def test_mmm_and_clv_primitives_enforce_data_contracts() -> None:
+    pytest.importorskip("arviz")
+    pytest.importorskip("pymc_marketing")
+
     # Full Bayesian fits are heavy; assert the vetted data-contract guards hold.
     with pytest.raises(ValueError, match="at least 52"):
         ANALYSIS_TOOLS["run_bayesian_mmm"].invoke({
