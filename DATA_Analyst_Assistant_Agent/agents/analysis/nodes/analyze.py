@@ -46,6 +46,7 @@ class AnalysisOutcome:
     result: dict[str, Any] | None = None
     critique: CodeCritique | None = None
     error_history: list[dict[str, str]] = field(default_factory=list)
+    early_stop_reason: str = ""
 
 
 def run_analysis(
@@ -64,6 +65,7 @@ def run_analysis(
     last_code: GeneratedAnalysisCode | None = None
     last_result: dict[str, Any] | None = None
     last_critique: CodeCritique | None = None
+    previous_failure_signature: tuple[str, str] | None = None
 
     for attempt in range(1, max_attempts + 1):
         code = generate_analysis_code(
@@ -75,7 +77,20 @@ def run_analysis(
             result = execute_generated_code(code, dataframe)
         except AnalysisCodeError as exc:
             feedback = f"The previous code failed to run: {exc}. Fix it and regenerate."
-            history.append({"stage": "execute", "code": code.code, "error": str(exc)})
+            error = str(exc)
+            history.append({"stage": "execute", "code": code.code, "error": error})
+            signature = _failure_signature("execute", error)
+            if signature == previous_failure_signature:
+                return AnalysisOutcome(
+                    status="failed",
+                    attempts=attempt,
+                    code=last_code,
+                    result=last_result,
+                    critique=last_critique,
+                    error_history=history,
+                    early_stop_reason="same execution failure repeated after regeneration",
+                )
+            previous_failure_signature = signature
             continue
 
         critique = deterministic_precheck(intent, context, code, result)
@@ -98,6 +113,18 @@ def run_analysis(
 
         feedback = critique.feedback or "; ".join(critique.method_issues)
         history.append({"stage": "critic", "code": code.code, "error": feedback})
+        signature = _failure_signature("critic", feedback)
+        if signature == previous_failure_signature:
+            return AnalysisOutcome(
+                status="failed",
+                attempts=attempt,
+                code=last_code,
+                result=last_result,
+                critique=last_critique,
+                error_history=history,
+                early_stop_reason="same critic failure repeated after regeneration",
+            )
+        previous_failure_signature = signature
 
     return AnalysisOutcome(
         status="failed",
@@ -107,3 +134,9 @@ def run_analysis(
         critique=last_critique,
         error_history=history,
     )
+
+
+def _failure_signature(stage: str, error: str) -> tuple[str, str]:
+    """Compact a failure so repeated unresolved problems can stop early."""
+
+    return stage, " ".join(str(error or "").split()).lower()

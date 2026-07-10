@@ -84,6 +84,8 @@ def build_result_from_outcome(
     if outcome.status == "failed":
         reason = outcome.critique.feedback if outcome.critique else "did not pass method review"
         limitations.append(f"Analysis did not pass method review after {outcome.attempts} attempts: {reason}")
+        if outcome.early_stop_reason:
+            limitations.append(f"Analysis stopped early: {outcome.early_stop_reason}.")
     limitations.extend(_eda_limitations(profiles))
 
     review_required = intent.requires_human_review or outcome.status == "failed"

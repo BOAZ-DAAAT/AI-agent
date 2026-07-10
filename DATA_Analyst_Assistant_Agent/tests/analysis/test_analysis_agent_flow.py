@@ -20,6 +20,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import AgentStatus
 
 
 class _Structured:
@@ -96,3 +97,50 @@ def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter
     assert parsed.answer_coverage.used_metrics == ["revenue"]
     assert parsed.answer_coverage.used_dimensions == ["category"]
     assert all(check.passed for check in envelope.validation.local_checks)
+
+
+def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: BackendAdapter) -> None:
+    run = adapter.create_run()
+    sql_ref = adapter.register_artifact(
+        run.run_id,
+        ArtifactType.sql_result,
+        content_text="category,revenue\nA,10\nA,12\nB,20\nB,22\n",
+        filename="result.csv",
+        created_by_tool="test.sql",
+        preview={"row_count": 4, "columns": ["category", "revenue"]},
+    )
+    state = OrchestrationState(
+        run_id=run.run_id,
+        user_query="which category has the most revenue",
+        goal="which category has the most revenue",
+        route_kind="comprehensive",
+        plan=AnalysisPlan(goal="revenue by category", metric="revenue", dimension="category", route_kind="comprehensive"),
+        max_retry_per_agent=1,
+    )
+    state.artifact_ids = {"sql_agent": [sql_ref.artifact_id]}
+
+    envelope = AnalysisAgent().run(
+        state,
+        AgentRuntime(adapter),
+        planner_model=_FakeModel([AnalysisIntent(objective="revenue by category", domain="finance", metric_hints=["revenue"], dimension_hints=["category"])]),
+        code_generator_model=_FakeModel([_GOOD_CODE, _GOOD_CODE, _GOOD_CODE]),
+        critic_model=_FakeModel([CodeCritique(verdict="fail", feedback="wrong method")] * 3),
+    )
+
+    artifact = adapter.get_artifact(envelope.artifact_ids()[0])
+    payload = json.loads(adapter.read_artifact_text(artifact.artifact_id))
+    parsed = AnalysisResult.model_validate(payload)
+
+    assert parsed.human_review.required is True
+    assert envelope.status == AgentStatus.failed
+    assert envelope.approval.required is False
+    assert envelope.retry_hint.retryable is True
+    assert envelope.retry_hint.reason_code == "method_review_failed"
+    assert envelope.error == "wrong method"
+    assert "wrong method" in envelope.summary
+    assert envelope.retry_hint.details == {
+        "terminal_reason": "method_review_failed",
+        "failure_reason": "wrong method",
+        "codegen_attempts": 2,
+        "agent_retry_budget": 1,
+    }
