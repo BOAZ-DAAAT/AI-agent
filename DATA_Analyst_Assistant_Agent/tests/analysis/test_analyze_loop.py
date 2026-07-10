@@ -113,16 +113,17 @@ def test_deterministic_precheck_reflects_before_critic() -> None:
     assert outcome.result["statistics"]["sum_revenue"] == 60
 
 
-def test_persistent_critic_failure_reports_failed() -> None:
+def test_repeated_critic_failure_stops_early() -> None:
     gen = _FakeModel([_GOOD_CODE, _GOOD_CODE, _GOOD_CODE])
     crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")] * 3)
     outcome = run_analysis(
         _intent(), _context(), _df(), code_generator_model=gen, critic_model=crit, max_attempts=3
     )
     assert outcome.status == "failed"
-    assert outcome.attempts == 3
+    assert outcome.attempts == 2
     assert outcome.critique.verdict == "fail"
-    assert len(outcome.error_history) == 3
+    assert len(outcome.error_history) == 2
+    assert outcome.early_stop_reason == "same critic failure repeated after regeneration"
 
 
 def test_critic_uses_dedicated_model_env(monkeypatch) -> None:
