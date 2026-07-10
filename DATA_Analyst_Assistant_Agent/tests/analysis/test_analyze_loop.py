@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.analyze import run_analysis
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes import critic as critic_module
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisIntent,
@@ -74,6 +75,44 @@ def test_critic_failure_reflects_then_passes() -> None:
     assert outcome.error_history[0]["stage"] == "critic"
 
 
+def test_deterministic_precheck_reflects_before_critic() -> None:
+    wrong_code = GeneratedAnalysisCode(
+        rationale="wrong metric",
+        code=(
+            "total = int(df['x'].sum())\n"
+            "result = {'summary': 'sum x', 'findings': ['sum x'], "
+            "'statistics': {'sum_x': total}, 'limitations': []}\n"
+        ),
+    )
+    right_code = GeneratedAnalysisCode(
+        rationale="right metric",
+        code=(
+            "total = int(df['revenue'].sum())\n"
+            "result = {'summary': 'sum revenue', 'findings': ['sum revenue'], "
+            "'statistics': {'sum_revenue': total}, 'limitations': []}\n"
+        ),
+    )
+    intent = AnalysisIntent(objective="sum revenue", metric_hints=["revenue"])
+    context = AnalysisContext(
+        user_question="sum revenue",
+        goal="sum revenue",
+        route_kind="simple",
+        columns=["x", "revenue"],
+        metric_hint="revenue",
+    )
+    df = pd.DataFrame({"x": [1, 2, 3], "revenue": [10, 20, 30]})
+    gen = _FakeModel([wrong_code, right_code])
+    crit = _FakeModel([CodeCritique(verdict="pass")])
+
+    outcome = run_analysis(intent, context, df, code_generator_model=gen, critic_model=crit)
+
+    assert outcome.status == "passed"
+    assert outcome.attempts == 2
+    assert outcome.error_history[0]["stage"] == "critic"
+    assert "pre-check" in outcome.error_history[0]["error"]
+    assert outcome.result["statistics"]["sum_revenue"] == 60
+
+
 def test_persistent_critic_failure_reports_failed() -> None:
     gen = _FakeModel([_GOOD_CODE, _GOOD_CODE, _GOOD_CODE])
     crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")] * 3)
@@ -84,3 +123,22 @@ def test_persistent_critic_failure_reports_failed() -> None:
     assert outcome.attempts == 3
     assert outcome.critique.verdict == "fail"
     assert len(outcome.error_history) == 3
+
+
+def test_critic_uses_dedicated_model_env(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_get_chat_model(**kwargs):
+        seen.update(kwargs)
+        return _FakeModel([CodeCritique(verdict="pass")])
+
+    monkeypatch.setattr(critic_module, "get_chat_model", fake_get_chat_model)
+
+    verdict = critic_module.critique_analysis_code(
+        _intent(),
+        _GOOD_CODE,
+        {"summary": "ok", "findings": ["ok"], "statistics": {"sum": 6}, "limitations": []},
+    )
+
+    assert verdict.verdict == "pass"
+    assert seen["model_env"] == "ANALYSIS_CRITIC_MODEL"

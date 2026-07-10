@@ -19,7 +19,10 @@ from typing import Any
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.critic import critique_analysis_code
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.critic import (
+    critique_analysis_code,
+    deterministic_precheck,
+)
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     AnalysisCodeError,
     execute_generated_code,
@@ -75,9 +78,11 @@ def run_analysis(
             history.append({"stage": "execute", "code": code.code, "error": str(exc)})
             continue
 
-        critique = critique_analysis_code(
-            intent, code, result, model=critic_model
-        )
+        critique = deterministic_precheck(intent, context, code, result)
+        if critique is None:
+            critique = critique_analysis_code(
+                intent, code, result, model=critic_model
+            )
         last_result = result
         last_critique = critique
 

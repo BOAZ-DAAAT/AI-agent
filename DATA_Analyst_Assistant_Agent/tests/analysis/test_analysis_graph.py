@@ -64,6 +64,8 @@ def test_graph_produces_valid_analysis_result() -> None:
     assert parsed.intent.domain == "finance"
     assert parsed.generated_code
     assert parsed.codegen_attempts == 1
+    assert parsed.answer_coverage.coverage_status == "full"
+    assert parsed.answer_coverage.used_metrics == ["revenue"]
     assert parsed.chart_status == "not_needed"  # chart branch ran, nothing to inspect
     assert all(check.passed for check in checks)
 
