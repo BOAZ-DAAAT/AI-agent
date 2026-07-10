@@ -17,9 +17,12 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.supervisor.checkpoint import open_sqlite_checkpointer
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
+from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
+    normalize_supervisor_state,
+    promote_pending_result,
     to_orchestration_state,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import SubAgentAdapter
@@ -143,6 +146,16 @@ class SupervisorAgent:
         if not isinstance(pending_approval, dict):
             return None
 
+        pending_result = values.get("pending_result")
+        if isinstance(pending_result, dict) and pending_approval.get("candidate_id"):
+            return self._resume_validated_candidate(
+                graph,
+                config,
+                values,
+                pending_result,
+                pending_approval,
+            )
+
         next_action = self._next_action_for_pending_agent(pending_approval.get("agent"))
         if next_action is None:
             return None
@@ -154,6 +167,72 @@ class SupervisorAgent:
             "final_answer": "",
         }
         returned_config = graph.update_state(config, updates, as_node="summarize_step")
+        return graph.invoke(None, returned_config or config)
+
+    def _resume_validated_candidate(
+        self,
+        graph: Any,
+        config: dict[str, Any],
+        values: dict[str, Any],
+        pending_result: dict[str, Any],
+        pending_approval: dict[str, Any],
+    ) -> Any:
+        candidate_identity_matches = (
+            pending_approval.get("candidate_id") == pending_result.get("candidate_id")
+            and pending_approval.get("validation_id") == pending_result.get("validation_id")
+        )
+        expected_hashes = dict(pending_approval.get("content_hashes") or {})
+        hashes_match = candidate_identity_matches and bool(expected_hashes)
+        if hashes_match:
+            for artifact_id, expected_hash in expected_hashes.items():
+                try:
+                    record = self.adapter.get_artifact(artifact_id)
+                except Exception:
+                    hashes_match = False
+                    break
+                if str(getattr(record, "content_hash", "") or "") != str(expected_hash):
+                    hashes_match = False
+                    break
+
+        normalized = normalize_supervisor_state(values)
+        if hashes_match:
+            updates = promote_pending_result(normalized)
+            updates.update(
+                {
+                    "pending_approval": None,
+                    "terminal_state": "running",
+                    "final_answer": "",
+                }
+            )
+            returned_config = graph.update_state(config, updates, as_node="resolve_candidate")
+            return graph.invoke(None, returned_config or config)
+
+        events = list(normalized.get("run_events", []))
+        events.append(
+            {
+                "type": "approval.invalidated",
+                "candidate_id": pending_result.get("candidate_id"),
+                "validation_id": pending_result.get("validation_id"),
+                "reason": "승인 대상의 식별자 또는 content hash가 변경되었습니다.",
+            }
+        )
+        append_event = getattr(self.adapter, "append_run_event", None)
+        if append_event is not None:
+            append_event(
+                str(values.get("current_run_id") or ""),
+                "approval.invalidated",
+                "승인 대상의 식별자 또는 content hash가 변경되었습니다.",
+                node_name="supervisor",
+                metadata=events[-1],
+            )
+        updates = {
+            **normalized,
+            "pending_approval": None,
+            "terminal_state": "running",
+            "final_answer": "",
+            "run_events": events,
+        }
+        returned_config = graph.update_state(config, updates, as_node="stage_candidate")
         return graph.invoke(None, returned_config or config)
 
     @staticmethod
@@ -196,6 +275,7 @@ class SupervisorAgent:
     def _build_runtime_graph(self, checkpointer: Any):
         return build_graph(
             SubAgentAdapter(backend_adapter=self.adapter),
+            report_generator=SupervisorReportGenerator(self.adapter),
             model=self._decision_model(),
             checkpointer=checkpointer,
         )

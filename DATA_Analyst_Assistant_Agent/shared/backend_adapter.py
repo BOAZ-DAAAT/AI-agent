@@ -111,6 +111,17 @@ class BackendAdapter:
     def get_artifact(self, artifact_id: str) -> ArtifactRecord:
         return self.services.artifact_registry.get_artifact(artifact_id)
 
+    def list_artifacts(
+        self,
+        *,
+        run_id: str,
+        artifact_type: ArtifactType | str | None = None,
+    ) -> list[ArtifactRecord]:
+        return self.services.artifact_registry.list_artifacts(
+            run_id=run_id,
+            type=artifact_type,
+        )
+
     def run_sql_preview(
         self,
         run_id: str,

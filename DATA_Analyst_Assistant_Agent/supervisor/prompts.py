@@ -122,6 +122,7 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 허용 next_action:
 - clarify
 - create_plan
+- decide_next_action
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -146,15 +147,15 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 - final_answer: string
 
 예시:
-{"valid":true,"next_action":"create_plan","reason":"SQL 결과가 유효합니다.","terminal_state":"running","final_answer":""}
+{"valid":true,"next_action":"decide_next_action","reason":"SQL 결과가 유효해 Supervisor의 다음 행동 재판단으로 이동합니다.","terminal_state":"running","final_answer":""}
 """.strip()
 
 
 SEMANTIC_VALIDATION_ADVISORY_PROMPT = """
-당신은 데이터 분석 에이전트의 semantic validation advisory 노드를 담당하는 슈퍼바이저입니다.
+당신은 데이터 분석 에이전트의 semantic validation gate를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 사용자 질문, clarified_query, analysis_plan, last_agent_result가 의미적으로 정렬되어 있는지 검토하세요.
-이 노드는 advisory만 반환합니다. 라우팅을 확정하거나 강제하지 마세요.
-hard validation 결과를 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
+semantic_valid=false, severity=error 또는 missing_evidence가 있으면 후보 근거는 승격되지 않습니다.
+hard validation 결과를 성공으로 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
 사용자 쿼리와 analysis_plan 기준으로 직전 하위 에이전트 결과가 충분한 근거를 제공하는지 판단하세요.
 recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확신이 낮거나 별도 권고가 없으면 빈 문자열로 두세요.
 
@@ -195,6 +196,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 허용 next_action:
 - clarify
 - create_plan
+- decide_next_action
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -214,7 +216,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 - reason: string
 
 예시:
-{"step":"validate_subagent_result","agent":"sql_agent","action":"call_sql_agent","summary":"월별 매출 집계 SQL 산출물이 생성되었습니다.","artifact_ids":["artifact_sql"],"next_action":"call_eda_agent","reason":"다음 단계 탐색에 필요한 요약입니다."}
+{"step":"validate_subagent_result","agent":"sql_agent","action":"call_sql_agent","summary":"월별 매출 집계 SQL 산출물이 생성되었습니다.","artifact_ids":["artifact_sql"],"next_action":"decide_next_action","reason":"Supervisor의 다음 행동 재판단에 필요한 요약입니다."}
 """.strip()
 
 

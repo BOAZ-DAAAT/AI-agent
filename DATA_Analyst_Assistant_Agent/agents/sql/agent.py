@@ -8,7 +8,14 @@ import json
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AgentStatus, LocalCheck, OrchestrationState, ValidationBlock
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    AgentStatus,
+    LocalCheck,
+    OrchestrationState,
+    ValidationBlock,
+    ValidationFinding,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_artifact import build_validation_summary_payload
 
 
@@ -214,18 +221,42 @@ class SQLAgent:
             )
 
         has_error = any(not check.passed and check.severity == "error" for check in checks)
+        findings = [self._validation_finding(item) for item in result.get("validation_findings") or []]
         return AgentEnvelope(
             status=AgentStatus.failed if has_error else AgentStatus.success,
             agent_name=self.name,
             summary=result.get("final_answer") or "SQL LangGraph agent completed.",
             artifact_refs=[result_ref, plan_ref, sql_plan_ref, sql_ref, validation_ref],
-            validation=ValidationBlock(local_checks=checks),
+            validation=ValidationBlock(local_checks=checks, findings=findings),
             retry_hint={
-                "retryable": has_error,
+                "retryable": bool(retry_hint.get("retryable", has_error)),
                 "suggested_action": retry_hint.get("suggested_action", "fix_sql"),
                 "reason_code": retry_hint.get("reason_code", "main_sql_agent_validation" if has_error else "none"),
                 "details": retry_hint.get("details", {}),
             },
+        )
+
+    @staticmethod
+    def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
+        severity = str(item.get("severity") or "info")
+        retryable = bool(item.get("retryable", False))
+        if retryable:
+            disposition = "retry_required"
+        elif severity == "error":
+            disposition = "blocking"
+        elif severity == "warning":
+            disposition = "limitation"
+        else:
+            disposition = "advisory"
+        return ValidationFinding(
+            code=str(item.get("code") or item.get("category") or "sql_validation"),
+            source=str(item.get("source") or "sql_langgraph"),
+            severity=severity,
+            disposition=disposition,
+            message=str(item.get("message") or item.get("detail") or "SQL validation finding"),
+            retryable=retryable,
+            suggested_action=str(item.get("suggested_action") or ""),
+            details=dict(item.get("details") or {}),
         )
 
     @staticmethod

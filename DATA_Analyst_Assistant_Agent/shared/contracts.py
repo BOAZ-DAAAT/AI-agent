@@ -36,21 +36,62 @@ class BusinessFlag(BaseModel):
     message: str
 
 
+FindingDisposition = Literal["advisory", "limitation", "retry_required", "blocking"]
+
+
+class ValidationFinding(BaseModel):
+    code: str
+    source: str
+    severity: Literal["info", "warning", "error"] = "info"
+    disposition: FindingDisposition = "advisory"
+    message: str
+    retryable: bool = False
+    suggested_action: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ValidationBlock(BaseModel):
     local_checks: list[LocalCheck] = Field(default_factory=list)
     integrity_refs: list[ArtifactRef] = Field(default_factory=list)
     business_flags: list[BusinessFlag] = Field(default_factory=list)
+    findings: list[ValidationFinding] = Field(default_factory=list)
+
+    def normalized_findings(self) -> list[ValidationFinding]:
+        normalized = list(self.findings)
+        normalized.extend(
+            ValidationFinding(
+                code=check.name,
+                source="local_check",
+                severity=check.severity,
+                disposition="blocking" if check.severity == "error" else "limitation",
+                message=check.detail or check.name,
+                retryable=check.severity == "error",
+            )
+            for check in self.local_checks
+            if not check.passed and check.severity in {"warning", "error"}
+        )
+        normalized.extend(
+            ValidationFinding(
+                code=flag.code,
+                source="business_flag",
+                severity=flag.severity,
+                disposition="blocking" if flag.severity == "error" else "limitation",
+                message=flag.message,
+            )
+            for flag in self.business_flags
+            if flag.severity in {"warning", "error"}
+        )
+        return normalized
 
     @property
     def has_errors(self) -> bool:
-        return any(check.severity == "error" and not check.passed for check in self.local_checks) or any(
-            flag.severity == "error" for flag in self.business_flags
-        )
+        return any(finding.disposition == "blocking" for finding in self.normalized_findings())
 
     @property
     def has_warnings(self) -> bool:
-        return any(check.severity == "warning" and not check.passed for check in self.local_checks) or any(
-            flag.severity == "warning" for flag in self.business_flags
+        return any(
+            finding.disposition in {"limitation", "retry_required"}
+            for finding in self.normalized_findings()
         )
 
 
@@ -129,6 +170,7 @@ class OrchestrationState(BaseModel):
     generated_sql: str = ""
     retry_counts: dict[str, int] = Field(default_factory=dict)
     max_retry_per_agent: int = 1
+    limitations: list[str] = Field(default_factory=list)
 
     def add_artifacts(self, key: str, artifact_ids: list[str]) -> None:
         if not artifact_ids:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
 from typing import Any, Literal, TypedDict
 
@@ -8,8 +9,11 @@ from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AnalysisPlan,
+    ApprovalRequirement,
     OrchestrationState,
+    RetryHint,
     SupervisorTerminalState,
+    ValidationFinding,
 )
 
 
@@ -18,6 +22,7 @@ AgentStatusValue = Literal["success", "warning", "failed", "approval_required"]
 NextAction = Literal[
     "clarify",
     "create_plan",
+    "decide_next_action",
     "call_sql_agent",
     "call_eda_agent",
     "call_analysis_agent",
@@ -33,6 +38,11 @@ class ArtifactSummary(BaseModel):
     kind: str = ""
     summary: str = ""
     uri: str | None = None
+    run_id: str = ""
+    content_hash: str | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    preview: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentCompactResult(BaseModel):
@@ -43,6 +53,9 @@ class AgentCompactResult(BaseModel):
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     validation_errors: list[str] = Field(default_factory=list)
     validation_warnings: list[str] = Field(default_factory=list)
+    findings: list[ValidationFinding] = Field(default_factory=list)
+    retry_hint: RetryHint = Field(default_factory=RetryHint)
+    approval: ApprovalRequirement = Field(default_factory=ApprovalRequirement)
     fallback_used: bool = False
     retryable: bool = False
     error: str = ""
@@ -62,6 +75,9 @@ class PendingApproval(BaseModel):
     agent: AgentName
     reason: str
     approval_type: str
+    candidate_id: str = ""
+    validation_id: str = ""
+    content_hashes: dict[str, str] = Field(default_factory=dict)
 
 
 class SupervisorState(TypedDict, total=False):
@@ -86,6 +102,7 @@ class SupervisorState(TypedDict, total=False):
     artifacts: dict[str, list[dict[str, Any]]]
     validation_results: list[dict[str, Any]]
     semantic_validation_results: list[dict[str, Any]]
+    evidence_validation_results: list[dict[str, Any]]
     step_summaries: list[dict[str, Any]]
     completed_agents: list[str]
     failed_agents: list[str]
@@ -96,6 +113,14 @@ class SupervisorState(TypedDict, total=False):
     max_retry_per_agent: int
     llm_decisions: list[dict[str, Any]]
     decision_errors: list[dict[str, Any]]
+    pending_result: dict[str, Any] | None
+    result_history: list[dict[str, Any]]
+    accepted_evidence: dict[str, list[dict[str, Any]]]
+    rejected_results: list[dict[str, Any]]
+    quarantined_artifacts: list[dict[str, Any]]
+    state_schema_version: int
+    semantic_retry_counts: dict[str, int]
+    run_events: list[dict[str, Any]]
 
 
 def _ensure_json_serializable(state: SupervisorState) -> SupervisorState:
@@ -137,6 +162,7 @@ def empty_supervisor_state(
         "artifacts": {},
         "validation_results": [],
         "semantic_validation_results": [],
+        "evidence_validation_results": [],
         "step_summaries": [],
         "completed_agents": [],
         "failed_agents": [],
@@ -147,57 +173,214 @@ def empty_supervisor_state(
         "max_retry_per_agent": 1,
         "llm_decisions": [],
         "decision_errors": [],
+        "pending_result": None,
+        "result_history": [],
+        "accepted_evidence": {},
+        "rejected_results": [],
+        "quarantined_artifacts": [],
+        "state_schema_version": 2,
+        "semantic_retry_counts": {},
+        "run_events": [],
     }
     return _ensure_json_serializable(state)
 
 
 def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> SupervisorState:
-    agent_results = list(state.get("agent_results", []))
-    agent_results.append(result.model_dump(mode="json"))
-
-    artifacts = {agent: list(items) for agent, items in state.get("artifacts", {}).items()}
-    artifacts.setdefault(result.agent, [])
-    artifacts[result.agent].extend(artifact.model_dump(mode="json") for artifact in result.artifacts)
-
-    completed_agents = list(state.get("completed_agents", []))
-    failed_agents = list(state.get("failed_agents", []))
-    if result.status in {"success", "warning"} and result.agent not in completed_agents:
-        completed_agents.append(result.agent)
-    if result.status == "failed" and result.agent not in failed_agents:
-        failed_agents.append(result.agent)
-
-    merged: SupervisorState = {
-        **state,
-        "agent_results": agent_results,
-        "artifacts": artifacts,
-        "completed_agents": completed_agents,
-        "failed_agents": failed_agents,
-    }
-    if result.status in {"success", "warning"}:
-        pending_approval = merged.get("pending_approval")
-        if isinstance(pending_approval, dict) and pending_approval.get("agent") == result.agent:
-            merged["pending_approval"] = None
-            if merged.get("terminal_state") == SupervisorTerminalState.needs_user_approval.value:
-                merged["terminal_state"] = "running"
+    staged = stage_candidate_result(state, result, {})
     if result.status == "approval_required":
-        approval = PendingApproval(
-            approval_id=f"{state['current_run_id']}:{result.agent}:approval",
-            agent=result.agent,
-            reason=result.summary,
-            approval_type="agent_approval",
-        )
-        merged["pending_approval"] = approval.model_dump(mode="json")
-        merged["terminal_state"] = SupervisorTerminalState.needs_user_approval.value
-    if result.error:
-        merged["error_state"] = {
+        candidate = staged["pending_result"] or {}
+        staged["pending_approval"] = {
+            "approval_id": f"{state['current_run_id']}:{result.agent}:approval",
             "agent": result.agent,
-            "message": result.error,
-            "retryable": result.retryable,
+            "reason": result.approval.reason or result.summary,
+            "approval_type": result.approval.approval_type or "agent_approval",
+            "candidate_id": candidate.get("candidate_id", ""),
+            "validation_id": candidate.get("validation_id", ""),
+            "content_hashes": dict(candidate.get("content_hashes") or {}),
         }
-    return _ensure_json_serializable(merged)
+        staged["terminal_state"] = SupervisorTerminalState.needs_user_approval.value
+        return _ensure_json_serializable(staged)
+    return promote_pending_result(staged)
+
+
+def stage_candidate_result(
+    state: SupervisorState,
+    result: AgentCompactResult,
+    state_updates: dict[str, Any] | None = None,
+) -> SupervisorState:
+    normalized = normalize_supervisor_state(state)
+    candidate_id = f"candidate_{uuid4().hex}"
+    validation_id = f"validation_{uuid4().hex}"
+    candidate = {
+        "candidate_id": candidate_id,
+        "validation_id": validation_id,
+        "result": result.model_dump(mode="json"),
+        "state_updates": dict(state_updates or {}),
+        "content_hashes": {
+            artifact.artifact_id: artifact.content_hash
+            for artifact in result.artifacts
+            if artifact.content_hash
+        },
+    }
+    history = list(normalized.get("result_history", []))
+    history.append(candidate)
+    events = list(normalized.get("run_events", []))
+    events.append({"type": "result.staged", "candidate_id": candidate_id, "agent": result.agent})
+    return _ensure_json_serializable(
+        {**normalized, "pending_result": candidate, "result_history": history, "run_events": events}
+    )
+
+
+def promote_pending_result(state: SupervisorState) -> SupervisorState:
+    normalized = normalize_supervisor_state(state)
+    candidate = normalized.get("pending_result")
+    if not isinstance(candidate, dict):
+        raise ValueError("승격할 pending_result가 없습니다.")
+    result = AgentCompactResult.model_validate(candidate.get("result") or {})
+    if result.status not in {"success", "warning"}:
+        raise ValueError("성공 또는 경고 결과만 accepted evidence로 승격할 수 있습니다.")
+
+    agent_results = list(normalized.get("agent_results", []))
+    agent_results.append(result.model_dump(mode="json"))
+    accepted = {agent: list(items) for agent, items in normalized.get("accepted_evidence", {}).items()}
+    accepted.setdefault(result.agent, [])
+    summaries = list(result.artifacts)
+    known_ids = {item.artifact_id for item in summaries}
+    summaries.extend(
+        ArtifactSummary(artifact_id=artifact_id)
+        for artifact_id in result.artifact_ids
+        if artifact_id and artifact_id not in known_ids
+    )
+    for summary in summaries:
+        payload = summary.model_dump(mode="json")
+        if not any(item.get("artifact_id") == summary.artifact_id for item in accepted[result.agent]):
+            accepted[result.agent].append(payload)
+
+    completed = list(normalized.get("completed_agents", []))
+    if result.agent not in completed:
+        completed.append(result.agent)
+    failed = [agent for agent in normalized.get("failed_agents", []) if agent != result.agent]
+    promoted: SupervisorState = {
+        **normalized,
+        "pending_result": None,
+        "agent_results": agent_results,
+        "accepted_evidence": accepted,
+        "artifacts": {agent: list(items) for agent, items in accepted.items()},
+        "completed_agents": completed,
+        "failed_agents": failed,
+    }
+    promoted = _apply_candidate_state_updates(promoted, candidate.get("state_updates") or {})
+    pending_approval = promoted.get("pending_approval")
+    if isinstance(pending_approval, dict) and pending_approval.get("agent") == result.agent:
+        promoted["pending_approval"] = None
+        if promoted.get("terminal_state") == SupervisorTerminalState.needs_user_approval.value:
+            promoted["terminal_state"] = "running"
+    events = list(promoted.get("run_events", []))
+    events.append(
+        {
+            "type": "evidence.promoted",
+            "candidate_id": candidate.get("candidate_id"),
+            "validation_id": candidate.get("validation_id"),
+            "agent": result.agent,
+        }
+    )
+    promoted["run_events"] = events
+    return _ensure_json_serializable(promoted)
+
+
+def reject_pending_result(state: SupervisorState, reason: str) -> SupervisorState:
+    normalized = normalize_supervisor_state(state)
+    candidate = normalized.get("pending_result")
+    if not isinstance(candidate, dict):
+        return normalized
+    rejected = list(normalized.get("rejected_results", []))
+    rejected.append({**candidate, "reason": reason})
+    quarantined = list(normalized.get("quarantined_artifacts", []))
+    result = candidate.get("result") or {}
+    quarantined.extend(result.get("artifacts") or [])
+    events = list(normalized.get("run_events", []))
+    events.append({"type": "validation.rejected", "candidate_id": candidate.get("candidate_id"), "reason": reason})
+    return _ensure_json_serializable(
+        {
+            **normalized,
+            "pending_result": None,
+            "rejected_results": rejected,
+            "quarantined_artifacts": quarantined,
+            "run_events": events,
+        }
+    )
+
+
+def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
+    if int(state.get("state_schema_version", 0) or 0) >= 2:
+        accepted_evidence = {
+            agent: list(items) for agent, items in state.get("accepted_evidence", {}).items()
+        }
+        completed_agents: list[str] = []
+        for result in state.get("agent_results", []):
+            agent = str(result.get("agent") or "")
+            if result.get("status") in {"success", "warning"} and agent and agent not in completed_agents:
+                completed_agents.append(agent)
+        normalized: SupervisorState = {
+            **state,
+            "pending_result": state.get("pending_result"),
+            "result_history": list(state.get("result_history", [])),
+            "accepted_evidence": accepted_evidence,
+            "rejected_results": list(state.get("rejected_results", [])),
+            "quarantined_artifacts": list(state.get("quarantined_artifacts", [])),
+            "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+            "run_events": list(state.get("run_events", [])),
+            "state_schema_version": 2,
+            "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
+            "completed_agents": completed_agents,
+        }
+        return _ensure_json_serializable(normalized)
+
+    quarantined = list(state.get("quarantined_artifacts", []))
+    for agent, artifacts in (state.get("artifacts") or {}).items():
+        for artifact in artifacts:
+            quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
+    normalized = {
+        **state,
+        "state_schema_version": 2,
+        "pending_result": None,
+        "result_history": list(state.get("result_history", [])),
+        "accepted_evidence": {},
+        "rejected_results": list(state.get("rejected_results", [])),
+        "quarantined_artifacts": quarantined,
+        "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+        "run_events": list(state.get("run_events", [])),
+        "artifacts": {},
+        "agent_results": [],
+        "completed_agents": [],
+    }
+    return _ensure_json_serializable(normalized)
+
+
+def _apply_candidate_state_updates(state: SupervisorState, updates: dict[str, Any]) -> SupervisorState:
+    merged: SupervisorState = dict(state)
+    if updates.get("generated_sql"):
+        merged["generated_sql"] = str(updates["generated_sql"])
+    if "error_state" in updates:
+        merged["error_state"] = dict(updates.get("error_state") or {})
+    if "analysis_plan" in updates:
+        plan = dict(merged.get("analysis_plan") or {})
+        incoming = dict(updates.get("analysis_plan") or {})
+        for key in ("generated_sql", "source_sql"):
+            if key in incoming and not incoming[key]:
+                incoming.pop(key)
+        plan.update(incoming)
+        merged["analysis_plan"] = plan
+    if updates.get("planner_mode"):
+        plan = dict(merged.get("analysis_plan") or {})
+        plan["planner_mode"] = str(updates["planner_mode"])
+        merged["analysis_plan"] = plan
+    return merged
 
 
 def artifact_ids_by_agent(state: SupervisorState) -> dict[str, list[str]]:
+    if int(state.get("state_schema_version", 0) or 0) < 2:
+        return {}
     ids: dict[str, list[str]] = {}
 
     def append_unique(agent: str, artifact_id: Any) -> None:
@@ -214,7 +397,8 @@ def artifact_ids_by_agent(state: SupervisorState) -> dict[str, list[str]]:
             continue
         for artifact_id in result.get("artifact_ids", []):
             append_unique(agent, artifact_id)
-    for agent, artifacts in state.get("artifacts", {}).items():
+    evidence = state.get("accepted_evidence", state.get("artifacts", {}))
+    for agent, artifacts in evidence.items():
         agent_name = str(agent)
         if not agent_name:
             continue
@@ -226,6 +410,7 @@ def artifact_ids_by_agent(state: SupervisorState) -> dict[str, list[str]]:
 
 
 def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
+    state = normalize_supervisor_state(state)
     terminal_value = state.get("terminal_state")
     terminal_state = None
     if terminal_value and terminal_value != "running":
@@ -247,11 +432,14 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         if approval_id:
             approval_ids.append(approval_id)
     _error_state = state.get("error_state") or {}
-    _retry_context: dict = {
-        **(state.get("retry_counts") or {}),
-        "last_error": _error_state.get("message", ""),
-        "retryable": _error_state.get("retryable", False),
-    }
+    _retry_context: dict = dict(state.get("retry_counts") or {})
+    if _error_state:
+        _retry_context.update(
+            {
+                "last_error": _error_state.get("message", ""),
+                "retryable": _error_state.get("retryable", False),
+            }
+        )
     plan = AnalysisPlan(
         goal=str(plan_payload.get("goal") or state.get("latest_user_query") or ""),
         datasource_id=state.get("datasource_id"),
@@ -262,6 +450,12 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         generated_sql=generated_sql,
         source_sql=generated_sql,
     )
+    limitations = [
+        str(finding.get("message") or "")
+        for result in state.get("agent_results", [])
+        for finding in result.get("findings", [])
+        if finding.get("disposition") == "limitation" and finding.get("message")
+    ]
 
     return OrchestrationState(
         run_id=state["current_run_id"],
@@ -285,4 +479,5 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         generated_sql=generated_sql,
         retry_counts=dict(state.get("retry_counts", {})),
         max_retry_per_agent=int(state.get("max_retry_per_agent", 1)),
+        limitations=list(dict.fromkeys(limitations)),
     )
