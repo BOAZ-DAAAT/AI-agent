@@ -486,7 +486,6 @@ def make_semantic_validate_subagent_result_node(model: Any | None):
             return {
                 "semantic_validation_results": advisory_results,
                 "terminal_state": state.get("terminal_state", "running"),
-                "next_action": state.get("next_action", "create_plan"),
                 "current_step": "semantic_validate_subagent_result",
             }
 
@@ -497,7 +496,6 @@ def make_semantic_validate_subagent_result_node(model: Any | None):
         advisory_results.append(advisory_result)
         return {
             "semantic_validation_results": advisory_results,
-            "next_action": state.get("next_action", "create_plan"),
             "terminal_state": state.get("terminal_state", "running"),
             "current_step": "semantic_validate_subagent_result",
             "llm_decisions": _append_llm_decision(
@@ -858,13 +856,20 @@ def _route_after_semantic_validate(state: SupervisorState) -> str:
 def _route_after_summarize(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") == "call_report_agent":
+
+    next_action = state.get("next_action")
+    if next_action == "decide_next_action":
+        return "decide_next_action"
+    if next_action == "call_report_agent":
         return "generate_report"
-    if state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
+    if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
-    if state.get("next_action") in {"finalize", "fail"}:
+    if next_action in {"finalize", "fail"}:
         return "finalize"
-    return "decide_next_action"
+
+    raise ValueError(
+        f"summarize_step 이후 지원하지 않는 next_action입니다: {next_action!r}"
+    )
 
 
 def _default_final_answer_for_terminal_state(

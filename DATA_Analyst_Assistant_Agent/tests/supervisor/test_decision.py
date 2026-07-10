@@ -28,6 +28,11 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     parse_decision_json,
     parse_decision_json_as,
 )
+from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
+    DECIDE_NEXT_ACTION_PROMPT,
+    RESULT_VALIDATION_DECISION_PROMPT,
+    STEP_SUMMARY_DECISION_PROMPT,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
 from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
@@ -135,7 +140,7 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
             ResultValidationDecision,
             {
                 "valid": True,
-                "next_action": "create_plan",
+                "next_action": "decide_next_action",
                 "reason": "유효함",
                 "terminal_state": "running",
                 "final_answer": "",
@@ -160,7 +165,7 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "action": "call_sql_agent",
                 "summary": "SQL 완료",
                 "artifact_ids": ["artifact_sql"],
-                "next_action": "call_eda_agent",
+                "next_action": "decide_next_action",
                 "reason": "요약",
             },
         ),
@@ -263,6 +268,46 @@ def test_decide_next_action_propagates_invalid_model_action() -> None:
         decide_next_action(state, model=InvalidActionModel())
 
 
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (SupervisorDecision, {"next_action": "decide_next_action"}),
+        (
+            ExecutionGuardDecision,
+            {"allowed": True, "next_action": "decide_next_action"},
+        ),
+        (
+            SemanticValidationAdvisoryDecision,
+            {
+                "semantic_valid": True,
+                "recommended_next_action": "decide_next_action",
+            },
+        ),
+    ],
+)
+def test_llm_selectable_decisions_reject_internal_redecision_action(schema, payload) -> None:
+    with pytest.raises(ValidationError):
+        schema.model_validate(payload)
+
+
+@pytest.mark.parametrize("schema", [ResultValidationDecision, StepSummaryDecision])
+def test_internal_transition_decisions_allow_redecision_action(schema) -> None:
+    payload = (
+        {"valid": True, "next_action": "decide_next_action"}
+        if schema is ResultValidationDecision
+        else {
+            "step": "validate_subagent_result",
+            "action": "call_sql_agent",
+            "summary": "SQL 완료",
+            "next_action": "decide_next_action",
+        }
+    )
+
+    decision = schema.model_validate(payload)
+
+    assert decision.next_action == "decide_next_action"
+
+
 def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
@@ -315,12 +360,19 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "finalize",
         "fail",
     ]
+    assert "decide_next_action" not in snapshot["available_next_actions"]
     assert {capability["agent"] for capability in snapshot["agent_capabilities"]} == {
         "sql_agent",
         "eda_agent",
         "analysis_agent",
         "report_agent",
     }
+
+
+def test_prompts_expose_redecision_action_only_to_internal_transition_models() -> None:
+    assert "decide_next_action" not in DECIDE_NEXT_ACTION_PROMPT
+    assert '"next_action":"decide_next_action"' in RESULT_VALIDATION_DECISION_PROMPT
+    assert '"next_action":"decide_next_action"' in STEP_SUMMARY_DECISION_PROMPT
 
 
 def test_invoke_supervisor_decision_requires_model() -> None:

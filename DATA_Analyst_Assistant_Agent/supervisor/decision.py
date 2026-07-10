@@ -23,11 +23,21 @@ TerminalStateValue = Literal[
     "failed_with_recoverable_context",
     "failed_terminal",
 ]
+LLMSelectableNextAction = Literal[
+    "clarify",
+    "create_plan",
+    "call_sql_agent",
+    "call_eda_agent",
+    "call_analysis_agent",
+    "call_report_agent",
+    "finalize",
+    "fail",
+]
 DecisionModelT = TypeVar("DecisionModelT", bound=BaseModel)
 
 
 class SupervisorDecision(BaseModel):
-    next_action: NextAction
+    next_action: LLMSelectableNextAction
     reason: str = ""
 
 
@@ -51,7 +61,7 @@ class AnalysisPlanDecision(BaseModel):
 
 class ExecutionGuardDecision(BaseModel):
     allowed: bool
-    next_action: NextAction
+    next_action: LLMSelectableNextAction
     reason: str = ""
 
 
@@ -66,7 +76,7 @@ class ResultValidationDecision(BaseModel):
 class SemanticValidationAdvisoryDecision(BaseModel):
     semantic_valid: bool
     severity: Literal["info", "warning", "error"] = "info"
-    recommended_next_action: NextAction | Literal[""] = ""
+    recommended_next_action: LLMSelectableNextAction | Literal[""] = ""
     reason: str = ""
     missing_evidence: list[str] = Field(default_factory=list)
     alignment_notes: list[str] = Field(default_factory=list)

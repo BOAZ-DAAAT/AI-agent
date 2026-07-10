@@ -134,8 +134,8 @@ def validate_subagent_result(
             )
         return ResultValidationDecision(
             valid=True,
-            next_action="create_plan",
-            reason=f"{result.agent} 결과가 유효해 다음 계획 수립으로 이동합니다.",
+            next_action="decide_next_action",
+            reason=f"{result.agent} 결과가 유효해 Supervisor의 다음 행동 재판단으로 이동합니다.",
         )
 
     return ResultValidationDecision(

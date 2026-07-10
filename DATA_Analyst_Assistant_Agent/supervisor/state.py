@@ -18,6 +18,7 @@ AgentStatusValue = Literal["success", "warning", "failed", "approval_required"]
 NextAction = Literal[
     "clarify",
     "create_plan",
+    "decide_next_action",
     "call_sql_agent",
     "call_eda_agent",
     "call_analysis_agent",

@@ -148,7 +148,7 @@ def test_validate_fallback_success_without_retry_fails() -> None:
     assert "fallback" in decision.reason.lower()
 
 
-def test_validate_success_with_only_validation_warnings_is_valid() -> None:
+def test_validate_success_with_only_validation_warnings_requests_supervisor_redecision() -> None:
     state = _state()
     result = AgentCompactResult(
         agent="eda_agent",
@@ -160,7 +160,23 @@ def test_validate_success_with_only_validation_warnings_is_valid() -> None:
     decision = validate_subagent_result(state, result)
 
     assert decision.valid is True
-    assert decision.next_action == "create_plan"
+    assert decision.next_action == "decide_next_action"
+    assert "다음 행동 재판단" in decision.reason
+
+
+def test_validate_success_requests_supervisor_redecision() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="SQL 실행 완료",
+        artifact_ids=["artifact_sql"],
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.valid is True
+    assert decision.next_action == "decide_next_action"
 
 
 def test_validate_retry_boundary_allows_before_limit_and_fails_at_limit() -> None:

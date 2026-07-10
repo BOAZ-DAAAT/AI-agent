@@ -122,6 +122,7 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 허용 next_action:
 - clarify
 - create_plan
+- decide_next_action
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -146,7 +147,7 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 - final_answer: string
 
 예시:
-{"valid":true,"next_action":"create_plan","reason":"SQL 결과가 유효합니다.","terminal_state":"running","final_answer":""}
+{"valid":true,"next_action":"decide_next_action","reason":"SQL 결과가 유효해 Supervisor의 다음 행동 재판단으로 이동합니다.","terminal_state":"running","final_answer":""}
 """.strip()
 
 
@@ -195,6 +196,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 허용 next_action:
 - clarify
 - create_plan
+- decide_next_action
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -214,7 +216,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 - reason: string
 
 예시:
-{"step":"validate_subagent_result","agent":"sql_agent","action":"call_sql_agent","summary":"월별 매출 집계 SQL 산출물이 생성되었습니다.","artifact_ids":["artifact_sql"],"next_action":"call_eda_agent","reason":"다음 단계 탐색에 필요한 요약입니다."}
+{"step":"validate_subagent_result","agent":"sql_agent","action":"call_sql_agent","summary":"월별 매출 집계 SQL 산출물이 생성되었습니다.","artifact_ids":["artifact_sql"],"next_action":"decide_next_action","reason":"Supervisor의 다음 행동 재판단에 필요한 요약입니다."}
 """.strip()
 
 
