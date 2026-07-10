@@ -53,7 +53,6 @@ class StubAgent:
             agent_name="sql_agent",
             summary="SQL 완료",
             artifact_refs=[ArtifactRef(artifact_id="artifact_sql_result", type=ArtifactType.sql_result)],
-            next_handoff="validation_agent",
         )
 
 
@@ -243,7 +242,6 @@ class InvalidStatusAgent:
             retry_hint=RetryHint(),
             approval=ApprovalRequirement(),
             context_refs=[],
-            next_handoff="",
         )
 
 
@@ -263,3 +261,88 @@ def test_subagent_adapter_allows_empty_agent_mapping_without_loading_defaults(mo
 
     with pytest.raises(ValueError, match="Unknown supervisor sub-agent: sql_agent"):
         adapter.call("sql_agent", _state())
+
+
+class RaisingAgent:
+    name = "eda_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        raise RuntimeError("missing upstream SQL artifact")
+
+
+@pytest.mark.xfail(reason="SubAgentAdapter should convert agent exceptions into failed AgentCompactResult.")
+def test_subagent_adapter_converts_agent_exception_to_failed_contract() -> None:
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"eda_agent": RaisingAgent()})
+
+    result = adapter.call("eda_agent", _state())
+
+    assert result.agent_result.agent == "eda_agent"
+    assert result.agent_result.status == "failed"
+    assert result.agent_result.retryable is True
+    assert "missing upstream SQL artifact" in result.agent_result.error
+
+
+class MismatchedNameAgent:
+    name = "sql_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        return AgentEnvelope(status=AgentStatus.success, agent_name="eda_agent", summary="wrong envelope")
+
+
+@pytest.mark.xfail(reason="SubAgentAdapter should reject envelopes whose agent_name differs from the called agent.")
+def test_subagent_adapter_rejects_mismatched_agent_name() -> None:
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"sql_agent": MismatchedNameAgent()})
+
+    with pytest.raises(ValueError, match="agent_name"):
+        adapter.call("sql_agent", _state())
+
+
+class DetailedApprovalAgent:
+    name = "analysis_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="analysis_agent",
+            summary="needs review",
+            approval=ApprovalRequirement(
+                required=True,
+                reason="review causal assumptions",
+                approval_type="analysis.review",
+            ),
+        )
+
+
+@pytest.mark.xfail(reason="AgentCompactResult should preserve approval reason/type, not only status.")
+def test_subagent_adapter_preserves_approval_details_in_compact_result() -> None:
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"analysis_agent": DetailedApprovalAgent()})
+
+    result = adapter.call("analysis_agent", _state())
+
+    assert result.agent_result.approval_reason == "review causal assumptions"
+    assert result.agent_result.approval_type == "analysis.review"
+
+
+class IntegrityRefAgent:
+    name = "sql_agent"
+
+    def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="sql_agent",
+            summary="SQL complete with validation artifact",
+            validation=ValidationBlock(
+                integrity_refs=[
+                    ArtifactRef(artifact_id="artifact_integrity_summary", type=ArtifactType.file),
+                ],
+            ),
+        )
+
+
+@pytest.mark.xfail(reason="AgentCompactResult should preserve ValidationBlock.integrity_refs for supervisor output.")
+def test_subagent_adapter_preserves_integrity_refs_in_compact_result() -> None:
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"sql_agent": IntegrityRefAgent()})
+
+    result = adapter.call("sql_agent", _state())
+
+    assert result.agent_result.integrity_ref_ids == ["artifact_integrity_summary"]

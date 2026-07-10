@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import pytest
+
+TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from data_agent_backend.api.app import create_app
 from data_agent_backend.config import BackendConfig

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import pytest
+
+TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from backend.main import create_app
 from backend.storage import routes as storage_routes
