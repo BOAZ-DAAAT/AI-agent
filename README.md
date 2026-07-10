@@ -87,6 +87,17 @@ DATAMART_DB_HOST=127.0.0.1
 DATAMART_DB_PORT=3306
 DATAMART_DB_NAME=analytics
 
+# backend가 ingest / integrity queue 실행 시 사용할 storage mysql
+STORAGE_MYSQL_HOST=127.0.0.1
+STORAGE_MYSQL_PORT=3306
+STORAGE_MYSQL_USER=root
+STORAGE_MYSQL_PASSWORD=change_me_root_pw
+
+# backend api / cors
+CORS_ALLOW_ORIGINS=*
+DATA_AGENT_BACKEND_URL=http://localhost:8000
+DATA_AGENT_BASE_DIR=.data_agent
+
 # LLM
 OPENROUTER_API_KEY=your_openrouter_api_key
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
@@ -98,7 +109,9 @@ LLM_MODEL=~openai/gpt-latest
 ### 환경변수 주의사항
 
 - 파이프라인의 SQL Agent는 내부적으로 `DB_*` 값을 기준으로 MySQL에 접속합니다.
+- ingest / integrity backend는 내부적으로 `STORAGE_MYSQL_*` 값을 기준으로 로컬 storage MySQL에 접속합니다.
 - `.env.example`에는 `MYSQL_USER`, `MYSQL_PASSWORD`도 같이 보이는데, 실제 분석 실행 시에는 **`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_PASSWORD`가 올바른지** 먼저 확인하는 것이 안전합니다.
+- 로컬에서 `uvicorn backend.main:app ...` 으로 backend를 직접 띄우면 `STORAGE_MYSQL_HOST`, `STORAGE_MYSQL_PORT`, `STORAGE_MYSQL_USER`, `STORAGE_MYSQL_PASSWORD` 도 같이 맞춰야 합니다.
 - `docker compose`로 띄운 저장소 MySQL을 분석 대상으로 바로 쓰려면 보통 다음처럼 맞추면 됩니다.
 
 ```env
@@ -393,4 +406,3 @@ daaa_outputs/latest/index.html
 - `docs/data_analysis_agent.md`
 - `docs/sql_agent_architecture/architecture.ko.md`
 - `docs/sql_agent_architecture/prd-sql-agent-architecture.ko.md`
-
