@@ -7,7 +7,12 @@ from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AgentStatus, OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    AgentStatus,
+    OrchestrationState,
+    RetryHint,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     AgentName,
@@ -22,6 +27,10 @@ class RunnableAgent(Protocol):
 
     def run(self, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:
         ...
+
+
+class AgentContractError(ValueError):
+    pass
 
 
 class AgentToolResult(BaseModel):
@@ -155,11 +164,41 @@ class SubAgentAdapter:
 
         orchestration_state = to_orchestration_state(state)
         agent = self.agents[agent_name]
-        envelope = agent.run(
-            orchestration_state,
-            self.runtime,
-            **self._agent_run_kwargs(agent_name, agent),
-        )
+        run_kwargs = self._agent_run_kwargs(agent_name, agent)
+        try:
+            envelope = agent.run(
+                orchestration_state,
+                self.runtime,
+                **run_kwargs,
+            )
+        except Exception as exc:
+            error = str(exc)
+            retry_hint = RetryHint(
+                retryable=True,
+                reason_code="agent_execution_exception",
+                details={
+                    "failure_reason": error,
+                    "exception_type": exc.__class__.__name__,
+                },
+            )
+            return AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent=agent_name,
+                    status="failed",
+                    summary=f"{agent_name} 실행 중 예외가 발생했습니다.",
+                    retry_hint=retry_hint,
+                    retryable=True,
+                    error=error,
+                ),
+                state_updates={},
+            )
+
+        if envelope.agent_name != agent_name:
+            raise AgentContractError(
+                "Sub-agent envelope agent_name이 요청한 agent와 일치하지 않습니다: "
+                f"requested={agent_name}, returned={envelope.agent_name}"
+            )
+
         return AgentToolResult(
             agent_result=compact_agent_envelope(envelope, self.backend_adapter),
             state_updates=self._state_updates(orchestration_state),
