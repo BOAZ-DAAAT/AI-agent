@@ -92,4 +92,7 @@ def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter
     assert artifact.parent_ids == [sql_ref.artifact_id]
     assert parsed.evidence[0].statistics["top_category"] == "B"
     assert parsed.intent.domain == "finance"
+    assert parsed.answer_coverage.coverage_status == "full"
+    assert parsed.answer_coverage.used_metrics == ["revenue"]
+    assert parsed.answer_coverage.used_dimensions == ["category"]
     assert all(check.passed for check in envelope.validation.local_checks)

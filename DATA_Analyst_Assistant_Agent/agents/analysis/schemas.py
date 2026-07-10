@@ -165,6 +165,21 @@ class HumanReview(BaseModel):
     )
 
 
+class AnswerCoverage(BaseModel):
+    """Structured evidence for supervisor-level answer adequacy validation."""
+
+    requested_metrics: list[str] = Field(default_factory=list)
+    used_metrics: list[str] = Field(default_factory=list)
+    requested_dimensions: list[str] = Field(default_factory=list)
+    used_dimensions: list[str] = Field(default_factory=list)
+    requested_time_column: str | None = None
+    used_time_column: str | None = None
+    requested_time_grain: TimeGrain | None = None
+    used_time_grain: TimeGrain | None = None
+    coverage_status: Literal["full", "partial", "missing"] = "full"
+    missing_requirements: list[str] = Field(default_factory=list)
+
+
 class AnalysisResult(BaseModel):
     """Stable structured output for validation, visualization, and reporting."""
 
@@ -183,6 +198,7 @@ class AnalysisResult(BaseModel):
     visual_evidence: list[VisualEvidence] = Field(default_factory=list)
     chart_status: str = "not_needed"
     human_review: HumanReview = Field(default_factory=HumanReview)
+    answer_coverage: AnswerCoverage = Field(default_factory=AnswerCoverage)
 
     # Codegen-path additions (optional; empty on the legacy tool-dispatch path).
     intent: AnalysisIntent | None = None

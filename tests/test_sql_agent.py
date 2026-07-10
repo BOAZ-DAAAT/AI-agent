@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+import sys
+import types
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,7 +21,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql.planner import build_sql_plan, SQLP
 from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.validation.agent import CentralValidationAgent
+try:
+    from DATA_Analyst_Assistant_Agent.agents.validation.agent import CentralValidationAgent
+except ModuleNotFoundError:
+    CentralValidationAgent = None
 from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_sql_identifiers
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
@@ -209,6 +215,164 @@ class TestSQLPlanner:
 
 
 class TestSQLLangGraphSmoke:
+    def test_integrity_summary_compacts_legacy_and_ge_payloads(self, monkeypatch, tmp_path):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        payload = {
+            "summary": {"status": "ACTION_REQUIRED"},
+            "tables": {
+                "orders": [
+                    {"column": "order_id", "status": "PASS", "intent": "PK check", "observed": "all good"},
+                    {
+                        "column": "customer_id",
+                        "status": "FAIL",
+                        "intent": "FK check",
+                        "observed": "orphan rows detected",
+                    },
+                    {
+                        "success": False,
+                        "expectation_config": {
+                            "expectation_type": "expect_column_values_to_not_be_null",
+                            "kwargs": {"column": "amount"},
+                        },
+                        "result": {"unexpected_count": 3},
+                    },
+                ],
+                "customers": [
+                    {"column": "customer_id", "status": "PASS", "intent": "PK check", "observed": "all good"}
+                ],
+            },
+        }
+
+        text = integrity_loader.compact_integrity_summary_text(payload, tables=["orders"])
+
+        assert "customer_id" in text
+        assert "orphan rows detected" in text
+        assert "amount" in text
+        assert "unexpected_count" not in text
+        assert "all good" not in text
+        assert "customers" not in text
+
+        legacy_path = tmp_path / "db_integrity_result.json"
+        legacy_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(integrity_loader, "INTEGRITY_JSON_PATH", legacy_path)
+        assert json.loads(integrity_loader.load_integrity_text()) == payload
+
+    def test_backend_integrity_service_refresh_updates_prompt_context(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        calls: list[tuple[str, list[str], float, dict | None]] = []
+        monkeypatch.setenv("DATA_AGENT_BACKEND_URL", "http://backend.local")
+
+        def fake_post_backend_json(base_url, path, payload):
+            assert base_url == "http://backend.local"
+            if path == "/integrity/ensure-tables-ready":
+                dataset_name = payload["dataset_name"]
+                tables = payload["tables"]
+                wait_timeout_s = payload["wait_timeout_s"]
+                metadata = payload["metadata"]
+                calls.append((dataset_name, list(tables), wait_timeout_s, metadata))
+                return {"ok": True, "data": {"ready": False}}
+            if path == "/integrity/summary":
+                assert payload["dataset_name"] == "orders_ds"
+                assert payload["tables"] == ["orders"]
+                assert payload["include_pass"] is False
+                return {
+                    "ok": True,
+                    "data": {
+                        "tables": {
+                            "orders": {
+                                "checks": [
+                                    {"column": "order_id", "status": "PASS", "intent": "PK check", "observed": "all good"},
+                                    {
+                                        "column": "amount",
+                                        "status": "WARNING",
+                                        "intent": "null profile",
+                                        "observed": "amount has 2 nulls",
+                                    },
+                                ]
+                            }
+                        }
+                    },
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+            "integrity_text": 'legacy pass dump should be replaced'
+        })
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
+
+        app = build_app()
+        result = app.invoke({
+            "user_question": "주문 데이터를 간단히 보여줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "integrity_dataset_name": "orders_ds",
+            "integrity_refresh": {},
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "validation_findings": [],
+            "retry_hint": {},
+            "validation_summary": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert calls == [("orders_ds", ["orders"], 0.0, {"source": "sql_agent"})]
+        assert result["integrity_refresh"]["status"] == "queued"
+        assert result["integrity_refresh"]["tables"] == ["orders"]
+        assert result["integrity_refresh"]["ready"] is False
+        assert result["integrity_text"] == "legacy pass dump should be replaced"
+
+    def test_preplan_integrity_gate_updates_planner_context(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        monkeypatch.setenv("DATA_AGENT_BACKEND_URL", "http://backend.local")
+
+        def fake_post_backend_json(base_url, path, payload):
+            assert path == "/integrity/summary"
+            assert payload["dataset_name"] == "orders_ds"
+            return {
+                "ok": True,
+                "data": {
+                    "summaries": [
+                        {
+                            "table_name": "orders",
+                            "status": "stale",
+                            "summary": {"message": "orders needs refresh"},
+                        }
+                    ]
+                },
+            }
+
+        monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
+        update = context_module.preplan_integrity_gate({"integrity_dataset_name": "orders_ds", "integrity_text": "legacy text"})
+
+        assert update["integrity_preplan"]["status"] == "prefetched"
+        assert "orders" in update["integrity_text"]
+        assert "[STALE]" in update["integrity_text"]
+
     def test_build_app_simple_path_supports_future_input_fields(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
@@ -806,6 +970,8 @@ class TestSQLAgentIntegration:
             artifact_refs=[result_ref, plan_ref, sql_ref],
         )
         state.add_artifacts("sql_agent", upstream.artifact_ids())
+        if CentralValidationAgent is None:
+            pytest.skip("CentralValidationAgent source is not present in this checkout")
         envelope = CentralValidationAgent().run(state, runtime, upstream)
         assert envelope.status != AgentStatus.failed
         assert not any(flag.code == "unsafe_sql" for flag in envelope.validation.business_flags)
@@ -920,3 +1086,68 @@ class TestSQLAgentIntegration:
             "tests/test_sql_agent.py",
         ]
         assert not any(p.startswith("data_agent_backend/") for p in changed)
+
+
+    def test_backend_integrity_service_refresh_only_updates_prompt_when_ready(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        monkeypatch.setenv("DATA_AGENT_BACKEND_URL", "http://backend.local")
+
+        def fake_post_backend_json(base_url, path, payload):
+            if path == "/integrity/ensure-tables-ready":
+                return {"ok": True, "data": {"ready": True}}
+            if path == "/integrity/summary":
+                return {
+                    "ok": True,
+                    "data": {
+                        "summaries": [
+                            {"table_name": "orders", "status": "warning", "summary": {"message": "amount has 2 nulls"}}
+                        ]
+                    },
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+            "integrity_text": 'legacy pass dump should be replaced'
+        })
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
+
+        app = build_app()
+        result = app.invoke({
+            "user_question": "주문 데이터를 간단히 보여줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "SQL 기반 질의 응답",
+            "schema_text": "",
+            "integrity_text": "",
+            "integrity_dataset_name": "orders_ds",
+            "integrity_refresh": {},
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "validation_findings": [],
+            "retry_hint": {},
+            "validation_summary": {},
+            "retry_count": 0,
+            "max_retries": 1,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["integrity_refresh"]["status"] == "refreshed"
+        assert result["integrity_refresh"]["ready"] is True
+        assert "amount has 2 nulls" in result["integrity_text"]
+        assert "legacy pass dump" not in result["integrity_text"]

@@ -34,7 +34,9 @@ def build_app():
     graph = StateGraph(AgentState)
 
     graph.add_node("load_context", nodes.load_context)
+    graph.add_node("preplan_integrity_gate", nodes.preplan_integrity_gate)
     graph.add_node("plan_question", nodes.plan_question)
+    graph.add_node("refresh_integrity_context", nodes.refresh_integrity_context)
     graph.add_node("design_mart", nodes.design_mart)
     graph.add_node("generate_sql", nodes.generate_sql)
     graph.add_node("prevalidate_sql", nodes.prevalidate_sql)
@@ -44,8 +46,10 @@ def build_app():
     graph.add_node("finalize_answer", nodes.finalize_answer)
 
     graph.add_edge(START, "load_context")
-    graph.add_edge("load_context", "plan_question")
-    graph.add_edge("plan_question", "design_mart")
+    graph.add_edge("load_context", "preplan_integrity_gate")
+    graph.add_edge("preplan_integrity_gate", "plan_question")
+    graph.add_edge("plan_question", "refresh_integrity_context")
+    graph.add_edge("refresh_integrity_context", "design_mart")
     graph.add_edge("design_mart", "generate_sql")
     graph.add_edge("generate_sql", "prevalidate_sql")
     graph.add_conditional_edges(

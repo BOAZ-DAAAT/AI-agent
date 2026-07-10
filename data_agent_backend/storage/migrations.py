@@ -174,4 +174,55 @@ MIGRATIONS: list[tuple[int, str]] = [
             ON datasources(name, host, database_name, username);
         """,
     ),
+
+    (
+        4,
+        """
+        CREATE TABLE IF NOT EXISTS integrity_dataset_state (
+            dataset_name TEXT PRIMARY KEY,
+            source_version TEXT,
+            status TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS integrity_queue (
+            job_id TEXT PRIMARY KEY,
+            dataset_name TEXT NOT NULL,
+            tables_json TEXT,
+            source_version TEXT,
+            priority INTEGER NOT NULL DEFAULT 100,
+            status TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            error_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_integrity_queue_pending
+            ON integrity_queue(status, priority, created_at);
+        CREATE INDEX IF NOT EXISTS idx_integrity_queue_dataset
+            ON integrity_queue(dataset_name, status);
+
+        CREATE TABLE IF NOT EXISTS integrity_summaries (
+            summary_id TEXT PRIMARY KEY,
+            job_id TEXT,
+            dataset_name TEXT NOT NULL,
+            table_name TEXT,
+            source_version TEXT,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_integrity_summaries_dataset_table
+            ON integrity_summaries(dataset_name, table_name, created_at);
+        CREATE INDEX IF NOT EXISTS idx_integrity_summaries_status
+            ON integrity_summaries(dataset_name, status, created_at);
+        """,
+    ),
 ]

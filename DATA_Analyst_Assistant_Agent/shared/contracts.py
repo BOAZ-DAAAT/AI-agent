@@ -152,6 +152,12 @@ class SupervisorRunResult(BaseModel):
     state: OrchestrationState | None = None
     interrupt: SupervisorInterruptPayload | None = None
 
+    def __getattr__(self, item: str):
+        state = object.__getattribute__(self, "state")
+        if state is not None and hasattr(state, item):
+            return getattr(state, item)
+        raise AttributeError(item)
+
     @model_validator(mode="after")
     def validate_result_payload(self) -> SupervisorRunResult:
         if self.kind == "state":
