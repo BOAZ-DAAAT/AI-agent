@@ -44,7 +44,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     reject_pending_result,
     stage_candidate_result,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     validate_subagent_result as validate_subagent_result_contract,
 )
@@ -289,7 +289,36 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 llm_decisions=llm_decisions,
             )
 
-        tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
+        try:
+            tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
+        except AgentContractError as exc:
+            message = f"{agent_name} 결과의 에이전트 계약 검증에 실패했습니다: {exc}"
+            failed_agents = list(state.get("failed_agents", []))
+            if agent_name not in failed_agents:
+                failed_agents.append(agent_name)
+            return _terminal_failure_updates(
+                state,
+                "execute_subagent",
+                message,
+                llm_decisions=llm_decisions,
+                extra_updates={
+                    "pending_result": None,
+                    "last_agent_result": {},
+                    "failed_agents": failed_agents,
+                    "completed_agents": list(state.get("completed_agents", [])),
+                    "accepted_evidence": {
+                        agent: list(items)
+                        for agent, items in state.get("accepted_evidence", {}).items()
+                    },
+                    "error_state": {
+                        "node": "execute_subagent",
+                        "message": message,
+                        "reason_code": "agent_contract_mismatch",
+                        "retryable": False,
+                    },
+                },
+            )
+
         updates = stage_candidate_result(state, tool_result.agent_result, tool_result.state_updates)
         updates["last_agent_result"] = tool_result.agent_result.model_dump(mode="json")
         updates["current_step"] = "executed_subagent"

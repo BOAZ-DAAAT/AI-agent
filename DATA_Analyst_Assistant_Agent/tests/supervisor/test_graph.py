@@ -25,7 +25,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     merge_agent_result,
     stage_candidate_result,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ApprovalRequirement,
     RetryHint,
@@ -106,6 +106,17 @@ class SequencedSubAgentAdapter:
     def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
         self.calls.append(agent_name)
         return self.results[agent_name].pop(0)
+
+
+class ContractViolatingSubAgentAdapter:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
+        self.calls.append(agent_name)
+        raise AgentContractError(
+            f"requested={agent_name}, returned=eda_agent"
+        )
 
 
 def _state(user_query: str = "매출") -> dict[str, Any]:
@@ -491,6 +502,42 @@ def test_execute_guard_unsupported_redirect_fails_terminally() -> None:
     assert result["terminal_state"] == "failed_terminal"
     assert result["next_action"] == "finalize"
     assert "지원하지 않는 대체 action" in result["final_answer"]
+
+
+def test_execute_subagent_contract_mismatch_becomes_non_retryable_terminal_failure() -> None:
+    adapter = ContractViolatingSubAgentAdapter()
+    accepted_evidence = {
+        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+    }
+    state = _state()
+    state.update(
+        {
+            "next_action": "call_sql_agent",
+            "accepted_evidence": accepted_evidence,
+            "completed_agents": ["analysis_agent"],
+            "failed_agents": ["eda_agent"],
+            "pending_result": {"candidate_id": "candidate_stale"},
+            "last_agent_result": {"agent": "eda_agent", "status": "success"},
+        }
+    )
+    node = make_execute_subagent_node(
+        adapter,
+        SequencedDecisionModel([_guard_decision("call_sql_agent")]),
+    )
+
+    result = node(state)
+
+    assert adapter.calls == ["sql_agent"]
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["next_action"] == "finalize"
+    assert result["current_step"] == "execute_subagent"
+    assert result["pending_result"] is None
+    assert result["last_agent_result"] == {}
+    assert result["failed_agents"] == ["eda_agent", "sql_agent"]
+    assert result["completed_agents"] == ["analysis_agent"]
+    assert result["accepted_evidence"] == accepted_evidence
+    assert result["error_state"]["reason_code"] == "agent_contract_mismatch"
+    assert result["error_state"]["retryable"] is False
 
 
 def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> None:
