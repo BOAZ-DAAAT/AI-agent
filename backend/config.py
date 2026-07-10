@@ -20,3 +20,9 @@ class StorageMySQL:
 # ingest 안전장치
 INGEST_ROW_LIMIT = int(os.getenv("INGEST_ROW_LIMIT", "1000000"))   # 테이블당 최대 행
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "10000"))   # 한 번에 옮기는 행 수
+
+class Auth:
+    """로그인/토큰 설정."""
+    SECRET = os.getenv("AUTH_SECRET", "dev-insecure-change-me")
+    TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL", str(60 * 60 * 12)))  # 12시간
+    ENABLED = os.getenv("AUTH_ENABLED", "true").strip().lower() != "false"
