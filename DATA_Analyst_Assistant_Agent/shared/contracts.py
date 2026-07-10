@@ -102,6 +102,9 @@ class AnalysisPlan(BaseModel):
     route_kind: Literal["simple", "eda", "trend", "mart", "comprehensive"] = "simple"
     generated_sql: str = "SELECT 1 AS sample_value"
     source_sql: str = "SELECT 1 AS sample_value"
+    # comprehensive(마트) 경로에서 SQL 에이전트가 analytics 스키마에 적재한 마트 테이블 참조.
+    # 하류(EDA/분석)는 이 이름으로 DB에서 마트를 직접 조회한다. simple 경로면 None.
+    target_table: str | None = None
 
 
 class OrchestrationState(BaseModel):

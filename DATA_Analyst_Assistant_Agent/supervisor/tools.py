@@ -165,5 +165,6 @@ class SubAgentAdapter:
                 "planner_mode": state.plan.planner_mode,
                 "route_kind": state.plan.route_kind,
                 "goal": state.plan.goal,
+                "target_table": state.plan.target_table,
             }
         return updates

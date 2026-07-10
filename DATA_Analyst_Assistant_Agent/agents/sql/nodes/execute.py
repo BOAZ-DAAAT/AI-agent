@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import (
     can_use_live_db,
     drop_table_if_exists,
@@ -15,6 +17,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql._runtime import (
     validate_mysql_sql,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
+
+# 마트 생성 후 sql_result 에 담을 미리보기 행 수. 하류(EDA/분석)는 마트를 DB 로 직접
+# 조회(전체)하므로 이 미리보기는 검증/최종답변 표시·CSV 폴백용 소량 샘플이다.
+MART_PREVIEW_ROWS = int(os.getenv("MART_PREVIEW_ROWS", "100"))
 
 
 def execute_sql(state: AgentState):
@@ -82,9 +88,20 @@ def execute_sql(state: AgentState):
         if state["sql_draft"].get("postcheck_sql") and can_use_live_db():
             post_rows = run_sql_fetchall(state["sql_draft"]["postcheck_sql"])
 
+        # 마트 실데이터 미리보기를 sql_result 로 반환한다. 과거엔 ("마트 생성 완료", table)
+        # 확인메시지를 넣어 하류가 col_1/col_2 만 받아 분석에 실패했다. 실데이터 미리보기를
+        # 넣으면 검증·최종답변 표시와 CSV 폴백이 실제 컬럼을 갖는다(전체 데이터는 하류가 DB 직접조회).
+        if can_use_live_db():
+            try:
+                mart_rows = run_sql_fetchall(f"SELECT * FROM {target_table} LIMIT {MART_PREVIEW_ROWS}")
+            except Exception:
+                mart_rows = [("마트 생성 완료", target_table)]
+        else:
+            mart_rows = offline_mart_rows(target_table)
+
         return {
-            "sql_result": [("마트 생성 완료", target_table)] if can_use_live_db() else offline_mart_rows(target_table),
-            "row_count": 1,
+            "sql_result": mart_rows,
+            "row_count": len(mart_rows),
             "precheck_result": pre_rows,
             "postcheck_result": post_rows,
             "error": ""

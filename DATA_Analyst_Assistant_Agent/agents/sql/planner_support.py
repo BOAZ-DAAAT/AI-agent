@@ -257,6 +257,33 @@ def normalize_postcheck_sql(postcheck_sql: str | None, target_table: str | None)
     return sql
 
 
+def _coerce_column_name(entry: Any) -> str:
+    """LLM이 컬럼을 문자열 대신 {"column_name": ..., "description": ...} dict 로 줄 때
+    식별자만 뽑아 문자열로 정규화한다. 문자열이면 그대로 둔다."""
+    if isinstance(entry, str):
+        return entry.strip()
+    if isinstance(entry, dict):
+        for key in ("column_name", "name", "col", "column", "expression"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(entry)
+
+
+def normalize_mart_column_lists(design: dict[str, Any]) -> dict[str, Any]:
+    """MartDesign 의 문자열 리스트 필드에 dict 항목이 섞여 와도 문자열 리스트로 정규화한다.
+
+    프롬프트는 key_columns/measure_columns 등을 ["col", ...] 로 요구하지만 모델에 따라
+    [{"column_name": ..., "description": ...}] 형태로 주기도 한다(형식 편차). 그대로 두면
+    MartDesign(List[str]) pydantic 검증이 깨지므로 식별자만 뽑아 정규화한다.
+    """
+    for field in ("key_columns", "measure_columns", "dimension_columns", "source_tables"):
+        value = design.get(field)
+        if isinstance(value, list):
+            design[field] = [_coerce_column_name(item) for item in value if item not in (None, "")]
+    return design
+
+
 def normalize_generated_sql(parsed: dict[str, Any], fallback: dict[str, Any], route_kind: str) -> dict[str, Any]:
     parsed["sql"] = clean_sql(parsed.get("sql", fallback["sql"]))
     parsed["target_table"] = qualify_target_table(parsed.get("target_table") or fallback.get("target_table"))
