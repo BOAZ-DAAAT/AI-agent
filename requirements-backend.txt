@@ -1,6 +1,10 @@
 fastapi
+great-expectations>=0.18.21,<1.0
+numpy<2
+pandas<3
 pydantic
 pymysql
 cryptography
+sqlalchemy
 uvicorn[standard]
 python-dotenv

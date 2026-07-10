@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from data_agent_backend.api.routes_artifacts import router as artifacts_router
+from data_agent_backend.api.routes_integrity import router as integrity_router
 from data_agent_backend.api.routes_policy import router as policy_router
 from data_agent_backend.api.routes_runs import router as runs_router
 from data_agent_backend.models.tool_results import ToolResult
@@ -15,9 +19,33 @@ def _json_result(result: ToolResult) -> JSONResponse:
     return JSONResponse(status_code=200, content=result.model_dump(mode="json"))
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    async def _run() -> None:
+        while True:
+            try:
+                app.state.services.integrity_service.process_next_pending()
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+
+    app.state.integrity_worker_task = asyncio.create_task(_run())
+    try:
+        yield
+    finally:
+        task = getattr(app.state, "integrity_worker_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 def create_app(services: BackendServices | None = None) -> FastAPI:
-    app = FastAPI(title="Data Agent Backend API")
+    app = FastAPI(title="Data Agent Backend API", lifespan=_lifespan)
     app.state.services = services or create_core_services()
+    app.state.integrity_worker_task = None
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_request, exc: RequestValidationError) -> JSONResponse:
@@ -39,6 +67,7 @@ def create_app(services: BackendServices | None = None) -> FastAPI:
     app.include_router(runs_router)
     app.include_router(artifacts_router)
     app.include_router(policy_router)
+    app.include_router(integrity_router)
     return app
 
 

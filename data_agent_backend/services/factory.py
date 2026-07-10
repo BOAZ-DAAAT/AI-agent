@@ -8,6 +8,7 @@ from data_agent_backend.config import BackendConfig
 from data_agent_backend.services.artifact_registry import ArtifactRegistry
 from data_agent_backend.services.artifact_store import ArtifactStore
 from data_agent_backend.services.policy_engine import PolicyEngine
+from data_agent_backend.services.integrity_service import IntegrityService
 from data_agent_backend.services.run_service import RunService
 from data_agent_backend.storage.sqlite import SQLiteStore
 
@@ -20,6 +21,7 @@ class CoreBackendServices:
     artifact_store: ArtifactStore
     artifact_registry: ArtifactRegistry
     run_service: RunService
+    integrity_service: IntegrityService
 
 
 BackendServices = CoreBackendServices
@@ -35,6 +37,7 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
     artifact_store = ArtifactStore(config.artifact_dir)
     artifact_registry = ArtifactRegistry(sqlite, artifact_store, policy_engine)
     run_service = RunService(sqlite, policy_engine, artifact_registry)
+    integrity_service = IntegrityService(sqlite)
 
     return CoreBackendServices(
         config=config,
@@ -43,6 +46,7 @@ def create_core_services(config: BackendConfig | None = None) -> CoreBackendServ
         artifact_store=artifact_store,
         artifact_registry=artifact_registry,
         run_service=run_service,
+        integrity_service=integrity_service,
     )
 
 

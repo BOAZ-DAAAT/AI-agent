@@ -81,6 +81,9 @@ class AgentState(TypedDict):
     planner_selection_reason: str
     schema_text: str
     integrity_text: str
+    integrity_dataset_name: str
+    integrity_preplan: Dict[str, Any]
+    integrity_refresh: Dict[str, Any]
 
     plan: Dict[str, Any]
     mart_design: Dict[str, Any]

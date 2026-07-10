@@ -13,8 +13,10 @@ WORKDIR /app
 COPY requirements-backend.txt ./
 RUN pip install --no-cache-dir -r requirements-backend.txt
 
-# backend 패키지만 복사 — 에이전트/구백엔드/테스트는 이 이미지에 불필요
+# integrity orchestration now depends on data_agent_backend plus SQL integrity helpers
 COPY backend/ ./backend/
+COPY data_agent_backend/ ./data_agent_backend/
+COPY DATA_Analyst_Assistant_Agent/ ./DATA_Analyst_Assistant_Agent/
 
 EXPOSE 8000
 

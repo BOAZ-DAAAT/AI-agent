@@ -25,6 +25,50 @@ def schema_tables(schema_json: dict[str, Any]) -> dict[str, Any]:
     return schema_json
 
 
+
+
+def _question_lower(state: AgentState) -> str:
+    return str(state.get("user_question") or "").lower()
+
+
+def _is_datamart_question(state: AgentState) -> bool:
+    q = _question_lower(state)
+    reason = str(state.get("planner_selection_reason") or "").lower()
+    tokens = ("데이터마트", "datamart", "data mart", "마트")
+    intent = any(token in q for token in tokens) or any(token in reason for token in tokens)
+    reusable = any(token in q for token in ("재사용", "반복", "저장", "create table", "materialize"))
+    return intent or reusable or ("datamart" in reason)
+
+def _is_average_delivery_question(state: AgentState) -> bool:
+    q = _question_lower(state)
+    korean = ("평균" in q and ("배송" in q or "소요일" in q)) or ("주문 완료일" in q and "배송 완료일" in q)
+    english = "average" in q and ("delivery" in q or "shipping" in q)
+    return korean or english
+
+
+def _extract_table_columns_local(table_info: Any) -> set[str]:
+    columns: set[str] = set()
+    if not isinstance(table_info, dict):
+        return columns
+    raw_columns = table_info.get("columns", [])
+    if isinstance(raw_columns, dict):
+        columns.update(str(name) for name in raw_columns.keys())
+    elif isinstance(raw_columns, list):
+        for col in raw_columns:
+            if isinstance(col, dict) and col.get("name"):
+                columns.add(str(col["name"]))
+            elif isinstance(col, str):
+                columns.add(col)
+    return columns
+
+def _table_has_columns(schema_json: dict[str, Any], table_name: str, required: list[str]) -> bool:
+    tables = schema_tables(schema_json)
+    table = tables.get(table_name) if isinstance(tables, dict) else None
+    if not isinstance(table, dict):
+        return False
+    cols = _extract_table_columns_local(table)
+    return all(col in cols for col in required)
+
 def retry_feedback_text(state: AgentState) -> str:
     feedback_parts: list[str] = []
     for label, value in (
@@ -74,27 +118,64 @@ def default_plan_from_state(state: AgentState) -> dict[str, Any]:
         "target_table": None,
         "mart_policy": None,
     }
+    route_kind = "simple"
+    task_type = "query_answer"
+    requested_output = "execute_and_answer"
+    expected_result_shape = "table_preview"
+    required_aggregations: list[str] = []
+    required_columns: list[str] = []
+    target_metric = ""
+
+    if _is_datamart_question(state):
+        route_kind = "comprehensive"
+        task_type = "data_mart_build"
+        requested_output = "create_table"
+        expected_result_shape = "datamart_creation"
+        validation_contract.update({
+            "expected_result_shape": expected_result_shape,
+            "required_tables": selected_tables,
+            "mart_policy": "prefer_row_preserving",
+        })
+
+    if route_kind == "simple" and _is_average_delivery_question(state) and _table_has_columns(schema_json, "orders", ["order_approved_at", "order_delivered_customer_date"]):
+        if "orders" not in selected_tables:
+            selected_tables = ["orders"]
+        if "orders" not in candidate_tables:
+            candidate_tables = ["orders", *candidate_tables]
+        expected_result_shape = "single_scalar"
+        required_aggregations = ["AVG"]
+        required_columns = ["order_approved_at", "order_delivered_customer_date"]
+        target_metric = "average_delivery_days"
+        validation_contract.update({
+            "expected_result_shape": expected_result_shape,
+            "required_aggregations": required_aggregations,
+            "required_columns": required_columns,
+            "expected_aliases": ["avg_delivery_days"],
+            "required_tables": ["orders"],
+            "target_metric": target_metric,
+            "dimensions": [],
+        })
 
     return QuestionPlan(
         original_question=state["user_question"],
-        route_kind="simple",
-        question_type="detail",
-        task_type="query_answer",
-        requested_output="execute_and_answer",
-        target_metric="",
+        route_kind=route_kind,
+        question_type="mart_build" if route_kind == "comprehensive" else "detail",
+        task_type=task_type,
+        requested_output=requested_output,
+        target_metric=target_metric,
         dimensions=[],
         filters=[],
         time_condition=None,
         selected_join_tables=selected_tables,
         relevant_tables=selected_tables,
         candidate_tables=candidate_tables,
-        mart_name=None,
-        grain=None,
-        load_strategy=None,
+        mart_name="analytics_mart" if route_kind == "comprehensive" else None,
+        grain="원본 entity/event 행 수준 grain 유지" if route_kind == "comprehensive" else None,
+        load_strategy="full_refresh" if route_kind == "comprehensive" else None,
         ambiguity_note="LLM 분석 없이 스키마 기본값으로 생성된 fallback plan입니다.",
-        expected_result_shape="table_preview",
-        required_columns=[],
-        required_aggregations=[],
+        expected_result_shape=expected_result_shape,
+        required_columns=required_columns,
+        required_aggregations=required_aggregations,
         validation_contract=validation_contract,
         reasoning="(fallback) LLM 결과가 우선 적용됩니다. 스키마 상위 테이블 기준으로 구성된 기본 plan입니다.",
     ).model_dump()
@@ -127,8 +208,14 @@ def deterministic_sql_draft(state: AgentState) -> dict[str, Any]:
             reasoning="재사용 가능한 datamart 생성을 위한 기본 SQL 초안입니다.",
         ).model_dump()
 
-    # simple: 기본 SELECT
-    if primary_table:
+    # simple: intent-aware deterministic SELECT
+    if _is_average_delivery_question(state) and primary_table == "orders":
+        sql = (
+            "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days "
+            "FROM orders "
+            "WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NOT NULL;"
+        )
+    elif primary_table:
         sql = f"SELECT * FROM {primary_table} LIMIT 50;"
     else:
         sql = "SELECT 1 AS sample_value;"
