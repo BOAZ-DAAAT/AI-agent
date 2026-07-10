@@ -14,7 +14,7 @@ def insight_prompt(user_question: str, statistical_metadata: Dict[str, Any], all
 {user_question}
 
 [검증된 수치 (구체적인 숫자를 쓸 때는 이 값을 우선 참고하라)]
-{json.dumps(statistical_metadata, ensure_ascii=False, indent=2)}
+{json.dumps(statistical_metadata, ensure_ascii=False, default=str, separators=(",", ":"))}
 
 [전체 EDA 결과 (패턴 해석의 주요 근거 — 분포/그룹비교/관계/시간 결과를 모두 활용하라)]
 {all_results}

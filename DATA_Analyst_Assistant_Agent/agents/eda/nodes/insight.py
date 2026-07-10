@@ -49,7 +49,7 @@ def _llm_infer_cautions(numeric_summary: Dict[str, Any], user_question: str, exi
             "- 각 항목은 soft 경고다. 분석을 '금지'하지 마라(권고까지만).\n"
             f"- 최대 {_LLM_CAUTION_MAX}개.\n\n"
             f"[사용자 질문]\n{user_question}\n\n"
-            f"[계산된 통계 요약]\n{json.dumps(numeric_summary, ensure_ascii=False, default=str)[:4000]}\n\n"
+            f"[계산된 통계 요약]\n{json.dumps(numeric_summary, ensure_ascii=False, default=str, separators=(",", ":"))[:4000]}\n\n"
             "아래 JSON 배열만 출력하라(설명 금지). 각 원소:\n"
             '{"code":"UPPER_SNAKE","severity":"low|medium|high","message_ko":"한국어 설명",'
             '"recommended_action":["english_tag"],"evidence_keys":["어느 통계를 봤는지"]}'
@@ -529,7 +529,7 @@ def insight_node(state: EDAState) -> dict:
 [그룹 비교] {state.get('comparison_result', '해당 없음')}
 [관계 탐색] {state.get('relationship_result', '해당 없음')}
 [시간 분석] {state.get('time_result', '해당 없음')}
-[클러스터링] {json.dumps(state.get('clustering_result', {}), ensure_ascii=False)}
+[클러스터링] {json.dumps(statistical_metadata.get('clustering', {}), ensure_ascii=False, default=str, separators=(',', ':'))}
 """
     prompt = insight_prompt(state["user_question"], statistical_metadata, all_results)
     fb = state.get("validation_feedback")
