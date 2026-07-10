@@ -31,15 +31,104 @@ class AgentToolResult(BaseModel):
 def default_agents() -> dict[AgentName, RunnableAgent]:
     from DATA_Analyst_Assistant_Agent.agents.analysis.agent import AnalysisAgent
     from DATA_Analyst_Assistant_Agent.agents.eda.agent import EDAAgent
-    from DATA_Analyst_Assistant_Agent.agents.report.agent import ReportAgent
     from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 
     return {
         "sql_agent": SQLAgent(),
         "eda_agent": EDAAgent(),
         "analysis_agent": AnalysisAgent(),
-        "report_agent": ReportAgent(),
     }
+
+
+def compact_agent_envelope(
+    envelope: AgentEnvelope,
+    backend_adapter: BackendAdapter,
+) -> AgentCompactResult:
+    artifact_ids = envelope.artifact_ids()
+    validation_errors = [
+        check.detail
+        for check in envelope.validation.local_checks
+        if check.severity == "error" and not check.passed
+    ]
+    validation_warnings = [
+        check.detail
+        for check in envelope.validation.local_checks
+        if check.severity == "warning" and not check.passed
+    ]
+    validation_errors.extend(
+        flag.message for flag in envelope.validation.business_flags if flag.severity == "error"
+    )
+    validation_warnings.extend(
+        flag.message for flag in envelope.validation.business_flags if flag.severity == "warning"
+    )
+
+    return AgentCompactResult(
+        agent=envelope.agent_name,
+        status=_status_value(envelope),
+        summary=envelope.summary,
+        artifact_ids=artifact_ids,
+        artifacts=[_artifact_summary(backend_adapter, artifact_id) for artifact_id in artifact_ids],
+        validation_errors=validation_errors,
+        validation_warnings=validation_warnings,
+        fallback_used=envelope.fallback_used,
+        retryable=envelope.retry_hint.retryable,
+        error=_error_message(envelope),
+    )
+
+
+def _artifact_summary(backend_adapter: BackendAdapter, artifact_id: str) -> ArtifactSummary:
+    try:
+        artifact = backend_adapter.get_artifact(artifact_id)
+    except Exception:
+        return ArtifactSummary(artifact_id=artifact_id)
+
+    metadata = getattr(artifact, "metadata", None) or {}
+    preview = getattr(artifact, "preview", None) or {}
+    return ArtifactSummary(
+        artifact_id=artifact_id,
+        type=str(getattr(artifact, "type", "") or ""),
+        kind=str(metadata.get("kind", "")),
+        summary=_preview_summary(preview),
+        uri=getattr(artifact, "uri", None),
+    )
+
+
+def _status_value(envelope: AgentEnvelope) -> str:
+    if envelope.approval.required:
+        return AgentStatus.approval_required.value
+    if isinstance(envelope.status, AgentStatus):
+        return envelope.status.value
+    status = str(envelope.status)
+    valid_statuses = {item.value for item in AgentStatus}
+    if status not in valid_statuses:
+        raise ValueError(f"Invalid status from {envelope.agent_name}: {status}")
+    return status
+
+
+def _error_message(envelope: AgentEnvelope) -> str:
+    if envelope.status != AgentStatus.failed:
+        return ""
+    if envelope.retry_hint.reason_code and envelope.retry_hint.reason_code != "none":
+        return f"{envelope.summary} ({envelope.retry_hint.reason_code})"
+    return envelope.summary
+
+
+def _preview_summary(preview: Any) -> str:
+    if not isinstance(preview, dict):
+        return ""
+    parts = [
+        f"{key}={_truncate_text(str(value), 240)}"
+        for key, value in list(preview.items())[:3]
+    ]
+    return _truncate_text(", ".join(parts), 1000)
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 1:
+        return value[:limit]
+    return value[: limit - 1] + "…"
 
 
 class SubAgentAdapter:
@@ -60,96 +149,31 @@ class SubAgentAdapter:
         orchestration_state = to_orchestration_state(state)
         envelope = self.agents[agent_name].run(orchestration_state, self.runtime)
         return AgentToolResult(
-            agent_result=self._compact_envelope(envelope),
+            agent_result=compact_agent_envelope(envelope, self.backend_adapter),
             state_updates=self._state_updates(orchestration_state),
         )
 
     def _compact_envelope(self, envelope: AgentEnvelope) -> AgentCompactResult:
-        artifact_ids = envelope.artifact_ids()
-        status = self._status_value(envelope)
-        validation_errors = [
-            check.detail
-            for check in envelope.validation.local_checks
-            if check.severity == "error" and not check.passed
-        ]
-        validation_warnings = [
-            check.detail
-            for check in envelope.validation.local_checks
-            if check.severity == "warning" and not check.passed
-        ]
-        validation_errors.extend(
-            flag.message for flag in envelope.validation.business_flags if flag.severity == "error"
-        )
-        validation_warnings.extend(
-            flag.message for flag in envelope.validation.business_flags if flag.severity == "warning"
-        )
-
-        return AgentCompactResult(
-            agent=envelope.agent_name,
-            status=status,
-            summary=envelope.summary,
-            artifact_ids=artifact_ids,
-            artifacts=[self._artifact_summary(artifact_id) for artifact_id in artifact_ids],
-            validation_errors=validation_errors,
-            validation_warnings=validation_warnings,
-            fallback_used=envelope.fallback_used,
-            retryable=envelope.retry_hint.retryable,
-            error=self._error_message(envelope),
-        )
+        return compact_agent_envelope(envelope, self.backend_adapter)
 
     def _artifact_summary(self, artifact_id: str) -> ArtifactSummary:
-        try:
-            artifact = self.backend_adapter.get_artifact(artifact_id)
-        except Exception:
-            return ArtifactSummary(artifact_id=artifact_id)
-
-        metadata = getattr(artifact, "metadata", None) or {}
-        preview = getattr(artifact, "preview", None) or {}
-        return ArtifactSummary(
-            artifact_id=artifact_id,
-            type=str(getattr(artifact, "type", "") or ""),
-            kind=str(metadata.get("kind", "")),
-            summary=self._preview_summary(preview),
-            uri=getattr(artifact, "uri", None),
-        )
+        return _artifact_summary(self.backend_adapter, artifact_id)
 
     @staticmethod
     def _status_value(envelope: AgentEnvelope) -> str:
-        if envelope.approval.required:
-            return AgentStatus.approval_required.value
-        if isinstance(envelope.status, AgentStatus):
-            return envelope.status.value
-        status = str(envelope.status)
-        valid_statuses = {item.value for item in AgentStatus}
-        if status not in valid_statuses:
-            raise ValueError(f"Invalid status from {envelope.agent_name}: {status}")
-        return status
+        return _status_value(envelope)
 
     @staticmethod
     def _error_message(envelope: AgentEnvelope) -> str:
-        if envelope.status != AgentStatus.failed:
-            return ""
-        if envelope.retry_hint.reason_code and envelope.retry_hint.reason_code != "none":
-            return f"{envelope.summary} ({envelope.retry_hint.reason_code})"
-        return envelope.summary
+        return _error_message(envelope)
 
     @staticmethod
     def _preview_summary(preview: Any) -> str:
-        if not isinstance(preview, dict):
-            return ""
-        parts = [
-            f"{key}={SubAgentAdapter._truncate_text(str(value), 240)}"
-            for key, value in list(preview.items())[:3]
-        ]
-        return SubAgentAdapter._truncate_text(", ".join(parts), 1000)
+        return _preview_summary(preview)
 
     @staticmethod
     def _truncate_text(value: str, limit: int) -> str:
-        if len(value) <= limit:
-            return value
-        if limit <= 1:
-            return value[:limit]
-        return value[: limit - 1] + "…"
+        return _truncate_text(value, limit)
 
     @staticmethod
     def _state_updates(state: OrchestrationState) -> dict[str, Any]:

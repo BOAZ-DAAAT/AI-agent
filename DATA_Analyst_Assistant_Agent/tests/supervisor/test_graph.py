@@ -18,6 +18,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
     empty_supervisor_state,
+    merge_agent_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
 
@@ -42,6 +43,7 @@ class FakeSubAgentAdapter:
     def __init__(self, results: dict[str, AgentToolResult] | None = None) -> None:
         self.results = results or {}
         self.calls: list[str] = []
+        self.report_calls = 0
 
     def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
         self.calls.append(agent_name)
@@ -65,6 +67,25 @@ class FakeSubAgentAdapter:
             state_updates={
                 "generated_sql": "SELECT 1 AS sample_value" if agent_name == "sql_agent" else "",
             },
+        )
+
+    def generate(self, state: dict[str, Any]) -> AgentCompactResult:
+        self.report_calls += 1
+        if "report_agent" in self.results:
+            return self.results["report_agent"].agent_result
+        return AgentCompactResult(
+            agent="report_agent",
+            status="success",
+            summary="report_agent 완료",
+            artifact_ids=["artifact_report_agent"],
+            artifacts=[
+                ArtifactSummary(
+                    artifact_id="artifact_report_agent",
+                    type="report",
+                    kind="final_report",
+                    summary="report_agent 산출물 요약",
+                )
+            ],
         )
 
 
@@ -177,6 +198,9 @@ def _agent_flow_decisions(
         strict=True,
     ):
         agent = action.replace("call_", "")
+        if action == "call_report_agent":
+            decisions.append(_next_action_decision(action))
+            continue
         decisions.extend(
             [
                 _next_action_decision(action),
@@ -221,9 +245,6 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
         "semantic_validate_subagent_result",
         "summarize_step",
         "decide_next_action",
-        "execute_subagent",
-        "semantic_validate_subagent_result",
-        "summarize_step",
         "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
@@ -672,13 +693,21 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
             _clarify_decision(),
             _plan_decision(),
             _next_action_decision("call_report_agent"),
-            _guard_decision("call_report_agent"),
             _final_decision("failed_terminal", "리포트 산출물이 없습니다."),
         ]
     )
     graph = build_graph(subagent_adapter=adapter, model=model)
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["artifact_sql"],
+        ),
+    )
 
-    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "failed_terminal"
     assert "리포트 산출물 ID" in result["final_answer"]
@@ -687,7 +716,6 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
         "clarify_query",
         "create_analysis_plan",
         "decide_next_action",
-        "execute_subagent",
         "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
@@ -801,13 +829,21 @@ def test_finalize_preserves_validation_terminal_state_when_llm_returns_completed
                 _clarify_decision(),
                 _plan_decision(),
                 _next_action_decision("call_report_agent"),
-                _guard_decision("call_report_agent"),
                 _final_decision("completed", "LLM은 완료로 판단했습니다."),
             ]
         ),
     )
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["artifact_sql"],
+        ),
+    )
 
-    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "failed_terminal"
     assert "리포트 산출물 ID" in result["final_answer"]

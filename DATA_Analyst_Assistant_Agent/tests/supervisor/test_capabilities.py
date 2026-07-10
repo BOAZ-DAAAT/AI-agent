@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import DEFAULT_AGENT_CAPABILITIES
-from DATA_Analyst_Assistant_Agent.supervisor.graph import ACTION_TO_AGENT
+from DATA_Analyst_Assistant_Agent.supervisor.graph import ACTION_TO_AGENT, SUBAGENT_ACTION_TO_AGENT
 
 
 def test_default_capabilities_include_all_supervisor_agents() -> None:
@@ -22,6 +22,14 @@ def test_default_capability_actions_match_action_to_agent_mapping() -> None:
 
     for capability in DEFAULT_AGENT_CAPABILITIES:
         assert capability.action == actions_by_agent[capability.agent]
+
+
+def test_subagent_action_mapping_excludes_report_agent() -> None:
+    assert SUBAGENT_ACTION_TO_AGENT == {
+        "call_sql_agent": "sql_agent",
+        "call_eda_agent": "eda_agent",
+        "call_analysis_agent": "analysis_agent",
+    }
 
 
 def test_default_capabilities_are_json_serializable() -> None:

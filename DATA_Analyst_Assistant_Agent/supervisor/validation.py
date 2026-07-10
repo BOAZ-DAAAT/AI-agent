@@ -146,7 +146,7 @@ def validate_subagent_result(
 
 
 def _result_has_artifact(result: AgentCompactResult) -> bool:
-    if result.artifact_ids:
+    if any(bool(artifact_id) for artifact_id in result.artifact_ids):
         return True
     return any(bool(artifact.artifact_id) for artifact in result.artifacts)
 

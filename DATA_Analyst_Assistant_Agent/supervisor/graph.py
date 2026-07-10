@@ -39,6 +39,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     NextAction,
     StepSummary,
     SupervisorState,
+    artifact_ids_by_agent,
     merge_agent_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
@@ -52,6 +53,12 @@ ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     "call_eda_agent": "eda_agent",
     "call_analysis_agent": "analysis_agent",
     "call_report_agent": "report_agent",
+}
+
+SUBAGENT_ACTION_TO_AGENT: dict[NextAction, AgentName] = {
+    action: agent
+    for action, agent in ACTION_TO_AGENT.items()
+    if agent != "report_agent"
 }
 
 TERMINAL_STATES = {item.value for item in SupervisorTerminalState}
@@ -244,7 +251,14 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 updates["final_answer"] = guard.reason
             return updates
 
-        agent_name = ACTION_TO_AGENT.get(guard.next_action)
+        if guard.next_action == "call_report_agent":
+            return {
+                "next_action": "call_report_agent",
+                "current_step": "guard_redirected",
+                "llm_decisions": llm_decisions,
+            }
+
+        agent_name = SUBAGENT_ACTION_TO_AGENT.get(guard.next_action)
         if agent_name is None:
             return _terminal_failure_updates(
                 state,
@@ -263,6 +277,104 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
         return updates
 
     return execute_subagent_node
+
+
+def make_generate_report_node(report_generator: Any):
+    def generate_report_node(state: SupervisorState) -> SupervisorState:
+        evidence_ids = artifact_ids_by_agent(state)
+        has_evidence = any(
+            bool(evidence_ids.get(agent_name))
+            for agent_name in ("sql_agent", "eda_agent", "analysis_agent")
+        )
+        if not has_evidence:
+            result = _failed_report_result(
+                "리포트를 생성하려면 SQL, EDA, 분석 중 하나 이상의 근거 아티팩트가 필요합니다."
+            )
+        else:
+            try:
+                result = report_generator.generate(state)
+            except Exception as exc:
+                result = _failed_report_result(f"보고서 생성 또는 저장에 실패했습니다: {exc}")
+
+        if result.agent != "report_agent":
+            result = _failed_report_result(
+                f"보고서 생성기가 잘못된 agent 결과를 반환했습니다: {result.agent}"
+            )
+
+        merged = merge_agent_result(state, result)
+        validation = validate_subagent_result_contract(state, result)
+        valid = validation.valid and validation.next_action == "finalize"
+        terminal_state = "running" if valid else SupervisorTerminalState.failed_terminal.value
+        reason = validation.reason
+
+        completed_agents = [
+            agent for agent in merged.get("completed_agents", []) if agent != "report_agent"
+        ]
+        failed_agents = [
+            agent for agent in merged.get("failed_agents", []) if agent != "report_agent"
+        ]
+        if valid:
+            completed_agents.append("report_agent")
+        else:
+            failed_agents.append("report_agent")
+
+        validation_results = list(state.get("validation_results", []))
+        validation_results.append(
+            {
+                "agent": "report_agent",
+                "valid": valid,
+                "next_action": "finalize",
+                "terminal_state": terminal_state,
+                "reason": reason,
+            }
+        )
+        step_summaries = list(state.get("step_summaries", []))
+        step_summaries.append(
+            StepSummary(
+                step="generate_report",
+                agent="report_agent",
+                action="call_report_agent",
+                summary=result.summary,
+                artifact_ids=[artifact_id for artifact_id in result.artifact_ids if artifact_id],
+                next_action="finalize",
+            ).model_dump(mode="json")
+        )
+
+        updates: SupervisorState = {
+            **merged,
+            "last_agent_result": result.model_dump(mode="json"),
+            "validation_results": validation_results,
+            "step_summaries": step_summaries,
+            "completed_agents": completed_agents,
+            "failed_agents": failed_agents,
+            "terminal_state": terminal_state,
+            "next_action": "finalize",
+            "current_step": "generate_report",
+        }
+        if valid:
+            if merged.get("error_state", {}).get("agent") == "report_agent":
+                updates["error_state"] = {}
+        else:
+            updates["final_answer"] = reason
+            updates["error_state"] = {
+                "node": "generate_report",
+                "agent": "report_agent",
+                "message": reason,
+                "retryable": False,
+            }
+        return updates
+
+    return generate_report_node
+
+
+def _failed_report_result(message: str) -> AgentCompactResult:
+    return AgentCompactResult(
+        agent="report_agent",
+        status="failed",
+        summary=message,
+        retryable=False,
+        error=message,
+    )
 
 
 def make_validate_subagent_result_node(model: Any | None):
@@ -329,7 +441,7 @@ def make_validate_subagent_result_node(model: Any | None):
                 agent for agent in state.get("completed_agents", []) if agent != result.agent
             ]
 
-        if not decision.valid and raw_next_action in ACTION_TO_AGENT:
+        if not decision.valid and raw_next_action in SUBAGENT_ACTION_TO_AGENT:
             retry_counts = dict(state.get("retry_counts", {}))
             retry_counts[result.agent] = int(retry_counts.get(result.agent, 0)) + 1
             updates["retry_counts"] = retry_counts
@@ -510,13 +622,25 @@ def build_graph(
     subagent_adapter: Any,
     model: Any | None = None,
     checkpointer: Any | None = None,
+    *,
+    report_generator: Any | None = None,
 ):
+    if report_generator is None:
+        if hasattr(subagent_adapter, "generate"):
+            report_generator = subagent_adapter
+        else:
+            backend_adapter = getattr(subagent_adapter, "backend_adapter", subagent_adapter)
+            from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
+
+            report_generator = SupervisorReportGenerator(backend_adapter)
+
     graph = StateGraph(SupervisorState)
     graph.add_node("clarify_query", make_clarify_query_node(model))
     graph.add_node("collect_clarification", make_collect_clarification_node())
     graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
+    graph.add_node("generate_report", make_generate_report_node(report_generator))
     graph.add_node("validate_subagent_result", make_validate_subagent_result_node(model))
     graph.add_node(
         "semantic_validate_subagent_result",
@@ -540,13 +664,18 @@ def build_graph(
     graph.add_conditional_edges(
         "decide_next_action",
         _route_after_decide,
-        {"execute_subagent": "execute_subagent", "finalize": "finalize"},
+        {
+            "execute_subagent": "execute_subagent",
+            "generate_report": "generate_report",
+            "finalize": "finalize",
+        },
     )
     graph.add_conditional_edges(
         "execute_subagent",
         _route_after_execute,
         {
             "execute_subagent": "execute_subagent",
+            "generate_report": "generate_report",
             "validate_subagent_result": "validate_subagent_result",
             "finalize": "finalize",
         },
@@ -571,9 +700,11 @@ def build_graph(
         {
             "decide_next_action": "decide_next_action",
             "execute_subagent": "execute_subagent",
+            "generate_report": "generate_report",
             "finalize": "finalize",
         },
     )
+    graph.add_edge("generate_report", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -690,7 +821,9 @@ def _route_after_clarify(state: SupervisorState) -> str:
 def _route_after_decide(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") in ACTION_TO_AGENT:
+    if state.get("next_action") == "call_report_agent":
+        return "generate_report"
+    if state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     return "finalize"
 
@@ -700,7 +833,9 @@ def _route_after_execute(state: SupervisorState) -> str:
         return "validate_subagent_result"
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("current_step") == "guard_blocked" and state.get("next_action") in ACTION_TO_AGENT:
+    if state.get("next_action") == "call_report_agent":
+        return "generate_report"
+    if state.get("current_step") == "guard_blocked" and state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     return "finalize"
 
@@ -723,7 +858,9 @@ def _route_after_semantic_validate(state: SupervisorState) -> str:
 def _route_after_summarize(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") in ACTION_TO_AGENT:
+    if state.get("next_action") == "call_report_agent":
+        return "generate_report"
+    if state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     if state.get("next_action") in {"finalize", "fail"}:
         return "finalize"

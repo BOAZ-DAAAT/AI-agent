@@ -17,6 +17,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.supervisor.checkpoint import open_sqlite_checkpointer
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
+from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
@@ -196,6 +197,7 @@ class SupervisorAgent:
     def _build_runtime_graph(self, checkpointer: Any):
         return build_graph(
             SubAgentAdapter(backend_adapter=self.adapter),
+            report_generator=SupervisorReportGenerator(self.adapter),
             model=self._decision_model(),
             checkpointer=checkpointer,
         )
