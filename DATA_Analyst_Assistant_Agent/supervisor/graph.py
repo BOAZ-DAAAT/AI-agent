@@ -47,6 +47,21 @@ from DATA_Analyst_Assistant_Agent.supervisor.validation import (
 )
 
 
+
+
+def _has_specific_analysis_intent(query: str) -> bool:
+    q = " ".join(str(query or "").split()).lower()
+    if not q:
+        return False
+    specific_tokens = [
+        "요약", "월별", "추이", "차트", "프로파일", "품질", "데이터마트", "마트", "분석", "지난", "최근", "올해", "작년",
+        "summary", "monthly", "trend", "chart", "profile", "quality", "datamart", "analysis", "last ", "recent", "this year", "yearly",
+    ]
+    if any(token in q for token in specific_tokens):
+        return True
+    words = [part for part in q.split() if part]
+    return len(words) >= 4
+
 ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     "call_sql_agent": "sql_agent",
     "call_eda_agent": "eda_agent",
@@ -65,16 +80,25 @@ FINALIZE_PROTECTED_TERMINAL_STATES = {
 
 def make_clarify_query_node(model: Any | None):
     def clarify_query_node(state: SupervisorState) -> SupervisorState:
-        try:
-            decision = invoke_supervisor_decision(
-                state,
-                model,
-                CLARIFY_DECISION_PROMPT,
-                ClarificationDecision,
-                extra=build_clarification_context(state),
+        latest_query = str(state.get("clarified_query") or state.get("latest_user_query") or "")
+        if _has_specific_analysis_intent(latest_query):
+            decision = ClarificationDecision(
+                needs_clarification=False,
+                clarified_query=latest_query,
+                clarification_question="",
+                reason="Deterministic clarification bypass for specific analytics intent.",
             )
-        except Exception as exc:
-            return _decision_failure_updates(state, "clarify_query", exc)
+        else:
+            try:
+                decision = invoke_supervisor_decision(
+                    state,
+                    model,
+                    CLARIFY_DECISION_PROMPT,
+                    ClarificationDecision,
+                    extra=build_clarification_context(state),
+                )
+            except Exception as exc:
+                return _decision_failure_updates(state, "clarify_query", exc)
 
         updates: SupervisorState = {
             "clarified_query": decision.clarified_query,

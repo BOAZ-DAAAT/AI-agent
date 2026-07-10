@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import pymysql
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from backend.config import StorageMySQL
 from backend.mysql import db
 from backend.mysql.schemas import DatabasesResponse, PreviewResponse, TablesResponse
 from backend.storage.ingest import ingest_database
 from backend.storage.schemas import IngestRequest, IngestResponse
+from data_agent_backend.services.factory import create_backend_services
 
 router = APIRouter(prefix="/storage", tags=["storage"])
 
+_backend_services = None
+
+
+def _integrity_service():
+    global _backend_services
+    if _backend_services is None:
+        _backend_services = create_backend_services()
+    return _backend_services.integrity_service
+
 # 사용자 원격 DB의 모든 테이블을 로컬 저장소로 복사
 @router.post("/ingest", response_model=IngestResponse)
-def ingest(payload: IngestRequest) -> IngestResponse:
+def ingest(payload: IngestRequest, background_tasks: BackgroundTasks) -> IngestResponse:
     try:
         copied = ingest_database(
             payload.host, payload.port, payload.user, payload.password,
@@ -23,8 +33,17 @@ def ingest(payload: IngestRequest) -> IngestResponse:
         raise HTTPException(status_code=400, detail=str(exc))
     except pymysql.MySQLError as exc:
         raise HTTPException(status_code=502, detail=f"적재 실패: {exc}")
+    target_database = payload.target_database or payload.database
+    integrity = _integrity_service()
+    notify_result = integrity.notify_dataset_update(
+        target_database,
+        tables=copied,
+        metadata={"source": "storage_ingest", "source_database": payload.database, "row_counts": copied},
+    )
+    if notify_result.ok:
+        background_tasks.add_task(integrity.process_next_pending)
     return IngestResponse(
-        target_database=payload.target_database or payload.database,
+        target_database=target_database,
         tables=copied,
     )
 
