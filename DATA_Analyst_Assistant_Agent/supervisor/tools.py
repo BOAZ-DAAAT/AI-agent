@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -143,21 +144,51 @@ class SubAgentAdapter:
         *,
         backend_adapter: BackendAdapter,
         agents: dict[str, RunnableAgent] | None = None,
+        chart_reader: Any | None = None,
     ) -> None:
         self.backend_adapter = backend_adapter
         self.runtime = AgentRuntime(adapter=backend_adapter)
         self.agents = agents if agents is not None else default_agents()
+        self.chart_reader = chart_reader
 
     def call(self, agent_name: AgentName, state: SupervisorState) -> AgentToolResult:
         if agent_name not in self.agents:
             raise ValueError(f"Unknown supervisor sub-agent: {agent_name}")
 
         orchestration_state = to_orchestration_state(state)
-        envelope = self.agents[agent_name].run(orchestration_state, self.runtime)
+        agent = self.agents[agent_name]
+        envelope = agent.run(
+            orchestration_state,
+            self.runtime,
+            **self._agent_run_kwargs(agent_name, agent),
+        )
         return AgentToolResult(
             agent_result=compact_agent_envelope(envelope, self.backend_adapter),
             state_updates=self._state_updates(orchestration_state),
         )
+
+    def _agent_run_kwargs(self, agent_name: AgentName, agent: RunnableAgent) -> dict[str, Any]:
+        if agent_name != "analysis_agent":
+            return {}
+
+        signature = inspect.signature(agent.run)
+        parameters = signature.parameters
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        kwargs: dict[str, Any] = {}
+        if accepts_kwargs or "chart_artifact_loader" in parameters:
+            kwargs["chart_artifact_loader"] = self._chart_artifact_loader
+        if self.chart_reader is not None and (accepts_kwargs or "chart_reader" in parameters):
+            kwargs["chart_reader"] = self.chart_reader
+        return kwargs
+
+    def _chart_artifact_loader(self, artifact_id: str) -> bytes:
+        if hasattr(self.backend_adapter, "read_artifact_bytes"):
+            return self.backend_adapter.read_artifact_bytes(artifact_id)
+        services = getattr(self.backend_adapter, "services", None)
+        artifact_store = getattr(services, "artifact_store", None)
+        if artifact_store is not None and hasattr(artifact_store, "read_bytes"):
+            return artifact_store.read_bytes(artifact_id)
+        raise RuntimeError("Backend adapter does not support artifact byte reads.")
 
     def _compact_envelope(self, envelope: AgentEnvelope) -> AgentCompactResult:
         return compact_agent_envelope(envelope, self.backend_adapter)

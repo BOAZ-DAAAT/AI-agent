@@ -43,6 +43,9 @@ class FakeAdapter:
             preview={"row_count": 3},
         )
 
+    def read_artifact_bytes(self, artifact_id: str) -> bytes:
+        return f"bytes:{artifact_id}".encode("utf-8")
+
 
 class StubAgent:
     name = "sql_agent"
@@ -97,6 +100,47 @@ def test_subagent_adapter_promotes_success_with_required_approval() -> None:
 
     assert result.agent_result.status == "success"
     assert result.agent_result.approval.required is True
+
+
+class ChartAwareAnalysisAgent:
+    name = "analysis_agent"
+
+    def __init__(self) -> None:
+        self.loaded_bytes: bytes | None = None
+        self.chart_reader: Any | None = None
+
+    def run(
+        self,
+        state: OrchestrationState,
+        runtime,
+        *,
+        chart_artifact_loader=None,
+        chart_reader=None,
+    ) -> AgentEnvelope:
+        assert chart_artifact_loader is not None
+        self.loaded_bytes = chart_artifact_loader("artifact_chart")
+        self.chart_reader = chart_reader
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="analysis_agent",
+            summary="analysis complete",
+        )
+
+
+def test_subagent_adapter_injects_chart_loader_and_reader_for_analysis_agent() -> None:
+    agent = ChartAwareAnalysisAgent()
+    reader = object()
+    adapter = SubAgentAdapter(
+        backend_adapter=FakeAdapter(),
+        agents={"analysis_agent": agent},
+        chart_reader=reader,
+    )
+
+    result = adapter.call("analysis_agent", _state())
+
+    assert result.agent_result.status == "success"
+    assert agent.loaded_bytes == b"bytes:artifact_chart"
+    assert agent.chart_reader is reader
 
 
 class BusinessFlagAgent:

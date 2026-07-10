@@ -374,6 +374,9 @@ class BackendAdapter:
     def read_artifact_text(self, artifact_id: str) -> str:
         return self.services.artifact_store.read_text(artifact_id)
 
+    def read_artifact_bytes(self, artifact_id: str) -> bytes:
+        return self.services.artifact_store.read_bytes(artifact_id)
+
     @property
     def base_data_dir(self) -> Path:
         return self.services.config.base_data_dir
