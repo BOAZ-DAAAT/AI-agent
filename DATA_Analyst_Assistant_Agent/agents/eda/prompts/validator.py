@@ -30,7 +30,7 @@ def validator_prompt(
 [실행된 분석] {completed_analyses}
 
 [검증된 수치 (인사이트의 숫자는 이것과 일치해야 한다)]
-{json.dumps(statistical_metadata, ensure_ascii=False, indent=2)}
+{json.dumps(statistical_metadata, ensure_ascii=False, default=str, separators=(",", ":"))}
 
 [인사이트]
 {insight_result}

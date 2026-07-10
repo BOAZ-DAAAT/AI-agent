@@ -16,6 +16,8 @@ from __future__ import annotations
 import ast
 import os
 import time
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Dict
 
 import numpy as np
@@ -153,13 +155,27 @@ def _emit_chart_request(ctx, req: CodegenRequest, value: Any) -> None:
 
 
 def _py(v: Any) -> Any:
-    """numpy 스칼라 → 파이썬 기본형 (JSON 직렬화용)."""
+    """numpy/pandas 결과를 JSON 직렬화 가능한 기본형으로 변환한다."""
+    if v is pd.NA or v is pd.NaT:
+        return None
+    if isinstance(v, (pd.Timestamp, pd.Timedelta)):
+        return str(v)
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, Decimal):
+        return float(v)
     if isinstance(v, np.integer):
         return int(v)
     if isinstance(v, np.floating):
         return None if np.isnan(v) else float(v)
     if isinstance(v, np.bool_):
         return bool(v)
+    if isinstance(v, np.ndarray):
+        return [_py(x) for x in v.tolist()]
+    if isinstance(v, dict):
+        return {str(k): _py(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [_py(x) for x in v]
     return v
 
 
@@ -174,7 +190,7 @@ def _coerce_result(result: Any):
         # groupby 등 의미있는 인덱스(지역명 등)는 답 자체라 컬럼으로 보존한다(records가 인덱스를 버림)
         if not isinstance(r.index, pd.RangeIndex):
             r = r.reset_index()
-        return r.where(pd.notna(r), None).to_dict(orient="records"), f"frame{list(result.shape)}", note
+        return _py(r.where(pd.notna(r), None).to_dict(orient="records")), f"frame{list(result.shape)}", note
     if isinstance(result, pd.Series):
         note = ""
         s = result
