@@ -57,6 +57,7 @@ class SQLAgent:
                 "mart_design": {},
                 "sql_draft": {},
                 "sql_result": None,
+                "statement_results": [],
                 "row_count": 0,
                 "precheck_result": None,
                 "postcheck_result": None,
@@ -69,6 +70,10 @@ class SQLAgent:
                 "max_retries": 2,
                 "feedback": "",
                 "error": "",
+                "generation_source": "llm",
+                "fallback_reason": "",
+                "failed_statement_index": None,
+                "failed_statement_sql": "",
                 "final_answer": "",
             }
         )
@@ -97,7 +102,12 @@ class SQLAgent:
             "plan": result.get("plan") or {},
             "mart_design": result.get("mart_design") or {},
             "sql_draft": sql_draft,
+            "statement_results": result.get("statement_results") or [],
             "validation": result.get("validation") or {},
+            "generation_source": result.get("generation_source") or "llm",
+            "fallback_reason": result.get("fallback_reason") or "",
+            "failed_statement_index": result.get("failed_statement_index"),
+            "failed_statement_sql": result.get("failed_statement_sql") or "",
             "final_answer": result.get("final_answer") or "",
             "source": "main/sql_agent/lang graph",
         }
@@ -112,6 +122,7 @@ class SQLAgent:
                 "kind": "sql_lang_graph_result",
                 "source": "main/sql_agent/lang graph",
                 "sql_type": sql_draft.get("sql_type"),
+                "generation_source": result.get("generation_source") or "llm",
             },
             preview={
                 "question_type": (result.get("plan") or {}).get("question_type"),
@@ -214,6 +225,16 @@ class SQLAgent:
                 detail=f"row_count={result_row_count}.",
             ),
         ]
+        fallback_used = bool(result.get("generation_source") in {"fallback", "hard_fallback"} and result.get("retry_count", 0) > 0)
+        if result.get("generation_source") in {"fallback", "hard_fallback"}:
+            checks.append(
+                LocalCheck(
+                    name="main_sql_agent_generation_source",
+                    passed=not fallback_used,
+                    severity="warning" if fallback_used else "info",
+                    detail=f"generation_source={result.get('generation_source')} reason={result.get('fallback_reason') or 'none'}",
+                )
+            )
         if validation.get("result") == "invalid":
             checks.append(
                 LocalCheck(
@@ -238,6 +259,7 @@ class SQLAgent:
                 "reason_code": retry_hint.get("reason_code", "main_sql_agent_validation" if has_error else "none"),
                 "details": retry_hint.get("details", {}),
             },
+            fallback_used=fallback_used,
         )
 
     @staticmethod

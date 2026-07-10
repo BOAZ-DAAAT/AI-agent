@@ -79,11 +79,15 @@ def generate_query_prompt(state, feedback: str) -> str:
 {feedback if feedback else "없음"}
 
 규칙:
-- MySQL SELECT SQL만 생성
-- WITH 절 허용
-- 질문에 없는 조건 임의 추가 금지
-- 정합성 문제가 있는 컬럼/테이블 주의
-- 반드시 JSON만 출력
+ - MySQL SELECT SQL만 생성
+ - WITH 절 허용
+ - 필요하면 여러 개의 SELECT/WITH 문을 세미콜론으로 구분해 출력할 수 있다
+ - 각 statement는 반드시 SELECT 또는 WITH 로 시작해야 한다
+ - simple 경로에서는 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/CREATE 금지
+ - 이전에 특정 statement가 실패했다면 전체를 무작정 다시 쓰지 말고 실패 statement를 우선 수정하라
+ - 질문에 없는 조건 임의 추가 금지
+ - 정합성 문제가 있는 컬럼/테이블 주의
+ - 반드시 JSON만 출력
 
 출력 형식:
 {{

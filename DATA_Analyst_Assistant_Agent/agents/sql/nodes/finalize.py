@@ -6,6 +6,19 @@ from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 
 
+def _format_statement_results(state: AgentState) -> str:
+    statement_results = list(state.get("statement_results") or [])
+    if not statement_results:
+        return format_result_rows(state.get("sql_result"), max_rows=5)
+    chunks: list[str] = []
+    for item in statement_results[:5]:
+        chunks.append(
+            f"[statement {int(item.get('index', 0)) + 1}] row_count={item.get('row_count', 0)} "
+            f"preview={format_result_rows(item.get('rows'), max_rows=3)}"
+        )
+    return "\n".join(chunks)
+
+
 def finalize_answer(state: AgentState):
     if state["validation"].get("result") != "valid":
         return {
@@ -18,12 +31,19 @@ def finalize_answer(state: AgentState):
 
     route_kind = state.get("plan", {}).get("route_kind") or ("comprehensive" if state["plan"].get("task_type") == "data_mart_build" else "simple")
     sql_text = state.get("sql_draft", {}).get("sql", "")
+    fallback_note = ""
+    if state.get("generation_source") in {"fallback", "hard_fallback"}:
+        fallback_note = (
+            f"\n주의: 이 SQL은 LLM 재생성 실패 또는 강제 fallback으로 생성되었습니다. "
+            f"reason={state.get('fallback_reason') or 'unknown'}"
+        )
     if route_kind == "comprehensive":
         return {
             "final_answer": (
                 "comprehensive 경로로 datamart 생성 SQL을 작성하고 실행했습니다.\n"
                 f"대상 테이블: {state.get('sql_draft', {}).get('target_table') or '미지정'}\n"
-                f"실행 결과 미리보기: {format_result_rows(state.get('sql_result'), max_rows=5)}\n"
+                f"실행 결과 미리보기: {_format_statement_results(state)}\n"
+                f"{fallback_note}\n"
                 f"최종 SQL:\n{sql_text}"
             )
         }
@@ -31,7 +51,8 @@ def finalize_answer(state: AgentState):
         "final_answer": (
             "simple 경로로 조회 SQL을 작성하고 실행했습니다.\n"
             f"행 수: {state.get('row_count', 0)}\n"
-            f"실행 결과 미리보기: {format_result_rows(state.get('sql_result'), max_rows=5)}\n"
+            f"실행 결과 미리보기: {_format_statement_results(state)}\n"
+            f"{fallback_note}\n"
             f"최종 SQL:\n{sql_text}"
         )
     }

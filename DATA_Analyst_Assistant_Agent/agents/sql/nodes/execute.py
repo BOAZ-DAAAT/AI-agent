@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 import os
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import (
@@ -14,6 +15,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql._runtime import (
     is_safe_query_sql,
     run_sql_commit,
     run_sql_fetchall,
+    split_sql_statements,
     validate_mysql_sql,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
@@ -21,6 +23,25 @@ from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 # 마트 생성 후 sql_result 에 담을 미리보기 행 수. 하류(EDA/분석)는 마트를 DB 로 직접
 # 조회(전체)하므로 이 미리보기는 검증/최종답변 표시·CSV 폴백용 소량 샘플이다.
 MART_PREVIEW_ROWS = int(os.getenv("MART_PREVIEW_ROWS", "100"))
+
+
+def _statement_result(index: int, statement_sql: str, rows: list[Any]) -> dict[str, Any]:
+    columns: list[str] = []
+    if rows:
+        first = rows[0]
+        if hasattr(first, "_mapping"):
+            columns = list(first._mapping.keys())
+        elif isinstance(first, dict):
+            columns = list(first.keys())
+        elif isinstance(first, (list, tuple)):
+            columns = [f"col_{idx + 1}" for idx, _ in enumerate(first)]
+    return {
+        "index": index,
+        "sql": statement_sql,
+        "row_count": len(rows),
+        "columns": columns,
+        "rows": rows,
+    }
 
 
 def execute_sql(state: AgentState):
@@ -46,19 +67,39 @@ def execute_sql(state: AgentState):
             if not is_safe_query_sql(sql):
                 return {
                     "sql_result": None,
+                    "statement_results": [],
                     "row_count": 0,
                     "precheck_result": pre_rows,
                     "postcheck_result": None,
                     "error": "조회 SQL 안전성 검사 실패"
                 }
 
-            rows = run_sql_fetchall(sql) if can_use_live_db() else offline_select_rows(sql)
+            statements = split_sql_statements(sql)
+            statement_results: list[dict[str, Any]] = []
+            for index, statement_sql in enumerate(statements):
+                try:
+                    rows = run_sql_fetchall(statement_sql) if can_use_live_db() else offline_select_rows(statement_sql)
+                except Exception as e:
+                    return {
+                        "sql_result": statement_results[-1]["rows"] if statement_results else None,
+                        "statement_results": statement_results,
+                        "row_count": statement_results[-1]["row_count"] if statement_results else 0,
+                        "precheck_result": pre_rows,
+                        "postcheck_result": None,
+                        "error": str(e),
+                        "failed_statement_index": index,
+                        "failed_statement_sql": statement_sql,
+                    }
+                statement_results.append(_statement_result(index, statement_sql, list(rows)))
 
             return {
-                "sql_result": rows,
-                "row_count": len(rows),
+                "sql_result": statement_results[-1]["rows"] if statement_results else None,
+                "statement_results": statement_results,
+                "row_count": statement_results[-1]["row_count"] if statement_results else 0,
                 "precheck_result": pre_rows,
                 "postcheck_result": None,
+                "failed_statement_index": None,
+                "failed_statement_sql": "",
                 "error": ""
             }
 
@@ -66,6 +107,7 @@ def execute_sql(state: AgentState):
         if not ok:
             return {
                 "sql_result": None,
+                "statement_results": [],
                 "row_count": 0,
                 "precheck_result": pre_rows,
                 "postcheck_result": None,
@@ -101,17 +143,23 @@ def execute_sql(state: AgentState):
 
         return {
             "sql_result": mart_rows,
+            "statement_results": [],
             "row_count": len(mart_rows),
             "precheck_result": pre_rows,
             "postcheck_result": post_rows,
+            "failed_statement_index": None,
+            "failed_statement_sql": "",
             "error": ""
         }
 
     except Exception as e:
         return {
             "sql_result": None,
+            "statement_results": [],
             "row_count": 0,
             "precheck_result": None,
             "postcheck_result": None,
+            "failed_statement_index": state.get("failed_statement_index"),
+            "failed_statement_sql": state.get("failed_statement_sql", ""),
             "error": str(e)
         }
