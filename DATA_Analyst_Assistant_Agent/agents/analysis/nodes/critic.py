@@ -16,11 +16,13 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
     AnalysisIntent,
     CodeCritique,
     GeneratedAnalysisCode,
 )
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.coverage import build_answer_coverage
 
 
 CRITIC_SYSTEM_PROMPT = """You are a skeptical senior statistician reviewing one
@@ -55,7 +57,7 @@ def critique_analysis_code(
 ) -> CodeCritique:
     """Adversarially review the code + its result for method validity."""
 
-    chat_model = model or get_chat_model(model_env="CODE_GENERATOR_MODEL", temperature=0)
+    chat_model = model or get_chat_model(model_env="ANALYSIS_CRITIC_MODEL", temperature=0)
     structured_model = chat_model.with_structured_output(CodeCritique)
     human = (
         f"Objective: {intent.objective}\n"
@@ -73,3 +75,46 @@ def critique_analysis_code(
         HumanMessage(content=human),
     ])
     return verdict if isinstance(verdict, CodeCritique) else CodeCritique.model_validate(verdict)
+
+
+def deterministic_precheck(
+    intent: AnalysisIntent,
+    context: AnalysisContext,
+    code: GeneratedAnalysisCode,
+    result: dict[str, Any],
+) -> CodeCritique | None:
+    """Cheap structural checks before spending an LLM critic call.
+
+    The LLM critic remains method-only. These checks catch deterministic
+    codegen failures such as empty statistics or generated code that never
+    touches the metric/dimension/time signals the classifier identified.
+    """
+
+    issues: list[str] = []
+    if not str(result.get("summary") or "").strip():
+        issues.append("result.summary is empty")
+    if not result.get("findings"):
+        issues.append("result.findings is empty")
+    statistics = result.get("statistics")
+    if not isinstance(statistics, dict) or not statistics:
+        issues.append("result.statistics must contain computed values")
+
+    coverage = build_answer_coverage(intent, context, code, result)
+    if coverage.coverage_status == "missing":
+        issues.append(
+            "generated code did not use requested analysis signals: "
+            + ", ".join(coverage.missing_requirements)
+        )
+    elif coverage.coverage_status == "partial" and intent.is_time_based:
+        issues.append(
+            "time-based analysis only partially covered requested signals: "
+            + ", ".join(coverage.missing_requirements)
+        )
+
+    if not issues:
+        return None
+    feedback = (
+        "Fix deterministic pre-check failures before method review: "
+        + "; ".join(issues)
+    )
+    return CodeCritique(verdict="fail", method_issues=issues, feedback=feedback)

@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.analyze import AnalysisOutcome
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.coverage import build_answer_coverage
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisEvidence,
@@ -110,6 +111,7 @@ def build_result_from_outcome(
         data_quality_notes=_quality_notes(dataframe, profiles),
         eda_profile_summaries=profiles,
         human_review=HumanReview(required=review_required, reason=review_reason),
+        answer_coverage=build_answer_coverage(intent, context, outcome.code, outcome.result),
         intent=intent,
         generated_code=(outcome.code.code if outcome.code else ""),
         code_critique=outcome.critique,
