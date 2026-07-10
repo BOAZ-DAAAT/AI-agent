@@ -20,13 +20,13 @@ def plan_prompt(state) -> str:
 
 **route_kind는 반드시 "simple" 또는 "comprehensive" 중 하나다.**
 
-- **simple**: SELECT 문으로 결과를 바로 반환할 수 있는 모든 질문
-  - 단순 조회, 필터, 집계(SUM/COUNT/AVG), 트렌드(GROUP BY 날짜), 랭킹(ORDER BY + LIMIT) 모두 포함
-  - "일별 매출 추이", "상위 10개 제품", "월별 주문 수" 등은 simple
+- **simple**: SELECT 문으로 결과를 바로 조회하여 반환할 수 있는 단편적이고 단순한 조회 질문
+  - 단순 목록 조회, 특정 조건의 단일 레코드 확인 등 분석적 추세나 깊은 탐색이 필요 없는 단순 조회
+  - 예: "상위 10명 판매자 조회해줘", "특정 회원 ID의 가입일 조회", "카테고리 목록 출력", "가장 비싼 상품 5개 조회" 등은 simple
 
-- **comprehensive**: 재사용 가능한 데이터마트 테이블(CREATE TABLE AS SELECT)을 구축해야 하는 경우
-  - 사용자가 명시적으로 "데이터마트", "마트 생성", "분석용 테이블 만들어줘" 등을 요청
-  - 또는 여러 팀이 공유해야 할 복잡한 기반 테이블이 필요한 경우
+- **comprehensive**: 분석적 깊이가 있거나, 시계열 추이 분석, 혹은 다각적인 비즈니스 분석이 필요하여 분석용 데이터마트(CREATE TABLE AS SELECT)를 구축하고 이를 기반으로 분석하는 것이 적절한 경우
+  - 사용자가 명시적으로 "데이터마트", "마트 생성", "분석용 테이블 만들어줘" 등을 요청한 경우
+  - 또는 일별/월별 매출 추이 등 추세 분석, 카테고리별 성과 분석, 복잡한 다중 조인(Multi-join) 및 다단계 CTE(Common Table Expression) 분석, 복잡한 비즈니스 로직(예: 코호트 분석, LTV 분석, 리텐션 분석, 고객 세그먼트별 다차원 교차 분석 등)이 포함되어 깊은 분석이 필요한 경우
 
 ## task_type 규칙
 - route_kind=comprehensive → task_type=data_mart_build
