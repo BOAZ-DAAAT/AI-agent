@@ -90,6 +90,7 @@ class AgentState(TypedDict):
     sql_draft: Dict[str, Any]
 
     sql_result: Any
+    statement_results: List[Dict[str, Any]]
     row_count: int
 
     precheck_result: Any
@@ -104,4 +105,8 @@ class AgentState(TypedDict):
     max_retries: int
     feedback: str
     error: str
+    generation_source: str
+    fallback_reason: str
+    failed_statement_index: Optional[int]
+    failed_statement_sql: str
     final_answer: str

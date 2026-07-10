@@ -5,6 +5,7 @@ from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import extract_schema_json, schema_tables
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 
 
 def _normalized_sql(sql: str) -> str:
@@ -31,15 +32,39 @@ def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
 def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     sql = sql_draft.get("sql") or ""
+    statements = split_sql_statements(sql)
     route_kind = plan.get("route_kind") or ("comprehensive" if plan.get("task_type") == "data_mart_build" else "simple")
     sql_type = sql_draft.get("sql_type", "select")
-    dialect_issue = mysql_dialect_error(sql)
-    if dialect_issue:
-        findings.append({"category": "mysql_dialect_error", "severity": "error", "retryable": True, "detail": dialect_issue})
+    for index, statement in enumerate(statements):
+        dialect_issue = mysql_dialect_error(statement)
+        if dialect_issue:
+            findings.append({
+                "category": "mysql_dialect_error",
+                "severity": "error",
+                "retryable": True,
+                "detail": f"{index + 1}번 statement: {dialect_issue}",
+            })
     if route_kind == "simple" and sql_type != "select":
         findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "simple 경로에서는 조회 SQL만 허용됩니다."})
+    if route_kind == "simple":
+        for index, statement in enumerate(statements):
+            first_word = _normalized_sql(statement).split()[0].upper() if _normalized_sql(statement) else ""
+            if first_word not in {"SELECT", "WITH"}:
+                findings.append({
+                    "category": "route_kind_mismatch",
+                    "severity": "error",
+                    "retryable": True,
+                    "detail": f"simple 경로의 {index + 1}번 statement는 SELECT/WITH로 시작해야 합니다.",
+                })
     if route_kind == "comprehensive" and sql_type == "select":
         findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "comprehensive 경로에서는 datamart 생성 SQL이 필요합니다."})
+    if route_kind == "comprehensive" and len(statements) > 1:
+        findings.append({
+            "category": "route_kind_mismatch",
+            "severity": "error",
+            "retryable": True,
+            "detail": "comprehensive 경로에서는 단일 datamart 생성 statement만 허용됩니다.",
+        })
     return findings
 
 

@@ -2,10 +2,44 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import default_mart_design, try_llm_json
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import safe_json_parse
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, MartDesign
+
+
+def _normalize_column_list(values: Any) -> list[str]:
+    if not values:
+        return []
+    if not isinstance(values, list):
+        values = [values]
+
+    normalized: list[str] = []
+    for item in values:
+        if isinstance(item, str):
+            candidate = item.strip()
+        elif isinstance(item, dict):
+            candidate = str(
+                item.get("column_name")
+                or item.get("name")
+                or item.get("column")
+                or item.get("field")
+                or ""
+            ).strip()
+        else:
+            candidate = str(item).strip()
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
+def _normalize_mart_design_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    for key in ("key_columns", "measure_columns", "dimension_columns", "source_tables"):
+        normalized[key] = _normalize_column_list(normalized.get(key))
+    return normalized
 
 
 def design_mart(state: AgentState):
@@ -17,4 +51,5 @@ def design_mart(state: AgentState):
     parsed = safe_json_parse(response, fallback) if response else fallback
     merged = dict(fallback)
     merged.update({k: v for k, v in parsed.items() if v not in (None, "", [], {})})
-    return {"mart_design": MartDesign(**merged).model_dump()}
+    normalized = _normalize_mart_design_payload(merged)
+    return {"mart_design": MartDesign(**normalized).model_dump()}

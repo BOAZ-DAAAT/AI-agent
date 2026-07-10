@@ -85,6 +85,21 @@ def retry_feedback_text(state: AgentState) -> str:
             f"suggested_action={retry_hint.get('suggested_action', 'continue')}, "
             f"details={retry_hint.get('details', {})}"
         )
+    if state.get("failed_statement_index") is not None:
+        feedback_parts.append(f"직전 실패 statement 번호: {int(state['failed_statement_index']) + 1}")
+    if str(state.get("failed_statement_sql") or "").strip():
+        feedback_parts.append(f"직전 실패 statement SQL: {state['failed_statement_sql']}")
+    statement_results = list(state.get("statement_results") or [])
+    if statement_results:
+        successful = [
+            {
+                "index": item.get("index"),
+                "row_count": item.get("row_count"),
+                "sql": item.get("sql"),
+            }
+            for item in statement_results[:3]
+        ]
+        feedback_parts.append(f"직전 성공/부분 성공 statement 요약: {successful}")
     return "\n".join(feedback_parts)
 
 

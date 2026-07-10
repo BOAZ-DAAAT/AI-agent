@@ -22,6 +22,7 @@ from sqlalchemy import text
 from DATA_Analyst_Assistant_Agent.shared.db import get_db_engine
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 2))

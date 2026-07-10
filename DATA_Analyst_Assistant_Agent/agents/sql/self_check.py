@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 from DATA_Analyst_Assistant_Agent.shared.contracts import LocalCheck
 
 _BLOCKED_KEYWORDS: set[str] = {
@@ -26,6 +27,7 @@ _MYSQL_BANNED_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bdate_trunc\s*\(", "PostgreSQL DATE_TRUNC() 함수는 MySQL에서 지원되지 않습니다. DATE_FORMAT() 또는 TIMESTAMP() 조합을 사용하세요."),
     (r"\bilike\b", "PostgreSQL ILIKE 연산자는 MySQL에서 지원되지 않습니다. LOWER(col) LIKE LOWER(pattern) 형태를 사용하세요."),
     (r"::[a-z_]+", "PostgreSQL 타입 캐스팅(::type)은 MySQL에서 지원되지 않습니다. CAST(... AS ...)를 사용하세요."),
+    (r"\b(count|sum|avg|min|max)\s*\(\s*\)", "집계 함수에 인자가 비어 있습니다. COUNT(*) 또는 적절한 컬럼/표현식을 사용하세요."),
 )
 
 
@@ -43,14 +45,20 @@ def _first_match(sql: str, patterns: Iterable[tuple[str, str]]) -> tuple[str, st
 
 
 def check_read_only(sql: str) -> LocalCheck:
-    normalized = _normalize(sql).lstrip()
-    first_word = normalized.split()[0].upper() if normalized else ""
-    passed = first_word in ("SELECT", "WITH")
+    statements = split_sql_statements(sql)
+    first_words = []
+    passed = True
+    for statement in statements:
+        normalized = _normalize(statement).lstrip()
+        first_word = normalized.split()[0].upper() if normalized else ""
+        first_words.append(first_word)
+        if first_word not in ("SELECT", "WITH"):
+            passed = False
     return LocalCheck(
         name="read_only_sql",
         passed=passed,
         severity="error" if not passed else "info",
-        detail=f"SQL starts with '{first_word}'." if first_word else "Empty SQL.",
+        detail=f"Statements start with {first_words}." if first_words else "Empty SQL.",
     )
 
 
@@ -68,13 +76,14 @@ def check_blocked_keywords(sql: str) -> LocalCheck:
 
 def check_single_statement(sql: str) -> LocalCheck:
     normalized = _normalize(sql)
+    statements = split_sql_statements(normalized)
     match = _MULTI_STATEMENT_PATTERN.search(normalized)
-    passed = match is None
+    passed = len(statements) <= 1 and match is None
     return LocalCheck(
         name="single_statement",
         passed=passed,
         severity="error" if not passed else "info",
-        detail="Multiple statements detected." if not passed else "Single statement.",
+        detail=f"{len(statements)} statements detected." if not passed else "Single statement.",
     )
 
 
@@ -122,15 +131,18 @@ def run_sql_self_check(
     sql: str,
     columns: list[str] | None = None,
     row_count: int | None = None,
+    *,
+    allow_multi_statement: bool = False,
 ) -> list[LocalCheck]:
     """Run all SQL safety checks. Pre-execution checks always run.
     Post-execution checks (columns, row_count) run when values are provided."""
     checks = [
         check_read_only(sql),
         check_blocked_keywords(sql),
-        check_single_statement(sql),
         check_mysql_dialect_compatibility(sql),
     ]
+    if not allow_multi_statement:
+        checks.append(check_single_statement(sql))
     if columns is not None:
         checks.append(check_preview_has_columns(columns))
     if row_count is not None:
