@@ -32,6 +32,9 @@ services:
       STORAGE_MYSQL_USER: root           # ingest가 DB DROP/CREATE를 하므로 root 필요
       STORAGE_MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TOKEN_TTL: ${AUTH_TOKEN_TTL:-43200}
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
     ports:
       - "8000:8000"                      # 외부 공개 (프론트가 브라우저에서 직접 호출)
     depends_on:
