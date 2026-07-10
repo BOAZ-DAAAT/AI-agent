@@ -84,10 +84,14 @@ class SQLAgent:
         generated_sql = sql_draft.get("sql") or ""
         state.generated_sql = generated_sql
         state.planner_mode = "llm"
+        # comprehensive(마트) 경로면 마트 테이블 참조를 plan에 실어 하류로 넘긴다.
+        # 하류(EDA/분석)는 이 이름으로 DB에서 마트를 직접 조회한다. simple 경로면 target_table 없음.
+        target_table = sql_draft.get("target_table") if sql_draft.get("sql_type") != "select" else None
         if state.plan is not None:
             state.plan.generated_sql = generated_sql
             state.plan.source_sql = generated_sql
             state.plan.planner_mode = "llm"
+            state.plan.target_table = target_table or None
 
         plan_payload = {
             "plan": result.get("plan") or {},

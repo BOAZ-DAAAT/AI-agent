@@ -449,6 +449,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         route_kind=str(plan_payload.get("route_kind") or "simple"),
         generated_sql=generated_sql,
         source_sql=generated_sql,
+        target_table=plan_payload.get("target_table") or None,
     )
     limitations = [
         str(finding.get("message") or "")
