@@ -6,8 +6,13 @@ import pytest
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     AnalysisCodeError,
     execute_generated_code,
+    generate_analysis_code,
 )
-from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import GeneratedAnalysisCode
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
+    AnalysisIntent,
+    GeneratedAnalysisCode,
+)
 
 
 def _frame() -> pd.DataFrame:
@@ -63,3 +68,49 @@ def test_primitives_namespace_is_available() -> None:
 def test_file_and_builtins_escape_are_blocked() -> None:
     with pytest.raises(AnalysisCodeError):
         execute_generated_code(_code("data = open('x.txt')\nresult = {}"), _frame())
+
+
+class _CapturingCodeModel:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, messages):
+        self.messages = messages
+        return GeneratedAnalysisCode(
+            rationale="retry",
+            code=(
+                "result = {'summary': 'ok', 'findings': [], "
+                "'statistics': {}, 'limitations': []}"
+            ),
+        )
+
+
+def test_generate_prompt_keeps_supervisor_failure_separate_from_critic_feedback() -> None:
+    context = AnalysisContext(
+        user_question="매출 분석",
+        goal="매출 분석",
+        route_kind="simple",
+        columns=["amount"],
+        last_failure={
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+        },
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(
+        AnalysisIntent(objective="매출 분석"),
+        context,
+        model=model,
+        feedback="critic says aggregate first",
+    )
+
+    prompt = model.messages[1].content
+    assert "Previous Supervisor failure:" in prompt
+    assert "method_review_failed" in prompt
+    assert "wrong method" in prompt
+    assert "A previous attempt was rejected" in prompt
+    assert "critic says aggregate first" in prompt

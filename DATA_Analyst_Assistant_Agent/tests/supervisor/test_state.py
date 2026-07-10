@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    ApprovalRequirement,
+    SupervisorTerminalState,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
@@ -35,6 +38,7 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["artifacts"] == {}
     assert state["last_agent_result"] == {}
     assert state["semantic_validation_results"] == []
+    assert state["failure_streaks"] == {}
     assert state["terminal_state"] == "running"
 
 
@@ -123,11 +127,7 @@ def test_to_orchestration_state_preserves_existing_agent_artifacts() -> None:
     }
     assert orchestration.catalog_summary == catalog_summary
     assert orchestration.completed_agents == ["sql_agent"]
-    assert orchestration.retry_context == {
-        "sql_agent": 1,
-        "last_error": "",
-        "retryable": False,
-    }
+    assert orchestration.retry_context == {"sql_agent": 1}
     assert orchestration.retry_counts == {"sql_agent": 1}
     assert orchestration.max_retry_per_agent == 3
     assert orchestration.generated_sql == "SELECT 1 AS sample_value"
@@ -145,6 +145,7 @@ def test_merge_agent_result_marks_approval_required_as_pending_not_completed() -
         agent="sql_agent",
         status="approval_required",
         summary="데이터마트 사용 승인이 필요합니다",
+        approval=ApprovalRequirement(required=True),
     )
 
     merged = merge_agent_result(state, result)
@@ -201,6 +202,7 @@ def test_to_orchestration_state_exposes_pending_approval_id() -> None:
             agent="sql_agent",
             status="approval_required",
             summary="SQL 실행 승인 필요",
+            approval=ApprovalRequirement(required=True),
         ),
     )
 
@@ -263,6 +265,7 @@ def test_success_result_clears_pending_approval_for_same_agent() -> None:
             agent="sql_agent",
             status="approval_required",
             summary="데이터마트 사용 승인이 필요합니다",
+            approval=ApprovalRequirement(required=True),
         ),
     )
 
@@ -355,6 +358,7 @@ def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_
     assert normalized["accepted_evidence"] == {}
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []
+    assert normalized["failure_streaks"] == {}
     assert normalized["quarantined_artifacts"][0]["artifact_id"] == "legacy_sql"
     assert normalized_twice == normalized
 
@@ -373,3 +377,167 @@ def test_normalize_v2_rebuilds_compatibility_projections_from_accepted_evidence(
 
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []
+    assert normalized["failure_streaks"] == {}
+
+
+def test_to_orchestration_state_exposes_analysis_last_failure_in_plan_and_state() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+
+    orchestration = to_orchestration_state(state)
+
+    expected = {
+        "last_failure": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+        }
+    }
+    assert orchestration.retry_context == expected
+    assert orchestration.plan is not None
+    assert orchestration.plan.retry_context == expected
+
+
+def test_success_promotion_clears_only_matching_agent_failure_streak() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        },
+        "sql_agent": {
+            "reason_code": "timeout",
+            "failure_reason": "timeout",
+            "signature": '["timeout", "timeout"]',
+            "consecutive_count": 1,
+        },
+    }
+
+    promoted = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="warning",
+            summary="제한사항 포함 분석 완료",
+        ),
+    )
+
+    assert "analysis_agent" not in promoted["failure_streaks"]
+    assert promoted["failure_streaks"]["sql_agent"]["reason_code"] == "timeout"
+
+
+def test_approval_pending_keeps_streak_and_legacy_approval_promotes_as_success() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+    pending = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="approval_required",
+            summary="레거시 분석 승인 필요",
+            approval=ApprovalRequirement(required=True, reason="검토 필요"),
+        ),
+    )
+
+    assert "analysis_agent" in pending["failure_streaks"]
+
+    promoted = promote_pending_result(pending, approval_granted=True)
+
+    assert promoted["agent_results"][-1]["status"] == "success"
+    assert promoted["completed_agents"] == ["analysis_agent"]
+    assert "analysis_agent" not in promoted["failure_streaks"]
+    assert promoted["pending_approval"] is None
+
+
+def test_promote_legacy_approval_requires_explicit_grant() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    staged = stage_candidate_result(
+        state,
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="approval_required",
+            summary="레거시 분석 승인 필요",
+            approval=ApprovalRequirement(required=True),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="승인"):
+        promote_pending_result(staged)
+
+
+def test_merge_agent_result_rejects_approval_contract_mismatch() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+
+    with pytest.raises(ValueError, match="approval.required=false"):
+        merge_agent_result(
+            state,
+            AgentCompactResult(
+                agent="analysis_agent",
+                status="approval_required",
+                summary="잘못된 승인 계약",
+                approval=ApprovalRequirement(required=False),
+            ),
+        )
+
+
+def test_merge_success_with_required_approval_waits_without_promoting() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+
+    pending = merge_agent_result(
+        state,
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="success",
+            summary="분석 완료, 승인 필요",
+            approval=ApprovalRequirement(required=True, reason="인과 해석 검토"),
+        ),
+    )
+
+    assert pending["completed_agents"] == []
+    assert pending["pending_approval"]["reason"] == "인과 해석 검토"
+    assert pending["terminal_state"] == SupervisorTerminalState.needs_user_approval.value

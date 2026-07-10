@@ -7,6 +7,8 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 )
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ApprovalRequirement,
+    RetryHint,
+    SupervisorTerminalState,
     ValidationFinding,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
@@ -93,6 +95,7 @@ def test_validate_approval_required_result_finalizes_for_safe_waiting_state() ->
         agent="analysis_agent",
         status="approval_required",
         summary="분석 결과 승인 필요",
+        approval=ApprovalRequirement(required=True),
     )
 
     decision = validate_subagent_result(state, result)
@@ -299,3 +302,204 @@ def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
 
     assert decision.decision == "retry"
     assert decision.next_action == "call_sql_agent"
+
+
+def test_explicit_failure_takes_priority_over_blocking_finding_and_approval() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        findings=[
+            ValidationFinding(
+                code="blocking_output",
+                source="analysis_agent",
+                severity="error",
+                disposition="blocking",
+                message="blocking finding",
+            )
+        ],
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="method_review_failed",
+            details={"failure_reason": "wrong method"},
+        ),
+        approval=ApprovalRequirement(required=True, reason="승인 필요"),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "retry"
+    assert decision.next_action == "call_analysis_agent"
+    assert decision.reason_code == "method_review_failed"
+    assert decision.failure_reason == "wrong method"
+    assert decision.repeated_failure is False
+    assert decision.failure_streak == {
+        "reason_code": "method_review_failed",
+        "failure_reason": "wrong method",
+        "signature": '["method_review_failed", "wrong method"]',
+        "consecutive_count": 1,
+    }
+
+
+def test_failure_reason_uses_error_then_summary_then_unknown_fallback() -> None:
+    state = _state()
+    results = [
+        AgentCompactResult(
+            agent="sql_agent",
+            status="failed",
+            summary="summary reason",
+            error="error reason",
+        ),
+        AgentCompactResult(agent="sql_agent", status="failed", summary="summary reason"),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="failed",
+            summary="",
+            retry_hint=RetryHint(reason_code=""),
+        ),
+    ]
+
+    decisions = [validate_subagent_result(state, result) for result in results]
+
+    assert [decision.failure_reason for decision in decisions] == [
+        "error reason",
+        "summary reason",
+        "알 수 없는 실패",
+    ]
+    assert all(decision.reason_code == "none" for decision in decisions)
+
+
+def test_same_normalized_failure_signature_terminates_analysis_with_recoverable_context() -> None:
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["artifact_sql"],
+        ),
+    )
+    state["max_retry_per_agent"] = 10
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "METHOD_REVIEW_FAILED",
+            "failure_reason": "Wrong Method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="METHOD_REVIEW_FAILED",
+            details={"failure_reason": "  WRONG   method  "},
+        ),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.repeated_failure is True
+    assert decision.failure_streak is not None
+    assert decision.failure_streak["consecutive_count"] == 2
+    assert decision.next_action == "fail"
+    assert decision.terminal_state == SupervisorTerminalState.failed_with_recoverable_context.value
+    assert decision.reason == (
+        "analysis_agent 실패 [METHOD_REVIEW_FAILED]: WRONG   method (repeated_failure=true)"
+    )
+
+
+def test_same_failure_with_different_reason_code_starts_new_streak() -> None:
+    state = _state()
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="data_quality_failed",
+            details={"failure_reason": "wrong method"},
+        ),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.repeated_failure is False
+    assert decision.next_action == "call_analysis_agent"
+    assert decision.failure_streak is not None
+    assert decision.failure_streak["consecutive_count"] == 1
+
+
+def test_repeated_analysis_failure_ignores_analysis_and_pending_artifacts() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "analysis_agent": [{"artifact_id": "prior_analysis"}],
+    }
+    state["artifacts"] = dict(state["accepted_evidence"])
+    state["failure_streaks"] = {
+        "analysis_agent": {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        artifact_ids=["failed_candidate_artifact"],
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="method_review_failed",
+            details={"failure_reason": "wrong method"},
+        ),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.terminal_state == SupervisorTerminalState.failed_terminal.value
+
+
+def test_approval_required_status_without_required_flag_is_contract_failure() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="approval_required",
+        summary="승인 필요",
+        approval=ApprovalRequirement(required=False),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "reject"
+    assert decision.next_action == "fail"
+    assert decision.reason_code == "approval_contract_mismatch"
+    assert decision.failure_reason == "status=approval_required이지만 approval.required=false입니다."
+    assert decision.terminal_state == SupervisorTerminalState.failed_terminal.value
+
+
+def test_legacy_approval_required_status_with_required_flag_waits_for_approval() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="approval_required",
+        summary="승인 필요",
+        approval=ApprovalRequirement(required=True, reason="분석 승인 필요"),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "await_approval"
+    assert decision.next_action == "finalize"

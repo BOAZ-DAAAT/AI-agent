@@ -26,6 +26,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     stage_candidate_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    ApprovalRequirement,
+    RetryHint,
+)
 
 
 class FakeMessage:
@@ -111,6 +115,27 @@ def _state(user_query: str = "매출") -> dict[str, Any]:
         user_query=user_query,
         datasource_id=None,
     )
+
+
+class RecordingBackendAdapter:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def append_run_event(
+        self,
+        run_id: str,
+        event_type: str,
+        message: str,
+        **kwargs: Any,
+    ) -> None:
+        self.events.append(
+            {
+                "run_id": run_id,
+                "event_type": event_type,
+                "message": message,
+                **kwargs,
+            }
+        )
 
 
 def _clarify_decision(
@@ -534,6 +559,7 @@ def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
                     status="approval_required",
                     summary="SQL 실행 승인 필요",
                     artifact_ids=["artifact_sql_approval"],
+                    approval=ApprovalRequirement(required=True),
                 )
             )
         }
@@ -568,6 +594,7 @@ def test_approval_required_result_preserves_terminal_state_when_finalize_llm_fai
                     status="approval_required",
                     summary="SQL 실행 승인 필요",
                     artifact_ids=["artifact_sql_approval"],
+                    approval=ApprovalRequirement(required=True),
                 )
             )
         }
@@ -681,6 +708,206 @@ def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_
     assert result["retry_counts"]["sql_agent"] == 1
     assert result["completed_agents"] == ["sql_agent"]
     assert result["failed_agents"] == []
+    assert result["failure_streaks"] == {}
+
+
+def test_repeated_analysis_failure_stops_after_second_call_with_recoverable_context() -> None:
+    failed_result = AgentToolResult(
+        agent_result=AgentCompactResult(
+            agent="analysis_agent",
+            status="failed",
+            summary="분석 실패",
+            retry_hint=RetryHint(
+                retryable=True,
+                reason_code="method_review_failed",
+                details={"failure_reason": "wrong method"},
+            ),
+        )
+    )
+    adapter = SequencedSubAgentAdapter(
+        {"analysis_agent": [failed_result, failed_result.model_copy(deep=True)]}
+    )
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _guard_decision("call_analysis_agent"),
+            _summary_decision("analysis_agent", next_action="call_analysis_agent"),
+            _guard_decision("call_analysis_agent"),
+            _final_decision("completed", "완료로 덮어쓰면 안 됩니다."),
+        ]
+    )
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["artifact_sql"],
+        ),
+    )
+    graph = build_graph(adapter, model=model)
+
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
+
+    assert adapter.calls == ["analysis_agent", "analysis_agent"]
+    assert result["retry_counts"] == {"analysis_agent": 1}
+    assert result["failure_streaks"]["analysis_agent"]["consecutive_count"] == 2
+    assert result["terminal_state"] == "failed_with_recoverable_context"
+    assert result["final_answer"] == (
+        "analysis_agent 실패 [method_review_failed]: wrong method (repeated_failure=true)"
+    )
+    assert "analysis_agent" not in result["completed_agents"]
+
+
+def test_validate_node_records_failure_streak_and_shared_rejection_metadata() -> None:
+    backend = RecordingBackendAdapter()
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="method_review_failed",
+            details={"failure_reason": "wrong method"},
+        ),
+    )
+    state = stage_candidate_result(_state(), result)
+    state["last_agent_result"] = result.model_dump(mode="json")
+
+    updates = make_validate_subagent_result_node(None, backend)(state)
+
+    expected_metadata = {
+        "agent": "analysis_agent",
+        "reason_code": "method_review_failed",
+        "failure_reason": "wrong method",
+        "repeated_failure": False,
+    }
+    assert updates["failure_streaks"]["analysis_agent"]["consecutive_count"] == 1
+    assert updates["validation_results"][-1] | expected_metadata == updates["validation_results"][-1]
+    internal_event = updates["run_events"][-1]
+    assert internal_event["type"] == "validation.rejected"
+    assert internal_event | expected_metadata == internal_event
+    assert backend.events[-1]["event_type"] == "validation.rejected"
+    assert backend.events[-1]["metadata"] | expected_metadata == backend.events[-1]["metadata"]
+
+
+@pytest.mark.parametrize(
+    ("agent", "has_sql_context", "expected_terminal"),
+    [
+        ("analysis_agent", True, "failed_with_recoverable_context"),
+        ("analysis_agent", False, "failed_terminal"),
+        ("sql_agent", True, "failed_terminal"),
+        ("eda_agent", True, "failed_terminal"),
+        ("report_agent", True, "failed_terminal"),
+    ],
+)
+def test_validate_node_honors_repeated_failure_terminal_policy(
+    agent: str,
+    has_sql_context: bool,
+    expected_terminal: str,
+) -> None:
+    state = _state()
+    if has_sql_context:
+        state = merge_agent_result(
+            state,
+            AgentCompactResult(
+                agent="sql_agent",
+                status="success",
+                summary="SQL 완료",
+                artifact_ids=["artifact_sql"],
+            ),
+        )
+    state["failure_streaks"] = {
+        agent: {
+            "reason_code": "method_review_failed",
+            "failure_reason": "wrong method",
+            "signature": '["method_review_failed", "wrong method"]',
+            "consecutive_count": 1,
+        }
+    }
+    result = AgentCompactResult(
+        agent=agent,
+        status="failed",
+        summary="실패",
+        retry_hint=RetryHint(
+            retryable=True,
+            reason_code="method_review_failed",
+            details={"failure_reason": "wrong method"},
+        ),
+    )
+    state = stage_candidate_result(state, result)
+    state["last_agent_result"] = result.model_dump(mode="json")
+
+    updates = make_validate_subagent_result_node(None)(state)
+
+    assert updates["terminal_state"] == expected_terminal
+    assert updates["next_action"] == "finalize"
+    assert updates["validation_results"][-1]["repeated_failure"] is True
+    assert updates["final_answer"] == (
+        f"{agent} 실패 [method_review_failed]: wrong method (repeated_failure=true)"
+    )
+
+
+def test_failed_result_with_required_approval_is_rejected_not_awaited() -> None:
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 실패",
+        retryable=False,
+        approval=ApprovalRequirement(required=True, reason="승인 필요"),
+    )
+    state = stage_candidate_result(_state(), result)
+    state["last_agent_result"] = result.model_dump(mode="json")
+
+    updates = make_validate_subagent_result_node(None)(state)
+
+    assert updates["validation_results"][-1]["decision"] == "reject"
+    assert updates["terminal_state"] == "failed_terminal"
+    assert updates.get("pending_approval") is None
+
+
+def test_resolve_candidate_uses_only_approval_required_flag() -> None:
+    state = stage_candidate_result(
+        _state(),
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="success",
+            summary="분석 완료",
+            artifacts=[
+                ArtifactSummary(
+                    artifact_id="artifact_analysis",
+                    preview={"human_review": {"required": True}},
+                )
+            ],
+            approval=ApprovalRequirement(required=False),
+        ),
+    )
+
+    promoted = make_resolve_candidate_node()(state)
+
+    assert promoted["pending_approval"] is None
+    assert promoted["completed_agents"] == ["analysis_agent"]
+
+
+def test_resolve_success_with_required_approval_waits_without_promotion() -> None:
+    state = stage_candidate_result(
+        _state(),
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="success",
+            summary="분석 완료",
+            artifact_ids=["artifact_analysis"],
+            approval=ApprovalRequirement(required=True, reason="분석 검토 필요"),
+        ),
+    )
+
+    pending = make_resolve_candidate_node()(state)
+
+    assert pending["terminal_state"] == "needs_user_approval"
+    assert pending["pending_approval"]["reason"] == "분석 검토 필요"
+    assert pending.get("completed_agents", []) == []
 
 
 def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -> None:

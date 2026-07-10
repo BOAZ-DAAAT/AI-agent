@@ -196,7 +196,7 @@ class SupervisorAgent:
 
         normalized = normalize_supervisor_state(values)
         if hashes_match:
-            updates = promote_pending_result(normalized)
+            updates = promote_pending_result(normalized, approval_granted=True)
             updates.update(
                 {
                     "pending_approval": None,

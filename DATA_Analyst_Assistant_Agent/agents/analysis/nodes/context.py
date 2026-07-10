@@ -44,6 +44,14 @@ def build_analysis_context(
                 issues.append(str(caution["message_ko"]))
 
     plan = state.plan
+    retry_context = state.retry_context or {}
+    last_failure_payload = retry_context.get("last_failure")
+    last_failure = None
+    if isinstance(last_failure_payload, dict):
+        last_failure = {
+            "reason_code": str(last_failure_payload.get("reason_code") or "none"),
+            "failure_reason": str(last_failure_payload.get("failure_reason") or ""),
+        }
     return AnalysisContext(
         user_question=state.user_query,
         goal=state.goal or (plan.goal if plan else state.user_query),
@@ -61,6 +69,7 @@ def build_analysis_context(
         eda_quality_statuses=quality_statuses,
         eda_key_issues=list(dict.fromkeys(issues)),
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
+        last_failure=last_failure,
     )
 
 

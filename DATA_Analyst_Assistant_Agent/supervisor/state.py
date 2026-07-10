@@ -110,6 +110,7 @@ class SupervisorState(TypedDict, total=False):
     generated_sql: str
     error_state: dict[str, Any]
     retry_counts: dict[str, int]
+    failure_streaks: dict[str, dict[str, Any]]
     max_retry_per_agent: int
     llm_decisions: list[dict[str, Any]]
     decision_errors: list[dict[str, Any]]
@@ -170,6 +171,7 @@ def empty_supervisor_state(
         "generated_sql": "",
         "error_state": {},
         "retry_counts": {},
+        "failure_streaks": {},
         "max_retry_per_agent": 1,
         "llm_decisions": [],
         "decision_errors": [],
@@ -186,8 +188,10 @@ def empty_supervisor_state(
 
 
 def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> SupervisorState:
+    if result.status == "approval_required" and not result.approval.required:
+        raise ValueError("status=approval_required이지만 approval.required=false입니다.")
     staged = stage_candidate_result(state, result, {})
-    if result.status == "approval_required":
+    if result.approval.required:
         candidate = staged["pending_result"] or {}
         staged["pending_approval"] = {
             "approval_id": f"{state['current_run_id']}:{result.agent}:approval",
@@ -231,12 +235,24 @@ def stage_candidate_result(
     )
 
 
-def promote_pending_result(state: SupervisorState) -> SupervisorState:
+def promote_pending_result(
+    state: SupervisorState,
+    *,
+    approval_granted: bool = False,
+) -> SupervisorState:
     normalized = normalize_supervisor_state(state)
     candidate = normalized.get("pending_result")
     if not isinstance(candidate, dict):
         raise ValueError("승격할 pending_result가 없습니다.")
     result = AgentCompactResult.model_validate(candidate.get("result") or {})
+    if result.status == "approval_required":
+        if not result.approval.required:
+            raise ValueError("status=approval_required이지만 approval.required=false입니다.")
+        if not approval_granted:
+            raise ValueError("approval_required 결과를 승격하려면 승인이 필요합니다.")
+        result = result.model_copy(update={"status": "success"})
+    elif result.approval.required and not approval_granted:
+        raise ValueError("approval.required=true 결과를 승격하려면 승인이 필요합니다.")
     if result.status not in {"success", "warning"}:
         raise ValueError("성공 또는 경고 결과만 accepted evidence로 승격할 수 있습니다.")
 
@@ -260,6 +276,11 @@ def promote_pending_result(state: SupervisorState) -> SupervisorState:
     if result.agent not in completed:
         completed.append(result.agent)
     failed = [agent for agent in normalized.get("failed_agents", []) if agent != result.agent]
+    failure_streaks = {
+        agent: dict(streak)
+        for agent, streak in normalized.get("failure_streaks", {}).items()
+        if agent != result.agent
+    }
     promoted: SupervisorState = {
         **normalized,
         "pending_result": None,
@@ -268,6 +289,7 @@ def promote_pending_result(state: SupervisorState) -> SupervisorState:
         "artifacts": {agent: list(items) for agent, items in accepted.items()},
         "completed_agents": completed,
         "failed_agents": failed,
+        "failure_streaks": failure_streaks,
     }
     promoted = _apply_candidate_state_updates(promoted, candidate.get("state_updates") or {})
     pending_approval = promoted.get("pending_approval")
@@ -288,7 +310,11 @@ def promote_pending_result(state: SupervisorState) -> SupervisorState:
     return _ensure_json_serializable(promoted)
 
 
-def reject_pending_result(state: SupervisorState, reason: str) -> SupervisorState:
+def reject_pending_result(
+    state: SupervisorState,
+    reason: str,
+    metadata: dict[str, Any] | None = None,
+) -> SupervisorState:
     normalized = normalize_supervisor_state(state)
     candidate = normalized.get("pending_result")
     if not isinstance(candidate, dict):
@@ -299,7 +325,14 @@ def reject_pending_result(state: SupervisorState, reason: str) -> SupervisorStat
     result = candidate.get("result") or {}
     quarantined.extend(result.get("artifacts") or [])
     events = list(normalized.get("run_events", []))
-    events.append({"type": "validation.rejected", "candidate_id": candidate.get("candidate_id"), "reason": reason})
+    events.append(
+        {
+            "type": "validation.rejected",
+            "candidate_id": candidate.get("candidate_id"),
+            "reason": reason,
+            **dict(metadata or {}),
+        }
+    )
     return _ensure_json_serializable(
         {
             **normalized,
@@ -329,6 +362,10 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             "rejected_results": list(state.get("rejected_results", [])),
             "quarantined_artifacts": list(state.get("quarantined_artifacts", [])),
             "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+            "failure_streaks": {
+                agent: dict(streak)
+                for agent, streak in state.get("failure_streaks", {}).items()
+            },
             "run_events": list(state.get("run_events", [])),
             "state_schema_version": 2,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
@@ -349,6 +386,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "rejected_results": list(state.get("rejected_results", [])),
         "quarantined_artifacts": quarantined,
         "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+        "failure_streaks": {},
         "run_events": list(state.get("run_events", [])),
         "artifacts": {},
         "agent_results": [],
@@ -440,6 +478,12 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
                 "retryable": _error_state.get("retryable", False),
             }
         )
+    analysis_failure = (state.get("failure_streaks") or {}).get("analysis_agent")
+    if isinstance(analysis_failure, dict):
+        _retry_context["last_failure"] = {
+            "reason_code": str(analysis_failure.get("reason_code") or "none"),
+            "failure_reason": str(analysis_failure.get("failure_reason") or ""),
+        }
     plan = AnalysisPlan(
         goal=str(plan_payload.get("goal") or state.get("latest_user_query") or ""),
         datasource_id=state.get("datasource_id"),

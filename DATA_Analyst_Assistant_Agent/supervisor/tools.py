@@ -115,9 +115,7 @@ def _status_value(envelope: AgentEnvelope) -> str:
 def _error_message(envelope: AgentEnvelope) -> str:
     if envelope.status != AgentStatus.failed:
         return ""
-    if envelope.retry_hint.reason_code and envelope.retry_hint.reason_code != "none":
-        return f"{envelope.summary} ({envelope.retry_hint.reason_code})"
-    return envelope.summary
+    return envelope.error
 
 
 def _preview_summary(preview: Any) -> str:

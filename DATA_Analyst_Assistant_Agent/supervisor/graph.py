@@ -396,9 +396,9 @@ def make_validate_subagent_result_node(model: Any | None, backend_adapter: Any |
 
         hard_valid = decision.valid or decision.decision == "await_approval"
         if raw_next_action == "fail":
-            terminal_state = SupervisorTerminalState.failed_terminal.value
+            terminal_state = decision.terminal_state
             next_action = "finalize"
-            final_answer = decision.reason
+            final_answer = decision.final_answer or decision.reason
         elif terminal_state in TERMINAL_STATES:
             next_action = "finalize"
         else:
@@ -414,6 +414,9 @@ def make_validate_subagent_result_node(model: Any | None, backend_adapter: Any |
                 "next_action": next_action,
                 "terminal_state": terminal_state,
                 "reason": decision.reason,
+                "reason_code": decision.reason_code,
+                "failure_reason": decision.failure_reason,
+                "repeated_failure": decision.repeated_failure,
             }
         )
 
@@ -423,11 +426,28 @@ def make_validate_subagent_result_node(model: Any | None, backend_adapter: Any |
             "terminal_state": terminal_state,
             "current_step": "validate_subagent_result",
         }
+        if decision.failure_streak is not None:
+            failure_streaks = {
+                agent: dict(streak)
+                for agent, streak in state.get("failure_streaks", {}).items()
+            }
+            failure_streaks[result.agent] = dict(decision.failure_streak)
+            updates["failure_streaks"] = failure_streaks
         if final_answer:
             updates["final_answer"] = final_answer
 
         if not hard_valid:
-            rejected = reject_pending_result({**state, **updates}, decision.reason)
+            failure_metadata = {
+                "agent": result.agent,
+                "reason_code": decision.reason_code,
+                "failure_reason": decision.failure_reason,
+                "repeated_failure": decision.repeated_failure,
+            }
+            rejected = reject_pending_result(
+                {**state, **updates},
+                decision.reason,
+                metadata=failure_metadata,
+            )
             updates.update(rejected)
             failed = list(updates.get("failed_agents", []))
             if raw_next_action == "fail" and result.agent not in failed:
@@ -438,7 +458,10 @@ def make_validate_subagent_result_node(model: Any | None, backend_adapter: Any |
                 state,
                 "validation.rejected",
                 decision.reason,
-                metadata={"candidate_id": (state.get("pending_result") or {}).get("candidate_id")},
+                metadata={
+                    "candidate_id": (state.get("pending_result") or {}).get("candidate_id"),
+                    **failure_metadata,
+                },
             )
 
         if not hard_valid and raw_next_action in SUBAGENT_ACTION_TO_AGENT:
@@ -597,7 +620,7 @@ def make_resolve_candidate_node(backend_adapter: Any | None = None):
         if not isinstance(pending, dict):
             return _terminal_failure_updates(state, "resolve_candidate", "승격할 후보 결과가 없습니다.")
         result = AgentCompactResult.model_validate(pending.get("result") or {})
-        if result.approval.required or result.status == "approval_required":
+        if result.approval.required:
             approval = {
                 "approval_id": f"{state['current_run_id']}:{result.agent}:approval",
                 "agent": result.agent,

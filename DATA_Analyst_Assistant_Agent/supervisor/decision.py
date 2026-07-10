@@ -259,6 +259,9 @@ def build_step_summary_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
+    latest_validation = (state.get("validation_results") or [{}])[-1]
+    latest_agent = str(latest_validation.get("agent") or "")
+    recent_failure_streak = (state.get("failure_streaks") or {}).get(latest_agent)
     return _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
@@ -276,6 +279,7 @@ def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
             "step_summaries": list(state.get("step_summaries", []))[-5:],
             "llm_decisions": list(state.get("llm_decisions", []))[-5:],
             "decision_errors": list(state.get("decision_errors", []))[-3:],
+            "recent_failure_streak": recent_failure_streak,
         },
         max_text=500,
         max_items=8,

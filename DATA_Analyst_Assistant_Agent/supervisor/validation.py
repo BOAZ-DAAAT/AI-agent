@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -11,6 +12,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     artifact_ids_by_agent,
 )
+from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
 
 
 class GuardDecision(BaseModel):
@@ -26,6 +28,10 @@ class ResultValidationDecision(BaseModel):
     decision: Literal["accept", "accept_with_limitations", "retry", "await_approval", "reject"] = "accept"
     terminal_state: str = "running"
     final_answer: str = ""
+    reason_code: str = "none"
+    failure_reason: str = ""
+    repeated_failure: bool = False
+    failure_streak: dict[str, Any] | None = None
 
 
 _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
@@ -111,19 +117,17 @@ def validate_subagent_result(
     retry_findings = [finding for finding in result.findings if finding.disposition == "retry_required"]
     limitation_findings = [finding for finding in result.findings if finding.disposition == "limitation"]
     has_validation_errors = bool(result.validation_errors or blocking_findings)
-    has_failure = result.status == "failed" or has_validation_errors or fallback_used
-    if has_failure:
-        routed = _route_invalid_result(
+
+    if result.status == "failed":
+        return _route_explicit_failure(state, result)
+
+    if result.status in {"success", "warning"} and (has_validation_errors or fallback_used):
+        return _route_invalid_result(
             state,
             result,
             has_validation_errors=has_validation_errors,
             fallback_used=fallback_used,
         )
-        if blocking_findings:
-            routed.next_action = "fail"
-            routed.decision = "reject"
-            routed.reason = "; ".join(finding.message for finding in blocking_findings)
-        return routed
 
     if retry_findings:
         retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
@@ -140,15 +144,27 @@ def validate_subagent_result(
             next_action="fail",
             reason=f"retry-required finding의 재시도 한도 {max_retry}회에 도달했습니다.",
             decision="reject",
+            terminal_state=SupervisorTerminalState.failed_terminal.value,
         )
 
-    approval_required = result.approval.required or result.status == "approval_required"
-    if approval_required:
+    if result.approval.required:
         return ResultValidationDecision(
             valid=False,
             next_action="finalize",
             reason=result.approval.reason or f"{result.agent} 실행 결과에 승인이 필요합니다: {result.summary}",
             decision="await_approval",
+        )
+
+    if result.status == "approval_required":
+        failure_reason = "status=approval_required이지만 approval.required=false입니다."
+        return ResultValidationDecision(
+            valid=False,
+            next_action="fail",
+            reason=failure_reason,
+            decision="reject",
+            terminal_state=SupervisorTerminalState.failed_terminal.value,
+            reason_code="approval_contract_mismatch",
+            failure_reason=failure_reason,
         )
 
     if result.status in {"success", "warning"}:
@@ -158,6 +174,8 @@ def validate_subagent_result(
                     valid=False,
                     next_action="fail",
                     reason="리포트 에이전트 결과에 리포트 산출물 ID가 없어 완료할 수 없습니다.",
+                    decision="reject",
+                    terminal_state=SupervisorTerminalState.failed_terminal.value,
                 )
             return ResultValidationDecision(
                 valid=True,
@@ -177,7 +195,92 @@ def validate_subagent_result(
         next_action="fail",
         reason=f"{result.agent} 결과 상태를 처리할 수 없습니다: {result.status}",
         decision="reject",
+        terminal_state=SupervisorTerminalState.failed_terminal.value,
     )
+
+
+def _route_explicit_failure(
+    state: SupervisorState,
+    result: AgentCompactResult,
+) -> ResultValidationDecision:
+    reason_code = _failure_reason_code(result)
+    failure_reason = _failure_reason(result)
+    signature = _failure_signature(reason_code, failure_reason)
+    previous = (state.get("failure_streaks") or {}).get(result.agent) or {}
+    repeated_failure = previous.get("signature") == signature
+    consecutive_count = int(previous.get("consecutive_count", 0)) + 1 if repeated_failure else 1
+    failure_streak = {
+        "reason_code": reason_code,
+        "failure_reason": failure_reason,
+        "signature": signature,
+        "consecutive_count": consecutive_count,
+    }
+
+    retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
+    max_retry = int(state.get("max_retry_per_agent", 0))
+    retryable = bool(result.retryable or result.retry_hint.retryable)
+    if not repeated_failure and retryable and retry_count < max_retry:
+        return ResultValidationDecision(
+            valid=False,
+            next_action=_AGENT_CALL_ACTIONS[result.agent],
+            reason=(
+                f"{result.agent} 실패 [{reason_code}]: {failure_reason} "
+                f"(repeated_failure=false) 재시도 {retry_count}/{max_retry}"
+            ),
+            decision="retry",
+            reason_code=reason_code,
+            failure_reason=failure_reason,
+            repeated_failure=False,
+            failure_streak=failure_streak,
+        )
+
+    terminal_state = SupervisorTerminalState.failed_terminal.value
+    if repeated_failure and result.agent == "analysis_agent" and _has_artifact(
+        state, "sql_agent", "eda_agent"
+    ):
+        terminal_state = SupervisorTerminalState.failed_with_recoverable_context.value
+    reason = (
+        f"{result.agent} 실패 [{reason_code}]: {failure_reason} "
+        f"(repeated_failure={'true' if repeated_failure else 'false'})"
+    )
+    return ResultValidationDecision(
+        valid=False,
+        next_action="fail",
+        reason=reason,
+        decision="reject",
+        terminal_state=terminal_state,
+        final_answer=reason,
+        reason_code=reason_code,
+        failure_reason=failure_reason,
+        repeated_failure=repeated_failure,
+        failure_streak=failure_streak,
+    )
+
+
+def _failure_reason_code(result: AgentCompactResult) -> str:
+    reason_code = str(result.retry_hint.reason_code or "")
+    return reason_code if reason_code.strip() else "none"
+
+
+def _failure_reason(result: AgentCompactResult) -> str:
+    values = (
+        result.retry_hint.details.get("failure_reason"),
+        result.error,
+        result.summary,
+    )
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return "알 수 없는 실패"
+
+
+def _failure_signature(reason_code: str, failure_reason: str) -> str:
+    normalized = [
+        " ".join(reason_code.split()).casefold(),
+        " ".join(failure_reason.split()).casefold(),
+    ]
+    return json.dumps(normalized, ensure_ascii=False)
 
 
 def _result_has_artifact(result: AgentCompactResult) -> bool:
@@ -213,7 +316,13 @@ def _route_invalid_result(
         reason = f"{detail} 재시도 한도 {max_retry}회에 도달해 실패로 종료합니다."
     else:
         reason = f"{detail} 재시도할 수 없어 실패로 종료합니다."
-    return ResultValidationDecision(valid=False, next_action="fail", reason=reason, decision="reject")
+    return ResultValidationDecision(
+        valid=False,
+        next_action="fail",
+        reason=reason,
+        decision="reject",
+        terminal_state=SupervisorTerminalState.failed_terminal.value,
+    )
 
 
 def _invalid_reason_detail(
