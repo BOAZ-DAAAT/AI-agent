@@ -34,6 +34,11 @@ class ResultValidationDecision(BaseModel):
     failure_streak: dict[str, Any] | None = None
 
 
+class CompletionReadinessDecision(BaseModel):
+    status: Literal["ready", "report_required", "invalid"]
+    reason: str
+
+
 _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "sql_agent": "call_sql_agent",
     "eda_agent": "call_eda_agent",
@@ -52,6 +57,49 @@ def _has_artifact(state: SupervisorState, *agents: AgentName) -> bool:
 
 def _has_completed_evidence(state: SupervisorState) -> bool:
     return _has_artifact(state, *_EVIDENCE_AGENTS)
+
+
+def _has_valid_accepted_artifact(state: SupervisorState, agent: AgentName) -> bool:
+    evidence = state.get("accepted_evidence") or {}
+    return any(
+        bool(str(item.get("artifact_id") or "").strip())
+        for item in evidence.get(agent, [])
+        if isinstance(item, dict)
+    )
+
+
+def _check_completion_readiness(state: SupervisorState) -> CompletionReadinessDecision:
+    has_analysis_evidence = any(
+        _has_valid_accepted_artifact(state, agent)
+        for agent in _EVIDENCE_AGENTS
+    )
+    if not has_analysis_evidence:
+        return CompletionReadinessDecision(
+            status="invalid",
+            reason="검증·승격된 SQL, EDA, 분석 근거가 없어 완료할 수 없습니다.",
+        )
+
+    report_completed = "report_agent" in state.get("completed_agents", [])
+    has_report_artifact = _has_valid_accepted_artifact(state, "report_agent")
+    if report_completed and not has_report_artifact:
+        return CompletionReadinessDecision(
+            status="invalid",
+            reason="report_agent 완료 표식은 있지만 승격된 리포트 아티팩트가 없습니다.",
+        )
+    if has_report_artifact and not report_completed:
+        return CompletionReadinessDecision(
+            status="invalid",
+            reason="승격된 리포트 아티팩트는 있지만 report_agent 완료 표식이 없습니다.",
+        )
+    if not report_completed:
+        return CompletionReadinessDecision(
+            status="report_required",
+            reason="검증·승격된 분석 근거가 있어 최종 리포트 생성이 필요합니다.",
+        )
+    return CompletionReadinessDecision(
+        status="ready",
+        reason="분석 근거와 검증·승격된 최종 리포트가 있어 완료할 수 있습니다.",
+    )
 
 
 def guard_agent_preconditions(agent: AgentName | str, state: SupervisorState) -> GuardDecision:
