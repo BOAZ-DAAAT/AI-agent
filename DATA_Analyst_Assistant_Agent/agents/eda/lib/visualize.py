@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
+
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "all")
 KEY_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "key")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -84,7 +86,7 @@ def _pick_key_col(df: pd.DataFrame, key_col=None, max_card: int = _KEY_MAX_CARDI
     valid = _valid_cat_col(df, key_col, max_card)
     if valid:
         return valid
-    for c in df.select_dtypes(include=["object"]).columns:
+    for c in categorical_object_columns(df):
         if _valid_cat_col(df, c, max_card):
             return c
     return None
@@ -268,7 +270,7 @@ def plot_category_distribution(df: pd.DataFrame, top_n: int = 20,
     고유값이 max_cardinality 초과인 컬럼(예: seller_id, product_id)은 스킵."""
     paths = []
     stats = {}
-    for col in df.select_dtypes(include=["object"]).columns:
+    for col in categorical_object_columns(df):
         # 고카디널리티 ID 컬럼은 의미 있는 빈도 분포가 없으므로 스킵
         if df[col].nunique() > max_cardinality:
             continue
@@ -991,7 +993,7 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
                               measure_cols: list = None, top_n: int = 6, min_periods: int = 3) -> dict:
     """카테고리별 시간 추세를 한 그래프에 여러 줄로(상위 N개) — 시간 × 범주 교차."""
     numeric_cols = _get_numeric_cols(df, measure_cols)
-    cat_cols = list(df.select_dtypes(include=["object"]).columns)
+    cat_cols = categorical_object_columns(df)
     if not time_col:
         time_col = next((c for c in df.columns
                          if "datetime" in str(df[c].dtype) or "date" in c.lower() or "month" in c.lower()), None)
@@ -1044,7 +1046,7 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
 def plot_crosstab_heatmap(df: pd.DataFrame, cat_a: str = None, cat_b: str = None,
                           max_card: int = 15, max_overall_card: int = 50) -> dict:
     """두 범주형 변수의 교차 빈도 히트맵 — 범주 × 범주."""
-    all_cats = list(df.select_dtypes(include=["object"]).columns)
+    all_cats = categorical_object_columns(df)
     # cat_a가 명시되면 카디널리티 무관하게 사용(상위 N개만 표시하므로). 미지정 시 저카디널리티 우선.
     if cat_a is None:
         low = [c for c in all_cats if df[c].nunique() <= max_overall_card]

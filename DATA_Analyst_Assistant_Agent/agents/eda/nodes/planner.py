@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import planner_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
@@ -50,7 +51,7 @@ def _data_shape(ctx) -> Dict[str, Any]:
         numeric = [c for c in ctx.measure_cols if c in df.columns]
     else:
         numeric = list(df.select_dtypes(include=["float64", "int64"]).columns)
-    cat = list(df.select_dtypes(include=["object"]).columns)
+    cat = categorical_object_columns(df)
     time = ctx.time_cols or []
     return {"n_numeric": len(numeric), "n_cat": len(cat), "n_time": len(time),
             "row_count": len(df), "numeric_cols": numeric, "cat_cols": cat, "time_cols": time}

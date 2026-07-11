@@ -1,5 +1,7 @@
 import pandas as pd
 
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
+
 
 def check_duplicates_fn(df: pd.DataFrame) -> dict:
     """중복 행 수와 비율 반환"""
@@ -15,7 +17,7 @@ def check_sample_reliability_fn(df: pd.DataFrame, min_samples: int = 30, key_col
     집계 마트 기준으로 표본 수가 적은 그룹 탐지.
     count_col이 주어지면 우선 사용, 없으면 키워드로 탐지.
     """
-    cat_cols = list(df.select_dtypes(include=["object"]).columns)
+    cat_cols = categorical_object_columns(df)
     if not cat_cols:
         return {"message": "범주형 키 컬럼이 없습니다."}
 
