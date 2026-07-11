@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,8 @@ from sqlalchemy import create_engine, inspect, text
 
 from backend.config import StorageMySQL
 from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
+
+_FAIL_STATUSES = {"FAIL", "FAILED", "ERROR"}
 
 
 @contextmanager
@@ -162,17 +165,27 @@ def _format_physical_results(run_id: str, all_results: list[Any]) -> dict[str, A
     return final_report
 
 
-def _run_scoped_physical_checks(engine, context, schema_info: dict[str, Any], tables: list[str], run_id: str) -> dict[str, Any]:
+def _run_scoped_physical_checks(
+    engine, context, schema_info: dict[str, Any], tables: list[str], run_id: str, build_docs: bool = True
+) -> dict[str, Any]:
     all_results = []
     checkpoint_name = "integrity_checkpoint"
+    # build_docs=False: 결과 저장/데이터독 렌더 액션을 끈다. 검증 결과는 반환되는 CheckpointResult
+    # (메모리)에서 직접 읽으므로 파일쓰기 액션이 불필요하고, 긴 경로(한글/Windows MAX_PATH)에
+    # 파일 쓰다 죽는 문제(오프라인 다테이블 생성 시 store_validation_result 실패)를 피한다(#123).
+    action_list = (
+        [
+            {"name": "store_validation_result", "action": {"class_name": "StoreValidationResultAction"}},
+            {"name": "update_data_docs", "action": {"class_name": "UpdateDataDocsAction"}},
+        ]
+        if build_docs
+        else []
+    )
     context.add_or_update_checkpoint(
         name=checkpoint_name,
         class_name="Checkpoint",
         config_version=1,
-        action_list=[
-            {"name": "store_validation_result", "action": {"class_name": "StoreValidationResultAction"}},
-            {"name": "update_data_docs", "action": {"class_name": "UpdateDataDocsAction"}},
-        ],
+        action_list=action_list,
     )
 
     for table_name in tables:
@@ -347,19 +360,24 @@ def run_dataset_integrity_checks(
     table_scope: list[str] | None,
     source_version: str | None,
     metadata: dict[str, Any] | None = None,
+    build_docs: bool = True,
+    ge_root: str | Path | None = None,
 ) -> dict[str, Any]:
     import great_expectations as gx  # noqa: F401  # imported to fail fast when missing
 
     checked_at = __import__("datetime").datetime.now().isoformat()
     run_id = f"run_{dataset_name}_{checked_at.replace(':', '').replace('-', '')}"
-    ge_root = sql_metadata_dir() / ".ge_runtime" / dataset_name
+    # GE 는 검증 결과를 uncommitted/validations/<suite>/<run>/<ts>/<hash>.json 에 저장한다.
+    # 기본 위치가 긴 경로(한글 프로젝트 경로) 밑이면 그 조합이 Windows MAX_PATH(260자)를
+    # 넘어 FileNotFoundError 로 죽는다. 오프라인 생성 시 짧은 ge_root 를 주면 회피된다(#123).
+    ge_root = Path(ge_root) if ge_root else sql_metadata_dir() / ".ge_runtime" / dataset_name
 
     with _dataset_env(dataset_name):
         engine = _create_engine(dataset_name)
         context = _create_ge_context(ge_root)
         schema_info = _get_schema_info_minimal(engine)
         tables = _normalize_scope(schema_info, table_scope)
-        physical_report = _run_scoped_physical_checks(engine, context, schema_info, tables, run_id)
+        physical_report = _run_scoped_physical_checks(engine, context, schema_info, tables, run_id, build_docs=build_docs)
 
         semantic_warning = None
         try:
@@ -414,3 +432,65 @@ def run_dataset_integrity_checks(
         "summary_report": {"tables": summary_tables, "semantic_warning": semantic_warning},
         "tables": summary_tables,
     }
+
+
+def merge_integrity_reports(physical_report: dict[str, Any], semantic_report: dict[str, Any]) -> dict[str, Any]:
+    """physical/semantic 리포트를 런타임이 읽는 db_integrity_result.json 구조로 합친다.
+
+    출력 구조는 테이블명을 키로 두고 각 테이블의 physical+semantic 검사를 하나의 `checks`
+    리스트로 합친다(layer 필드로 구분). 이 구조라야 compact_integrity_summary_text 가
+    planned tables 로 스코핑할 때 선택 안 된 테이블을 통째로 건너뛴다(#123).
+    physical/semantic 을 최상위 키로 감싸면 파서가 그걸 테이블명으로 오해하므로 감싸지 않는다.
+    """
+    phys_tables = physical_report.get("tables", {}) or {}
+    sem_tables = semantic_report.get("tables", {}) or {}
+    merged_tables: dict[str, Any] = {}
+    for table in sorted(set(phys_tables) | set(sem_tables)):
+        phys = phys_tables.get(table, {})
+        phys_checks = phys.get("checks", []) if isinstance(phys, dict) else []
+        sem = sem_tables.get(table, [])
+        sem_checks = sem if isinstance(sem, list) else sem.get("checks", [])
+        checks = [*phys_checks, *sem_checks]
+        has_fail = any(str(c.get("status", "")).upper() in _FAIL_STATUSES for c in checks)
+        # 롤업 상태는 파서(compact_integrity_summary_text)가 검사로 오인하지 않도록 status 가 아닌
+        # table_status 키로 둔다. 실제 검사는 checks 안에 각자 status 를 갖는다.
+        merged_tables[table] = {
+            "table_status": "ACTION_REQUIRED" if has_fail else "PASS",
+            "checks": checks,
+        }
+    return {
+        "run_id": physical_report.get("run_id") or semantic_report.get("run_id"),
+        "summary": {
+            "total_tables": len(merged_tables),
+            # 마찬가지로 파서가 dataset 레벨 가짜 finding 을 만들지 않도록 overall_status 로 둔다.
+            "overall_status": "ACTION_REQUIRED"
+            if any(v["table_status"] == "ACTION_REQUIRED" for v in merged_tables.values())
+            else "PASS",
+        },
+        "tables": merged_tables,
+    }
+
+
+def generate_and_write_integrity(
+    dataset_name: str,
+    table_scope: list[str] | None = None,
+    *,
+    source_version: str | None = None,
+    ge_root: str | Path | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """정합성 검사를 실행하고 합본 db_integrity_result.json 을 써서 (merged, 경로) 를 돌려준다.
+
+    이것이 오프라인 1회 생성의 진입점: 무거운 GE 는 여기서만 돌고, 런타임은 결과 파일만 읽는다.
+    ge_root 는 GE 작업 디렉터리(짧은 경로 권장 — Windows MAX_PATH 회피).
+    """
+    result = run_dataset_integrity_checks(
+        dataset_name=dataset_name,
+        table_scope=table_scope,
+        source_version=source_version,
+        build_docs=False,  # 오프라인 생성: 데이터독 불필요
+        ge_root=ge_root,
+    )
+    merged = merge_integrity_reports(result["physical_report"], result["semantic_report"])
+    out_path = sql_metadata_dir() / "db_integrity_result.json"
+    out_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return merged, out_path
