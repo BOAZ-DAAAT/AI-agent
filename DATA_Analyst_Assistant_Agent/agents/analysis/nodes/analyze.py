@@ -96,7 +96,7 @@ def run_analysis(
         critique = deterministic_precheck(intent, context, code, result)
         if critique is None:
             critique = critique_analysis_code(
-                intent, code, result, model=critic_model
+                intent, code, result, context=context, model=critic_model
             )
         last_result = result
         last_critique = critique

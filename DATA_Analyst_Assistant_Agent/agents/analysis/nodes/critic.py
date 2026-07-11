@@ -53,6 +53,7 @@ def critique_analysis_code(
     code: GeneratedAnalysisCode,
     result: dict[str, Any],
     *,
+    context: AnalysisContext | None = None,
     model: Any | None = None,
 ) -> CodeCritique:
     """Adversarially review the code + its result for method validity."""
@@ -70,6 +71,15 @@ def critique_analysis_code(
         f"- statistics: {result.get('statistics')}\n"
         f"- limitations: {result.get('limitations')}\n"
     )
+    # 상류 SQL 원천 테이블의 알려진 정합성 이슈(#130) — 이를 감안 안 한 결론을 잡아내는 검토 근거.
+    if context is not None and context.known_data_quality_issues:
+        joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)
+        human += (
+            "\nKnown data quality issues (from SQL integrity check):\n"
+            f"{joined}\n"
+            "Fail if the analysis draws conclusions these issues would undermine "
+            "without acknowledging them.\n"
+        )
     verdict = structured_model.invoke([
         SystemMessage(content=CRITIC_SYSTEM_PROMPT),
         HumanMessage(content=human),

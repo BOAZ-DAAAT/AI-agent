@@ -330,6 +330,8 @@ def test_subagent_adapter_returns_plan_metadata_state_updates() -> None:
         "route_kind": "trend",
         "goal": "월별 매출",
         "target_table": None,
+        "source_tables": [],
+        "business_grain": None,
     }
 
 

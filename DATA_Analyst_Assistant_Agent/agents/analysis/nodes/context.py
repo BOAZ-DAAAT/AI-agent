@@ -44,6 +44,18 @@ def build_analysis_context(
                 issues.append(str(caution["message_ko"]))
 
     plan = state.plan
+    # 상류 SQL 원천 테이블의 GE 정합성 이슈를 스코핑해 코드생성/검증이 참고하게 한다(#130).
+    # #123 함수 재사용(fail_only+테이블스코핑+100줄 캡). source_tables 없으면 빈 리스트로 폴백.
+    known_data_quality_issues: list[str] = []
+    plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
+    if plan_source_tables:
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_integrity_text
+        integrity_text = load_scoped_integrity_text(plan_source_tables)
+        known_data_quality_issues = [
+            line.lstrip("- ").strip()
+            for line in integrity_text.splitlines()
+            if line.strip().startswith("- ")
+        ]
     retry_context = state.retry_context or {}
     last_failure_payload = retry_context.get("last_failure")
     last_failure = None
@@ -68,6 +80,7 @@ def build_analysis_context(
         sample_rows=samples,
         eda_quality_statuses=quality_statuses,
         eda_key_issues=list(dict.fromkeys(issues)),
+        known_data_quality_issues=known_data_quality_issues,
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
         last_failure=last_failure,
     )

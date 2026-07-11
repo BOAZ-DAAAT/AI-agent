@@ -494,6 +494,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         generated_sql=generated_sql,
         source_sql=generated_sql,
         target_table=plan_payload.get("target_table") or None,
+        source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
+        business_grain=plan_payload.get("business_grain") or None,
     )
     limitations = [
         str(finding.get("message") or "")

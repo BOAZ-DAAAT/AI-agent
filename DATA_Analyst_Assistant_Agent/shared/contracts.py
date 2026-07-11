@@ -146,6 +146,12 @@ class AnalysisPlan(BaseModel):
     # comprehensive(마트) 경로에서 SQL 에이전트가 analytics 스키마에 적재한 마트 테이블 참조.
     # 하류(EDA/분석)는 이 이름으로 DB에서 마트를 직접 조회한다. simple 경로면 None.
     target_table: str | None = None
+    # SQL 에이전트가 사용한 원천 테이블 목록 — 하류(EDA/분석)가 GE 정합성 결과를 이 테이블들로
+    # 스코핑해 읽는 데 쓴다(load_scoped_integrity_text). 비어 있으면 캐비어트 없이 폴백.
+    source_tables: list[str] = Field(default_factory=list)
+    # SQL 에이전트가 선언한 엔티티 grain(예: "one row per customer_unique_id"). EDA가 자체
+    # grain 추정치와 교차검증하는 데 쓴다. analysis의 time_grain(일/주/월)과는 다른 개념. None이면 스킵.
+    business_grain: str | None = None
 
 
 class OrchestrationState(BaseModel):

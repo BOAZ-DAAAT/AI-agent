@@ -310,6 +310,9 @@ def normalize_generated_sql(parsed: dict[str, Any], fallback: dict[str, Any], ro
     parsed.setdefault("sql_type", fallback["sql_type"])
     parsed.setdefault("source_tables", fallback["source_tables"])
     parsed.setdefault("columns_used", fallback["columns_used"])
+    # LLM이 business_grain을 빼먹어도 fallback으로 방어(하류 EDA grain 교차검증의 입력).
+    # simple 경로 fallback은 None이라 그대로 None(의도됨), comprehensive는 mart_design/plan grain.
+    parsed.setdefault("business_grain", fallback.get("business_grain"))
     parsed.setdefault("reasoning", fallback["reasoning"])
     if route_kind == "comprehensive" and parsed["sql_type"] == "select":
         return fallback

@@ -127,6 +127,14 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         f"Temporal: {context.temporal_columns}\n"
         f"Sample rows: {context.sample_rows}\n"
     )
+    if context.known_data_quality_issues:
+        # 상류 SQL 원천 테이블의 알려진 정합성 이슈(#130) — 코드가 이를 감안해 방어/한계 명시하게.
+        joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)
+        prompt += (
+            "\nKnown upstream data quality issues (from SQL integrity check):\n"
+            f"{joined}\n"
+            "Account for these when choosing methods and stating limitations.\n"
+        )
     if context.last_failure:
         prompt += (
             "\nPrevious Supervisor failure:\n"
