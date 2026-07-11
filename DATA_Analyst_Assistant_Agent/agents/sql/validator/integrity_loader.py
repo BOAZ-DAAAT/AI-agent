@@ -13,6 +13,7 @@ SCHEMA_JSON_PATH = DATA_DIR / "db_schema.json"
 INTEGRITY_JSON_PATH = DATA_DIR / "db_integrity_result.json"
 
 _ISSUE_STATUSES = {"FAIL", "FAILED", "ERROR", "WARNING", "WARN", "ACTION_REQUIRED", "STALE"}
+_FAIL_STATUSES = {"FAIL", "FAILED", "ERROR", "ACTION_REQUIRED"}  # fail_only 모드: 실패만
 _PASS_STATUSES = {"PASS", "PASSED", "SUCCESS", "OK"}
 _MAX_INTEGRITY_LINES = 60
 _MAX_DETAIL_CHARS = 260
@@ -52,6 +53,31 @@ def load_all_metadata():
         "schema_text": json.dumps(schema_json, ensure_ascii=False, indent=2),
         "integrity_text": compact_integrity_summary_text(integrity_json),
     }
+
+
+_SCOPED_MAX_LINES = 100  # 실측(9테이블 fail_only 무스코핑=29줄) 대비 넉넉한 안전망 — 평소엔 안 걸리고 이상상황(스키마 드리프트 등)만 방어(#123)
+
+
+def load_scoped_integrity_text(
+    tables: Iterable[str] | None,
+    *,
+    fail_only: bool = True,
+    max_lines: int | None = _SCOPED_MAX_LINES,
+) -> str:
+    """미리 생성해둔 정적 db_integrity_result.json 을 planned tables 로 스코핑해 프롬프트 텍스트를 만든다.
+
+    로컬/오프라인(백엔드 정합성 서비스 미가동)에서 쓰는 경로. 파일이 없거나 비어 있으면 ""
+    를 돌려 파이프라인을 막지 않는다. 기본은 fail_only=True(실패 검사만) + max_lines=100
+    — 스코핑·fail_only로 실사용은 이미 유계(실측 29줄)지만, 100은 평소엔 절대 안 걸리는
+    최후 방어선으로만 둔다(#123).
+    """
+    try:
+        data = load_integrity_json()
+    except FileNotFoundError:
+        return ""
+    return compact_integrity_summary_text(
+        data, tables=tables, fail_only=fail_only, max_lines=max_lines
+    )
 
 
 def preload_backend_integrity_summary(dataset_name: str) -> dict[str, Any]:
@@ -124,10 +150,12 @@ def _status_from_dict(item: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_prompt_relevant_status(status: str | None, include_pass: bool) -> bool:
+def _is_prompt_relevant_status(status: str | None, include_pass: bool, fail_only: bool = False) -> bool:
     if not status:
         return False
     normalized = status.upper()
+    if fail_only:
+        return normalized in _FAIL_STATUSES
     return normalized in _ISSUE_STATUSES or (include_pass and normalized in _PASS_STATUSES)
 
 
@@ -193,6 +221,7 @@ def _iter_integrity_findings(
     active_table: str = "",
     tables: set[str] | None = None,
     include_pass: bool = False,
+    fail_only: bool = False,
 ):
     if isinstance(value, list):
         for item in value:
@@ -201,6 +230,7 @@ def _iter_integrity_findings(
                 active_table=active_table,
                 tables=tables,
                 include_pass=include_pass,
+                fail_only=fail_only,
             )
         return
 
@@ -217,7 +247,7 @@ def _iter_integrity_findings(
         return
 
     status = _status_from_dict(value)
-    if _is_prompt_relevant_status(status, include_pass):
+    if _is_prompt_relevant_status(status, include_pass, fail_only):
         yield {
             "table": table_name,
             "column": _extract_column(value),
@@ -244,6 +274,7 @@ def _iter_integrity_findings(
             active_table=child_table,
             tables=tables,
             include_pass=include_pass,
+            fail_only=fail_only,
         )
 
 
@@ -252,28 +283,40 @@ def compact_integrity_summary_text(
     *,
     tables: Iterable[str] | None = None,
     include_pass: bool = False,
+    fail_only: bool = False,
+    max_lines: int | None = _MAX_INTEGRITY_LINES,
 ) -> str:
     """Build compact prompt context from legacy, service, or GE-shaped payloads.
 
     By default only failures, warnings, and stale checks are included so SQL
     prompts do not receive full passing validation dumps.
+
+    fail_only=True 면 실패(FAIL/ERROR/ACTION_REQUIRED)만 남긴다(경고/stale 제외).
+    max_lines=None 이면 줄 상한을 두지 않는다(스코핑·fail_only 로 이미 유계일 때 사용).
     """
     table_filter = _table_filter(tables)
     findings: list[dict[str, str]] = []
     seen = set()
-    for finding in _iter_integrity_findings(summary, tables=table_filter, include_pass=include_pass):
+    for finding in _iter_integrity_findings(
+        summary, tables=table_filter, include_pass=include_pass, fail_only=fail_only
+    ):
         key = tuple(finding.get(field, "") for field in ("table", "column", "status", "check", "detail"))
         if key in seen:
             continue
         seen.add(key)
         findings.append(finding)
-        if len(findings) >= _MAX_INTEGRITY_LINES:
+        if max_lines is not None and len(findings) >= max_lines:
             break
 
     if not findings:
         return ""
 
-    lines = ["Integrity context (only failures/warnings/stale checks):"]
+    header = (
+        "Integrity context (only FAILED checks):"
+        if fail_only
+        else "Integrity context (only failures/warnings/stale checks):"
+    )
+    lines = [header]
     for finding in findings:
         location = finding["table"] or "dataset"
         if finding["column"]:

@@ -66,8 +66,9 @@ def get_schema_info(engine, use_llm=False, use_cache=True): # use_cache 추가
     """
     회의 내용 반영: use_cache가 True면 기존에 생성된 파일이 있을 때 그걸 읽어옵니다.
     """
-    # 1. 캐시 확인 (비용 방어)
-    if use_cache and os.path.exists(SCHEMA_CACHE_PATH):
+    # 1. 캐시 확인 (비용 방어) — use_llm=True로 명시 요청하면 캐시가 description 없는
+    # 옛 스캐폴드일 수 있으니 무시하고 재생성한다(#123).
+    if use_cache and not use_llm and os.path.exists(SCHEMA_CACHE_PATH):
         print(f"📦 기존에 생성된 스키마 정보({SCHEMA_CACHE_PATH})를 활용합니다.")
         with open(SCHEMA_CACHE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)

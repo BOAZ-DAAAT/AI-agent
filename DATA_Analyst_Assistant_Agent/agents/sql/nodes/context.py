@@ -7,6 +7,7 @@ from typing import Any
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import (
     load_all_metadata,
+    load_scoped_integrity_text,
     preload_backend_integrity_summary,
     refresh_backend_integrity_summary,
 )
@@ -85,4 +86,10 @@ def refresh_integrity_context(state: AgentState):
     update: dict[str, Any] = {"integrity_refresh": refresh_meta}
     if result.get("status") == "refreshed" and result.get("ready"):
         update["integrity_text"] = result.get("integrity_text", "")
+    else:
+        # 백엔드 정합성 서비스가 없을 때(로컬/오프라인) → 미리 생성해둔 정적
+        # db_integrity_result.json 을 planned tables 로 스코핑해 읽는다.
+        # 실패 검사만(fail_only) + 캡 없음(max_lines=None) → 관련 테이블의 문제만 최소로.
+        update["integrity_text"] = load_scoped_integrity_text(tables)
+        update["integrity_refresh"] = {**refresh_meta, "local_fallback": True, "scoped_tables": tables}
     return update
