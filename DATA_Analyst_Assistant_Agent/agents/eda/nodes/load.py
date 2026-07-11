@@ -17,6 +17,7 @@ from typing import Optional
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import classify_columns_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
@@ -112,7 +113,7 @@ def load_mart_node(state: EDAState) -> dict:
     else:
         key_col = _select_best_key_col(df, key_columns, measure_cols or [])
     if key_col is None:
-        cat_cols = list(df.select_dtypes(include=["object"]).columns)
+        cat_cols = categorical_object_columns(df)
         key_col = cat_cols[0] if cat_cols else None
 
     col_meta = _classify_columns(df, measure_cols or [])

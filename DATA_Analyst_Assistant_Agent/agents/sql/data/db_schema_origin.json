@@ -1,0 +1,1095 @@
+{
+    "customers": {
+        "primary_key": [],
+        "description": "이 테이블은 고객의 고유 식별자와 배송지 주소의 지역 정보를 저장해 고객 단위를 구분하고 지역 분석이나 주문 연계에 활용하는 고객 마스터 테이블이다.",
+        "columns": [
+            {
+                "name": "customer_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "주문 단위로 발급되는 식별자다. 같은 사람이라도 주문할 때마다 새로운 customer_id가 생성되므로 고객이 아니라 사실상 주문 1건에 대응한다(customers와 orders가 customer_id로 1:1 연결). 고객 단위 집계에서는 GROUP BY 대상으로 쓰면 안 되고 orders 조인 키로만 사용한다."
+            },
+            {
+                "name": "customer_unique_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "동일 인물을 식별하는 실제 고객 키다. 한 사람이 여러 번 주문하면 customer_id는 여러 개 생기지만 customer_unique_id는 동일하다. 재구매·이탈·고객 단위(RFM 등) 분석에서 고객을 묶는 기준(GROUP BY 대상)은 반드시 이 컬럼이어야 한다."
+            },
+            {
+                "name": "customer_zip_code_prefix",
+                "type": "VARCHAR(10)",
+                "nullable": true,
+                "description": "고객 주소의 우편번호 앞자리로, 정확한 전체 주소 대신 지역 단위로 위치를 식별하거나 배송/지역 분석에 활용되는 값이다."
+            },
+            {
+                "name": "customer_city",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "고객이 속한 도시명으로, 예시 데이터상 브라질의 도시명이 소문자로 저장되어 있으며 지역 분포 분석에 사용된다."
+            },
+            {
+                "name": "customer_state",
+                "type": "VARCHAR(5)",
+                "nullable": true,
+                "description": "고객이 속한 주(State) 코드로 보이며, 예시에서는 브라질 주 약어(MG, SP, RJ 등)가 저장되어 지역 단위 집계나 배송권역 분석에 활용된다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "customer_id": "737d438cd631428265f911322d7e7f9d",
+                "customer_unique_id": "a658ea557e4a20a93cef77c26bf3811a",
+                "customer_zip_code_prefix": "30520",
+                "customer_city": "belo horizonte",
+                "customer_state": "MG"
+            },
+            {
+                "customer_id": "8de64fc8fa179ff773b31c717f5fc995",
+                "customer_unique_id": "dc0274a25d881c813da7d55b7faace37",
+                "customer_zip_code_prefix": "67133",
+                "customer_city": "ananindeua",
+                "customer_state": "PA"
+            },
+            {
+                "customer_id": "7670015fc62bb81758579a5e88de8596",
+                "customer_unique_id": "267b51cf96029a3c9526bae983306c09",
+                "customer_zip_code_prefix": "20270",
+                "customer_city": "rio de janeiro",
+                "customer_state": "RJ"
+            },
+            {
+                "customer_id": "329b7eb09d495661adbfb762e90eac15",
+                "customer_unique_id": "e4834c6feedd40a5d115c5734e0aa7e8",
+                "customer_zip_code_prefix": "55650",
+                "customer_city": "passira",
+                "customer_state": "PE"
+            },
+            {
+                "customer_id": "60305609fd9f1bd337ec2e5453861860",
+                "customer_unique_id": "2beb8dc2b2baa3a8cdbafd80f2d44347",
+                "customer_zip_code_prefix": "14784",
+                "customer_city": "barretos",
+                "customer_state": "SP"
+            },
+            {
+                "customer_id": "07171815cfd9a9aa8ee3dd62767f3ad4",
+                "customer_unique_id": "c6b2ccbe75ac5addb40fcff5db96a5c1",
+                "customer_zip_code_prefix": "39270",
+                "customer_city": "pirapora",
+                "customer_state": "MG"
+            },
+            {
+                "customer_id": "a56934ac6ba4aefa2d26ee8bba42d883",
+                "customer_unique_id": "cd96ad378788155fb021e1c6cd1985d1",
+                "customer_zip_code_prefix": "35400",
+                "customer_city": "ouro preto",
+                "customer_state": "MG"
+            },
+            {
+                "customer_id": "36a90120ace08b1a43f21ce23f44c5b9",
+                "customer_unique_id": "df57b7687506cc0e4b28e97ef158655c",
+                "customer_zip_code_prefix": "04366",
+                "customer_city": "sao paulo",
+                "customer_state": "SP"
+            },
+            {
+                "customer_id": "6f5d085fa90e41ad46b2f5623426febe",
+                "customer_unique_id": "32efa507b1a360412dee7ff30905ebdc",
+                "customer_zip_code_prefix": "18112",
+                "customer_city": "votorantim",
+                "customer_state": "SP"
+            },
+            {
+                "customer_id": "f57d3db30585e5fe7bb1649ec4b1bc32",
+                "customer_unique_id": "655e1a53d7b00597d4e1d54d6e92d39e",
+                "customer_zip_code_prefix": "41900",
+                "customer_city": "salvador",
+                "customer_state": "BA"
+            }
+        ]
+    },
+    "geolocation": {
+        "primary_key": [],
+        "description": "이 테이블은 우편번호 접두어(지역 코드)별로 위도·경도, 도시명, 주(state) 정보를 매핑해 둔 지리 위치 참고용 테이블입니다.",
+        "columns": [
+            {
+                "name": "geolocation_zip_code_prefix",
+                "type": "VARCHAR(10)",
+                "nullable": true,
+                "description": "우편번호의 앞자리(접두어)로 보이는 지역 식별 코드입니다. 주문/고객/판매자 주소의 우편번호와 연결하여 해당 지역의 위치 정보를 찾는 데 사용됩니다."
+            },
+            {
+                "name": "geolocation_lat",
+                "type": "DOUBLE",
+                "nullable": true,
+                "description": "해당 우편번호 접두어에 대응하는 위도(latitude) 값입니다. 지도의 남북 위치를 나타내며, 샘플상 브라질 내 여러 도시의 좌표로 보입니다."
+            },
+            {
+                "name": "geolocation_lng",
+                "type": "DOUBLE",
+                "nullable": true,
+                "description": "해당 우편번호 접두어에 대응하는 경도(longitude) 값입니다. 지도의 동서 위치를 나타내며, 위도와 함께 특정 지역의 좌표를 구성합니다."
+            },
+            {
+                "name": "geolocation_city",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "해당 우편번호 접두어가 속한 도시명입니다. 샘플에서는 'sao paulo', 'belo horizonte'처럼 브라질 도시명이 저장되어 있습니다."
+            },
+            {
+                "name": "geolocation_state",
+                "type": "VARCHAR(5)",
+                "nullable": true,
+                "description": "해당 도시가 속한 주(state) 약어입니다. 예: SP, RJ, PR, PE, TO, MG 등으로 브라질의 주를 식별합니다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "geolocation_zip_code_prefix": "11040",
+                "geolocation_lat": -23.971549683594,
+                "geolocation_lng": -46.317524500144216,
+                "geolocation_city": "santos",
+                "geolocation_state": "SP"
+            },
+            {
+                "geolocation_zip_code_prefix": "26250",
+                "geolocation_lat": -22.764063607732776,
+                "geolocation_lng": -43.444841050938464,
+                "geolocation_city": "nova iguacu",
+                "geolocation_state": "RJ"
+            },
+            {
+                "geolocation_zip_code_prefix": "04813",
+                "geolocation_lat": -23.720501503750913,
+                "geolocation_lng": -46.69010932944775,
+                "geolocation_city": "sao paulo",
+                "geolocation_state": "SP"
+            },
+            {
+                "geolocation_zip_code_prefix": "08260",
+                "geolocation_lat": -23.56729421065843,
+                "geolocation_lng": -46.42661683749782,
+                "geolocation_city": "sao paulo",
+                "geolocation_state": "SP"
+            },
+            {
+                "geolocation_zip_code_prefix": "87060",
+                "geolocation_lat": -23.45454688512454,
+                "geolocation_lng": -51.94270499065354,
+                "geolocation_city": "maringa",
+                "geolocation_state": "PR"
+            },
+            {
+                "geolocation_zip_code_prefix": "56912",
+                "geolocation_lat": -7.985185011436592,
+                "geolocation_lng": -38.28499856228716,
+                "geolocation_city": "serra talhada",
+                "geolocation_state": "PE"
+            },
+            {
+                "geolocation_zip_code_prefix": "77818",
+                "geolocation_lat": -7.189160876933616,
+                "geolocation_lng": -48.22065014760938,
+                "geolocation_city": "araguaína",
+                "geolocation_state": "TO"
+            },
+            {
+                "geolocation_zip_code_prefix": "12607",
+                "geolocation_lat": -22.747122727090993,
+                "geolocation_lng": -45.114713241618105,
+                "geolocation_city": "lorena",
+                "geolocation_state": "SP"
+            },
+            {
+                "geolocation_zip_code_prefix": "37750",
+                "geolocation_lat": -21.681987414741076,
+                "geolocation_lng": -45.92787691681708,
+                "geolocation_city": "machado",
+                "geolocation_state": "MG"
+            },
+            {
+                "geolocation_zip_code_prefix": "31720",
+                "geolocation_lat": -19.837892430203663,
+                "geolocation_lng": -43.949310092013334,
+                "geolocation_city": "belo horizonte",
+                "geolocation_state": "MG"
+            }
+        ]
+    },
+    "order_items": {
+        "primary_key": [],
+        "description": "주문별 상품 단위의 상세 내역을 저장하는 테이블로, 한 주문에 포함된 각 상품의 판매자, 가격, 배송 제한일, 배송비 정보를 관리한다.",
+        "columns": [
+            {
+                "name": "order_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "주문을 식별하는 고유 ID로, 같은 주문에 속한 여러 상품 행을 묶는 기준이 된다."
+            },
+            {
+                "name": "order_item_id",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "해당 주문 안에서 몇 번째 상품 항목인지 나타내는 순번으로, 동일 주문 내 개별 상품을 구분한다."
+            },
+            {
+                "name": "product_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "주문된 상품 자체를 식별하는 고유 ID이다."
+            },
+            {
+                "name": "seller_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "해당 상품을 판매한 판매자(셀러)를 식별하는 ID이다."
+            },
+            {
+                "name": "shipping_limit_date",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "판매자가 해당 주문 상품을 발송해야 하는 기한 또는 배송 처리 제한 시점이다."
+            },
+            {
+                "name": "price",
+                "type": "DECIMAL(10, 2)",
+                "nullable": true,
+                "description": "상품 1개 또는 해당 주문 항목의 판매 금액을 나타낸다."
+            },
+            {
+                "name": "freight_value",
+                "type": "DECIMAL(10, 2)",
+                "nullable": true,
+                "description": "해당 주문 상품에 대해 부과된 배송비 금액이다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "order_id": "808c7c69c2778bdf4689eee0286e2bef",
+                "order_item_id": 4,
+                "product_id": "5c3eaf54e8ee5d5378765ff16df7640b",
+                "seller_id": "8a32e327fe2c1b3511609d81aaf9f042",
+                "shipping_limit_date": "2018-03-05T08:10:27",
+                "price": 12.99,
+                "freight_value": 9.34
+            },
+            {
+                "order_id": "7a76fba56e5e78997c15b4e7a3a7e760",
+                "order_item_id": 1,
+                "product_id": "9e10ae46a3021a02f1692448ef9fa1db",
+                "seller_id": "8b28d096634035667e8263d57ba3368c",
+                "shipping_limit_date": "2017-09-29T17:44:42",
+                "price": 37.9,
+                "freight_value": 15.1
+            },
+            {
+                "order_id": "7a892f60ab55f0706eb2386da59a4849",
+                "order_item_id": 1,
+                "product_id": "d1a7965ac8d6ae62c9c1984434227cb6",
+                "seller_id": "87142160b41353c4e5fca2360caf6f92",
+                "shipping_limit_date": "2018-08-23T12:30:42",
+                "price": 69.9,
+                "freight_value": 23.29
+            },
+            {
+                "order_id": "f5508c24aa4418c7069ad5a43b06bdee",
+                "order_item_id": 1,
+                "product_id": "ab1f9387c0627dd24000bfbc54fdeee0",
+                "seller_id": "8b321bb669392f5163d04c59e235e066",
+                "shipping_limit_date": "2018-05-21T04:52:36",
+                "price": 12.25,
+                "freight_value": 12.79
+            },
+            {
+                "order_id": "28347fb7928bfd78f994fd08e778e7cd",
+                "order_item_id": 1,
+                "product_id": "a62e25e09e05e6faf31d90c6ec1aa3d1",
+                "seller_id": "634964b17796e64304cadf1ad3050fb7",
+                "shipping_limit_date": "2018-02-22T06:47:07",
+                "price": 108.0,
+                "freight_value": 18.33
+            },
+            {
+                "order_id": "3ffb5839790306f5e88e8319508dae29",
+                "order_item_id": 2,
+                "product_id": "5fc3e6a4b52b0c414458104ed4037f1c",
+                "seller_id": "229c3efbfb0ea2058de4ccdfbc3d784a",
+                "shipping_limit_date": "2017-05-25T15:42:49",
+                "price": 89.0,
+                "freight_value": 18.31
+            },
+            {
+                "order_id": "94fabf7998d05f3035718e58cb86d671",
+                "order_item_id": 1,
+                "product_id": "9363662bd84410483083a4fe6f06242a",
+                "seller_id": "b2ba3715d723d245138f291a6fe42594",
+                "shipping_limit_date": "2017-10-05T19:04:22",
+                "price": 24.9,
+                "freight_value": 11.85
+            },
+            {
+                "order_id": "82a4f87180e14e53d6b745317841196f",
+                "order_item_id": 1,
+                "product_id": "08bcc2d85da3a9c0e2ac1cc28b67418d",
+                "seller_id": "5f3ae9136c875522250f8184f253413a",
+                "shipping_limit_date": "2018-06-25T03:31:47",
+                "price": 19.9,
+                "freight_value": 8.3
+            },
+            {
+                "order_id": "4c2c7fcf017b1d438e1d6b7898d34a3a",
+                "order_item_id": 1,
+                "product_id": "75d6b6963340c6063f7f4cfcccfe6a30",
+                "seller_id": "cc419e0650a3c5ba77189a1882b7556a",
+                "shipping_limit_date": "2017-05-16T09:35:15",
+                "price": 56.99,
+                "freight_value": 8.72
+            },
+            {
+                "order_id": "3b12b05b1ef9fd1f18face4e10c50c2e",
+                "order_item_id": 2,
+                "product_id": "c7dc39bcc7f9bf8a9b253b8727a0cde5",
+                "seller_id": "7299e27ed73d2ad986de7f7c77d919fa",
+                "shipping_limit_date": "2017-09-14T01:10:19",
+                "price": 40.0,
+                "freight_value": 15.1
+            }
+        ]
+    },
+    "order_payments": {
+        "primary_key": [],
+        "description": "주문별 결제 정보를 저장하는 테이블로, 한 주문에 대해 결제 수단, 결제 회차, 할부 개수, 결제 금액을 관리한다.",
+        "columns": [
+            {
+                "name": "order_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "주문을 식별하는 고유 ID로, 어떤 주문의 결제 내역인지 연결해주는 키 역할을 한다."
+            },
+            {
+                "name": "payment_sequential",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "한 주문에서 결제 항목이 여러 개일 때 각 결제 내역의 순서를 나타내는 번호로 보이며, 샘플에서는 대부분 1로 첫 번째 결제 건임을 의미한다."
+            },
+            {
+                "name": "payment_type",
+                "type": "VARCHAR(30)",
+                "nullable": true,
+                "description": "결제 수단을 나타내는 컬럼으로, 샘플 기준 credit_card(신용카드), boleto(브라질 현금/은행지로 방식) 같은 값이 들어간다."
+            },
+            {
+                "name": "payment_installments",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "해당 결제가 몇 개의 할부로 나뉘어 처리되었는지를 나타내는 값으로, 1이면 일시불, 2 이상이면 분할 납부를 의미한다."
+            },
+            {
+                "name": "payment_value",
+                "type": "DECIMAL(10, 2)",
+                "nullable": true,
+                "description": "해당 결제 건의 금액을 나타내는 결제액으로, 소수점 둘째 자리까지 저장되는 통화 금액이다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "order_id": "1d0cb4b170fe0f5f20475c4ec3ec4f06",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 4,
+                "payment_value": 58.59
+            },
+            {
+                "order_id": "88c2f1df68b3360d2a6c71cf40941035",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 5,
+                "payment_value": 150.05
+            },
+            {
+                "order_id": "a014ab9c0e9c112b791293dc9ec38320",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 3,
+                "payment_value": 78.51
+            },
+            {
+                "order_id": "e326f9904d668c8e2fce637b8b1fabe6",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 3,
+                "payment_value": 180.47
+            },
+            {
+                "order_id": "bedcad246f8051ae66375615a3824588",
+                "payment_sequential": 1,
+                "payment_type": "boleto",
+                "payment_installments": 1,
+                "payment_value": 112.84
+            },
+            {
+                "order_id": "4f8c0aad507bf7d1561641f3208cb43b",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 1,
+                "payment_value": 37.68
+            },
+            {
+                "order_id": "4c9de71242c212430ae070b7d2f837e7",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 3,
+                "payment_value": 47.04
+            },
+            {
+                "order_id": "862ec83f2ebeb547ccece5ad0f8d6332",
+                "payment_sequential": 1,
+                "payment_type": "boleto",
+                "payment_installments": 1,
+                "payment_value": 55.34
+            },
+            {
+                "order_id": "47e9777346f914fcce7e8d5a411ca60a",
+                "payment_sequential": 1,
+                "payment_type": "credit_card",
+                "payment_installments": 2,
+                "payment_value": 96.43
+            },
+            {
+                "order_id": "38396b4cf6f7c64870a71804f18641bd",
+                "payment_sequential": 1,
+                "payment_type": "boleto",
+                "payment_installments": 1,
+                "payment_value": 117.85
+            }
+        ]
+    },
+    "order_reviews": {
+        "primary_key": [],
+        "description": "이 테이블은 고객이 주문한 상품에 대해 남긴 상품/배송 후기와 평점, 그리고 판매자(또는 운영자)의 답변 시점을 함께 저장하는 주문 리뷰 이력 테이블이다.",
+        "columns": [
+            {
+                "name": "review_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "각 리뷰를 고유하게 식별하는 리뷰 ID로, 리뷰 1건당 1개의 식별값이 부여된다."
+            },
+            {
+                "name": "order_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "해당 리뷰가 어떤 주문에 대한 것인지 연결해 주는 주문 ID로, 주문 테이블과의 조인 키로 사용된다."
+            },
+            {
+                "name": "review_score",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "고객이 남긴 만족도 평점으로, 샘플상 1~5점 범위의 정수이며 낮을수록 불만족, 높을수록 만족을 의미한다."
+            },
+            {
+                "name": "review_comment_title",
+                "type": "VARCHAR(255)",
+                "nullable": true,
+                "description": "리뷰의 제목 또는 한줄 요약을 저장하는 컬럼이다. 실제 샘플에서는 비어 있는 경우가 많아 선택적으로 작성되는 텍스트로 보인다."
+            },
+            {
+                "name": "review_comment_message",
+                "type": "TEXT",
+                "nullable": true,
+                "description": "고객이 자유롭게 작성한 리뷰 본문 내용으로, 배송 지연, 오배송, 제품 하자, 만족 후기 등 구체적인 의견이 들어간다."
+            },
+            {
+                "name": "review_creation_date",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "리뷰가 고객에 의해 작성된 날짜를 나타내는 컬럼으로 보이며, 샘플에서는 날짜 단위로 저장되어 있다."
+            },
+            {
+                "name": "review_answer_timestamp",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "판매자 또는 운영 측에서 리뷰에 답변한 시각을 나타내는 컬럼으로 보이며, 리뷰 작성 후 응답 시점을 추적하는 데 사용된다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "review_id": "e36f1670c54adb5ff6658e381c253901",
+                "order_id": "e1320973675a5fc37fab54cb22c582ab",
+                "review_score": 1,
+                "review_comment_title": "Bom",
+                "review_comment_message": "Não veio a embalagem certa",
+                "review_creation_date": "2018-08-09T00:00:00",
+                "review_answer_timestamp": "2018-08-11T17:33:19"
+            },
+            {
+                "review_id": "658d3983dd66c13ead0730ec91382a0c",
+                "order_id": "698b8ecdaf8c15fe44343352cff74210",
+                "review_score": 1,
+                "review_comment_title": "",
+                "review_comment_message": "Comprei o produto e até agora ele não chegou.\r\nSimples assim.",
+                "review_creation_date": "2018-05-11T00:00:00",
+                "review_answer_timestamp": "2018-05-11T12:13:51"
+            },
+            {
+                "review_id": "5b2d385e841ff71aa9f8f3e167984d0c",
+                "order_id": "a2a40434e08665181cc74e01e9eb05e5",
+                "review_score": 4,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2017-07-06T00:00:00",
+                "review_answer_timestamp": "2017-07-07T10:53:27"
+            },
+            {
+                "review_id": "73fcc81a6b5ac00bb335dd44388b4fcc",
+                "order_id": "6646c2a367068f9fc14a1346daec5db5",
+                "review_score": 1,
+                "review_comment_title": "",
+                "review_comment_message": "O produto entregue não foi o mesmo que comprei,e ainda veio com defeito a parte lateral direita veio aberta com isso o volume sobe sozinho só de segurar no controle, não estou conseguindo o meu reimbo",
+                "review_creation_date": "2017-08-26T00:00:00",
+                "review_answer_timestamp": "2017-08-27T21:23:06"
+            },
+            {
+                "review_id": "a74e625163df3bb5cfaa3f24bb9a0e4d",
+                "order_id": "363b0ca1f6415ac4da76eb3a3d91f191",
+                "review_score": 1,
+                "review_comment_title": "",
+                "review_comment_message": "Tive que ir no correio buscar a mercadoria, além de ter pago o frete para receber em minha residência.",
+                "review_creation_date": "2017-07-11T00:00:00",
+                "review_answer_timestamp": "2017-07-13T21:15:47"
+            },
+            {
+                "review_id": "46162122dd7ecd5f596287bccd249574",
+                "order_id": "eab659d04f2bba5abfe11a2e6ef92bd0",
+                "review_score": 5,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2018-06-13T00:00:00",
+                "review_answer_timestamp": "2018-06-14T03:22:59"
+            },
+            {
+                "review_id": "0b56c68caa5e8f0fea66d046bd909b1e",
+                "order_id": "5d3d12685107807b3d265fc3e4742597",
+                "review_score": 4,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2017-09-23T00:00:00",
+                "review_answer_timestamp": "2017-09-24T09:33:26"
+            },
+            {
+                "review_id": "348c75c9233095268e727196479e89b7",
+                "order_id": "b2899a43c8dc465bf845340ea77aef50",
+                "review_score": 2,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2018-08-16T00:00:00",
+                "review_answer_timestamp": "2018-08-17T00:33:30"
+            },
+            {
+                "review_id": "48d2d8dd0165abc41bf0ed908da2a753",
+                "order_id": "1d6bdccf67319c766b5d8ad06121a158",
+                "review_score": 5,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2018-01-18T00:00:00",
+                "review_answer_timestamp": "2018-01-19T21:57:42"
+            },
+            {
+                "review_id": "8251a38b3be19302941a93ae4b1556cd",
+                "order_id": "b038348f0efe343b8b4d649f0e66885e",
+                "review_score": 5,
+                "review_comment_title": "",
+                "review_comment_message": "",
+                "review_creation_date": "2017-10-27T00:00:00",
+                "review_answer_timestamp": "2017-11-08T17:57:44"
+            }
+        ]
+    },
+    "orders": {
+        "primary_key": [],
+        "description": "이 테이블은 고객의 주문 생성부터 승인, 출고, 최종 배송, 그리고 예상 배송일까지의 주문 처리 이력을 관리하는 주문 헤더(주문 요약) 테이블입니다.",
+        "columns": [
+            {
+                "name": "order_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "각 주문을 고유하게 식별하는 주문 ID로, 주문 1건마다 하나씩 부여되는 기본 키 역할의 값입니다."
+            },
+            {
+                "name": "customer_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "주문을 한 고객을 식별하는 고객 ID로, 한 고객이 여러 주문을 가질 수 있습니다."
+            },
+            {
+                "name": "order_status",
+                "type": "VARCHAR(20)",
+                "nullable": true,
+                "description": "주문의 현재 처리 상태를 나타내는 값입니다. 샘플에서는 delivered(배송 완료), shipped(출고됨) 등이 보이며 주문 진행 단계를 구분하는 데 사용됩니다."
+            },
+            {
+                "name": "order_purchase_timestamp",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "고객이 실제로 주문을 생성한 시점입니다. 주문 접수 시각을 의미하며 주문 흐름의 시작점입니다."
+            },
+            {
+                "name": "order_approved_at",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "주문이 결제/승인 처리된 시각입니다. 구매 후 내부 검토나 결제 승인 완료 시점을 기록합니다."
+            },
+            {
+                "name": "order_delivered_carrier_date",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "판매자 또는 물류센터에서 택배사/운송사로 상품이 인계되어 출고된 시각입니다. 즉, 배송 운송이 시작된 시점입니다."
+            },
+            {
+                "name": "order_delivered_customer_date",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "상품이 최종 고객에게 실제로 배송 완료된 시각입니다. delivered 상태일 때 주로 값이 존재하고, 아직 배송 완료 전이면 NaT처럼 비어 있을 수 있습니다."
+            },
+            {
+                "name": "order_estimated_delivery_date",
+                "type": "DATETIME",
+                "nullable": true,
+                "description": "시스템이 예상한 주문 배송 완료 예정일입니다. 실제 배송일과 비교하여 배송 지연 여부를 판단하는 기준으로 활용됩니다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "order_id": "06ffc260a153bba52d82a18f91e8f760",
+                "customer_id": "4d89aa17cabb9666287aeec3288d07fb",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-01-16T08:57:33",
+                "order_approved_at": "2018-01-17T08:51:28",
+                "order_delivered_carrier_date": "2018-01-17T21:58:08",
+                "order_delivered_customer_date": "2018-01-24T01:03:37",
+                "order_estimated_delivery_date": "2018-02-08T00:00:00"
+            },
+            {
+                "order_id": "c6dd5fe55c03a2618b4a0667de43fac9",
+                "customer_id": "d13cfe708043e8c414e5f194e187774c",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-01-12T18:39:59",
+                "order_approved_at": "2018-01-13T18:33:32",
+                "order_delivered_carrier_date": "2018-01-17T22:34:21",
+                "order_delivered_customer_date": "2018-01-26T18:22:04",
+                "order_estimated_delivery_date": "2018-02-07T00:00:00"
+            },
+            {
+                "order_id": "5c7932e52b3c1515dbad06328d81d6fa",
+                "customer_id": "7dbc7e3964ce88c85cfdcdc61320d724",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2017-12-13T08:52:59",
+                "order_approved_at": "2017-12-13T09:11:06",
+                "order_delivered_carrier_date": "2017-12-13T19:48:50",
+                "order_delivered_customer_date": "2017-12-18T21:08:14",
+                "order_estimated_delivery_date": "2018-01-08T00:00:00"
+            },
+            {
+                "order_id": "7e28ace88f5848adf24d9771e1ca2a62",
+                "customer_id": "e7304df26c35ee85bb68efe843a1441a",
+                "order_status": "shipped",
+                "order_purchase_timestamp": "2018-01-13T22:59:33",
+                "order_approved_at": "2018-01-13T23:09:10",
+                "order_delivered_carrier_date": "2018-01-15T22:53:53",
+                "order_delivered_customer_date": "NaT",
+                "order_estimated_delivery_date": "2018-02-08T00:00:00"
+            },
+            {
+                "order_id": "bfd664f7724709fb7bfbb33308a64ccd",
+                "customer_id": "b848a0e45ab7cc370ead566c06c250a9",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-01-05T00:04:11",
+                "order_approved_at": "2018-01-05T00:14:24",
+                "order_delivered_carrier_date": "2018-01-08T16:03:38",
+                "order_delivered_customer_date": "2018-01-15T21:28:47",
+                "order_estimated_delivery_date": "2018-01-30T00:00:00"
+            },
+            {
+                "order_id": "76cc0d927131093087a3d392008d9796",
+                "customer_id": "ce235b7711c4350b82cbeab0568b7df2",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-08-22T02:16:10",
+                "order_approved_at": "2018-08-22T02:30:17",
+                "order_delivered_carrier_date": "2018-08-23T13:55:00",
+                "order_delivered_customer_date": "2018-08-30T10:58:42",
+                "order_estimated_delivery_date": "2018-09-18T00:00:00"
+            },
+            {
+                "order_id": "6e0b28c14e19f98166a6c136548dab7b",
+                "customer_id": "07e4bae9721bddba07155c1b1cb5abb0",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-03-19T11:21:57",
+                "order_approved_at": "2018-03-21T02:56:47",
+                "order_delivered_carrier_date": "2018-03-21T19:33:35",
+                "order_delivered_customer_date": "2018-03-22T21:50:54",
+                "order_estimated_delivery_date": "2018-03-29T00:00:00"
+            },
+            {
+                "order_id": "305b0101ce8f8fd2d7b32f7480340018",
+                "customer_id": "06872c61a13a4d027504dd0c15d43b72",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2017-04-30T18:34:22",
+                "order_approved_at": "2017-04-30T18:45:15",
+                "order_delivered_carrier_date": "2017-05-05T12:07:58",
+                "order_delivered_customer_date": "2017-05-16T08:57:50",
+                "order_estimated_delivery_date": "2017-05-25T00:00:00"
+            },
+            {
+                "order_id": "8538cceabb941edabecc8ac62f6813c9",
+                "customer_id": "3756b6c32606779d7afef1ab970fcae2",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-05-17T16:56:01",
+                "order_approved_at": "2018-05-18T04:36:15",
+                "order_delivered_carrier_date": "2018-05-21T14:01:00",
+                "order_delivered_customer_date": "2018-06-06T16:56:38",
+                "order_estimated_delivery_date": "2018-06-18T00:00:00"
+            },
+            {
+                "order_id": "95b5dec92eff326736e1060b339f0013",
+                "customer_id": "977c17aaaaa190a607b8488d8a37bd72",
+                "order_status": "delivered",
+                "order_purchase_timestamp": "2018-04-18T22:11:59",
+                "order_approved_at": "2018-04-18T22:31:12",
+                "order_delivered_carrier_date": "2018-04-21T00:34:30",
+                "order_delivered_customer_date": "2018-04-23T14:21:13",
+                "order_estimated_delivery_date": "2018-05-10T00:00:00"
+            }
+        ]
+    },
+    "product_category_name_translation": {
+        "primary_key": [],
+        "description": "이 테이블은 상품 카테고리명을 포르투갈어 원문과 영어 번역명으로 매핑하여, 카테고리명을 다국어로 해석하고 통일된 분류 체계로 활용하기 위한 참조용 사전 테이블입니다.",
+        "columns": [
+            {
+                "name": "product_category_name",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "상품 카테고리의 원본 이름을 저장하는 컬럼으로, 주로 포르투갈어 형태의 카테고리 코드 또는 카테고리 식별명(예: music, automotivo 등)이 들어갑니다."
+            },
+            {
+                "name": "product_category_name_english",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "원본 상품 카테고리명을 영어로 번역한 값이 저장되는 컬럼으로, 분석이나 사용자 표시용으로 카테고리를 영어 기준으로 표준화할 때 사용됩니다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "product_category_name": "fashion_bolsas_e_acessorios",
+                "product_category_name_english": "fashion_bags_accessories\r"
+            },
+            {
+                "product_category_name": "musica",
+                "product_category_name_english": "music\r"
+            },
+            {
+                "product_category_name": "consoles_games",
+                "product_category_name_english": "consoles_games\r"
+            },
+            {
+                "product_category_name": "dvds_blu_ray",
+                "product_category_name_english": "dvds_blu_ray\r"
+            },
+            {
+                "product_category_name": "fashion_underwear_e_moda_praia",
+                "product_category_name_english": "fashion_underwear_beach\r"
+            },
+            {
+                "product_category_name": "utilidades_domesticas",
+                "product_category_name_english": "housewares\r"
+            },
+            {
+                "product_category_name": "moveis_quarto",
+                "product_category_name_english": "furniture_bedroom\r"
+            },
+            {
+                "product_category_name": "automotivo",
+                "product_category_name_english": "auto\r"
+            },
+            {
+                "product_category_name": "malas_acessorios",
+                "product_category_name_english": "luggage_accessories\r"
+            },
+            {
+                "product_category_name": "sinalizacao_e_seguranca",
+                "product_category_name_english": "signaling_and_security\r"
+            }
+        ]
+    },
+    "products": {
+        "primary_key": [],
+        "description": "이 테이블은 상품 마스터 정보로, 각 상품의 식별자, 카테고리, 상품명/설명 길이, 사진 수, 그리고 배송·물류에 필요한 중량과 크기 정보를 관리하는 용도입니다.",
+        "columns": [
+            {
+                "name": "product_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "각 상품을 유일하게 식별하는 상품 ID입니다. 문자열 형태의 키로 보이며, 다른 테이블과 연결할 때 기준이 되는 기본 식별자 역할을 합니다."
+            },
+            {
+                "name": "product_category_name",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "상품이 속한 카테고리명입니다. 예시를 보면 'cama_mesa_banho', 'automotivo', 'brinquedos'처럼 포르투갈어 카테고리 코드가 저장되어 있어 상품 분류에 사용됩니다."
+            },
+            {
+                "name": "product_name_lenght",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품명 길이를 나타내는 값입니다. 실제 상품명 텍스트 자체가 아니라, 상품명 문자열의 문자 수 또는 길이 지표를 저장한 것으로 보입니다. 샘플에서 소수점 형태로 보이지만 의미상 정수형 길이 값입니다."
+            },
+            {
+                "name": "product_description_lenght",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품 상세설명 길이를 나타내는 값입니다. 상품 설명 텍스트의 문자 수를 저장한 것으로 보이며, 상세 페이지 정보의 길이 정도를 분석하거나 품질을 측정하는 데 활용될 수 있습니다."
+            },
+            {
+                "name": "product_photos_qty",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "해당 상품에 등록된 사진 수입니다. 상품 상세페이지에 연결된 이미지 개수를 나타내며, 상품 노출도나 상세도 분석에 사용할 수 있습니다."
+            },
+            {
+                "name": "product_weight_g",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품의 무게를 그램(g) 단위로 저장한 값입니다. 배송비 계산, 물류 처리, 포장 기준 산정 등에 쓰이는 물류 속성입니다."
+            },
+            {
+                "name": "product_length_cm",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품의 길이(또는 한 변의 길이)를 센티미터(cm) 단위로 저장한 값입니다. 물류상 박스 규격이나 부피 산정에 사용될 수 있습니다."
+            },
+            {
+                "name": "product_height_cm",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품의 높이를 센티미터(cm) 단위로 저장한 값입니다. 배송 포장 및 부피 계산에 필요한 치수 정보입니다."
+            },
+            {
+                "name": "product_width_cm",
+                "type": "INTEGER",
+                "nullable": true,
+                "description": "상품의 너비를 센티미터(cm) 단위로 저장한 값입니다. 상품의 전체 부피와 포장 적합성을 판단하는 데 쓰이는 치수 정보입니다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "product_id": "c18dfe3165eaa55de9ec8f462cd7556f",
+                "product_category_name": "cama_mesa_banho",
+                "product_name_lenght": 56.0,
+                "product_description_lenght": 329.0,
+                "product_photos_qty": 2.0,
+                "product_weight_g": 500,
+                "product_length_cm": 30,
+                "product_height_cm": 10,
+                "product_width_cm": 30
+            },
+            {
+                "product_id": "36eece49385945a72f46e8edc9a56e42",
+                "product_category_name": "automotivo",
+                "product_name_lenght": 32.0,
+                "product_description_lenght": 1214.0,
+                "product_photos_qty": 1.0,
+                "product_weight_g": 1036,
+                "product_length_cm": 20,
+                "product_height_cm": 11,
+                "product_width_cm": 13
+            },
+            {
+                "product_id": "d500c64ef3ac31087d21f93faacec268",
+                "product_category_name": "livros_tecnicos",
+                "product_name_lenght": 55.0,
+                "product_description_lenght": 792.0,
+                "product_photos_qty": 1.0,
+                "product_weight_g": 2000,
+                "product_length_cm": 30,
+                "product_height_cm": 3,
+                "product_width_cm": 21
+            },
+            {
+                "product_id": "8ae1fefcfdc30ea49de246665b6d2713",
+                "product_category_name": null,
+                "product_name_lenght": NaN,
+                "product_description_lenght": NaN,
+                "product_photos_qty": NaN,
+                "product_weight_g": 400,
+                "product_length_cm": 16,
+                "product_height_cm": 15,
+                "product_width_cm": 15
+            },
+            {
+                "product_id": "d6f3bd7b1fc04fb1a2effb51ae44ab17",
+                "product_category_name": "consoles_games",
+                "product_name_lenght": 47.0,
+                "product_description_lenght": 348.0,
+                "product_photos_qty": 4.0,
+                "product_weight_g": 400,
+                "product_length_cm": 19,
+                "product_height_cm": 7,
+                "product_width_cm": 17
+            },
+            {
+                "product_id": "9ad1eced98687b00602a0b3cb3c0029f",
+                "product_category_name": "papelaria",
+                "product_name_lenght": 40.0,
+                "product_description_lenght": 310.0,
+                "product_photos_qty": 1.0,
+                "product_weight_g": 350,
+                "product_length_cm": 20,
+                "product_height_cm": 6,
+                "product_width_cm": 12
+            },
+            {
+                "product_id": "689b01074243aeee72049c8da42d2e22",
+                "product_category_name": "brinquedos",
+                "product_name_lenght": 57.0,
+                "product_description_lenght": 147.0,
+                "product_photos_qty": 8.0,
+                "product_weight_g": 900,
+                "product_length_cm": 30,
+                "product_height_cm": 25,
+                "product_width_cm": 20
+            },
+            {
+                "product_id": "c6c4ba8c85c4f5ffa22b732272a0e99d",
+                "product_category_name": "esporte_lazer",
+                "product_name_lenght": 58.0,
+                "product_description_lenght": 1897.0,
+                "product_photos_qty": 4.0,
+                "product_weight_g": 321,
+                "product_length_cm": 17,
+                "product_height_cm": 13,
+                "product_width_cm": 15
+            },
+            {
+                "product_id": "15ba996726b61ab95153368a8082c5d7",
+                "product_category_name": "industria_comercio_e_negocios",
+                "product_name_lenght": 54.0,
+                "product_description_lenght": 2587.0,
+                "product_photos_qty": 1.0,
+                "product_weight_g": 7000,
+                "product_length_cm": 40,
+                "product_height_cm": 30,
+                "product_width_cm": 40
+            },
+            {
+                "product_id": "1df69fad86c3fedbddd8b65fe13dc8db",
+                "product_category_name": "informatica_acessorios",
+                "product_name_lenght": 36.0,
+                "product_description_lenght": 236.0,
+                "product_photos_qty": 1.0,
+                "product_weight_g": 900,
+                "product_length_cm": 36,
+                "product_height_cm": 16,
+                "product_width_cm": 16
+            }
+        ]
+    },
+    "sellers": {
+        "primary_key": [],
+        "description": "이 테이블은 판매자(seller)의 식별 정보와 위치 정보를 저장하여, 각 판매자가 어디에 있는지 추적하고 주문/배송/정산 분석에 활용하기 위한 판매자 마스터 테이블입니다.",
+        "columns": [
+            {
+                "name": "seller_id",
+                "type": "VARCHAR(50)",
+                "nullable": true,
+                "description": "판매자를 고유하게 식별하는 ID로, 각 판매자 레코드를 구분하는 기본 식별자 역할을 합니다."
+            },
+            {
+                "name": "seller_zip_code_prefix",
+                "type": "VARCHAR(10)",
+                "nullable": true,
+                "description": "판매자의 우편번호 앞부분(지역을 대략적으로 나타내는 우편번호 prefix)으로, 판매자의 대략적인 위치를 파악하는 데 사용됩니다. 샘플상 '89150', '06714'처럼 5자리 문자열 형태로 저장되어 있습니다."
+            },
+            {
+                "name": "seller_city",
+                "type": "VARCHAR(100)",
+                "nullable": true,
+                "description": "판매자가 위치한 도시명입니다. 샘플상 'sao paulo', 'curitiba'처럼 브라질 도시명이 소문자 문자열로 저장되어 있습니다."
+            },
+            {
+                "name": "seller_state",
+                "type": "VARCHAR(5)",
+                "nullable": true,
+                "description": "판매자가 속한 주(State) 코드입니다. 샘플상 'SP', 'MG', 'PR', 'CE'처럼 브라질 주를 나타내는 2자리 약어로 저장되어 있습니다."
+            }
+        ],
+        "foreign_keys": [],
+        "sample_data": [
+            {
+                "seller_id": "f26d70155c2b6326fcfa1780c8c684e4",
+                "seller_zip_code_prefix": "89150",
+                "seller_city": "presidente getulio",
+                "seller_state": "SC"
+            },
+            {
+                "seller_id": "4450bd8327d471c4a11a83d1445b1b62",
+                "seller_zip_code_prefix": "06714",
+                "seller_city": "cotia",
+                "seller_state": "SP"
+            },
+            {
+                "seller_id": "94165aea8a35c3c21499cbcae239b16c",
+                "seller_zip_code_prefix": "38412",
+                "seller_city": "uberlandia",
+                "seller_state": "MG"
+            },
+            {
+                "seller_id": "3ded4e2d5f135cb103e5949d7263d2dd",
+                "seller_zip_code_prefix": "37550",
+                "seller_city": "pouso alegre",
+                "seller_state": "MG"
+            },
+            {
+                "seller_id": "6d988d6174a2c27441597174f8905515",
+                "seller_zip_code_prefix": "87070",
+                "seller_city": "maringa",
+                "seller_state": "PR"
+            },
+            {
+                "seller_id": "debe6615cd90cc0c2eac2b8988e1f628",
+                "seller_zip_code_prefix": "04282",
+                "seller_city": "sao paulo",
+                "seller_state": "SP"
+            },
+            {
+                "seller_id": "ea846a0e7ad98a741783e886d89dfa44",
+                "seller_zip_code_prefix": "16072",
+                "seller_city": "aracatuba",
+                "seller_state": "SP"
+            },
+            {
+                "seller_id": "2039c5e51785b5dde7cf93ccb3b7be2c",
+                "seller_zip_code_prefix": "14790",
+                "seller_city": "guaira",
+                "seller_state": "SP"
+            },
+            {
+                "seller_id": "612a743d294c27884fb7b80d2b19ba35",
+                "seller_zip_code_prefix": "80620",
+                "seller_city": "curitiba",
+                "seller_state": "PR"
+            },
+            {
+                "seller_id": "c4fabeea6e569d42d02993bb1f4f1cbc",
+                "seller_zip_code_prefix": "60741",
+                "seller_city": "fortaleza",
+                "seller_state": "CE"
+            }
+        ]
+    }
+}
