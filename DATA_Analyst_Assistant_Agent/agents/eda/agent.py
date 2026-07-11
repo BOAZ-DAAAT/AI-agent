@@ -144,6 +144,9 @@ class EDAAgent:
         plan = state.plan
         plan_metric = (plan.metric if plan and plan.metric else "") or ""
         plan_dimension = (plan.dimension if plan and plan.dimension else "") or ""
+        # GE 정합성 스코핑용 원천 테이블 + grain 교차검증용 선언 grain(있으면 줍고 없으면 폴백).
+        plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
+        plan_business_grain = (plan.business_grain if plan and plan.business_grain else "") or ""
         try:
             app = build_app()
             result = app.invoke(
@@ -154,6 +157,8 @@ class EDAAgent:
                     "question_type": state.route_kind or "",
                     "plan_metric": plan_metric,
                     "plan_dimension": plan_dimension,
+                    "plan_source_tables": plan_source_tables,
+                    "plan_business_grain": plan_business_grain,
                     "error_log": [],
                 }
             )

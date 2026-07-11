@@ -21,6 +21,9 @@ class EDAState(TypedDict, total=False):
     # ※ 앞단은 "매출"/"월" 같은 자연어/None으로만 채우는 경우가 있음(state.plan). 컬럼명 보장 X.
     plan_metric: str            # 분석 대상(target) 후보 힌트
     plan_dimension: str         # 그룹/단위(dimension) 힌트
+    # SQL 에이전트가 넘긴 원천 테이블/선언 grain. GE 정합성 스코핑 + grain 교차검증용(없으면 폴백).
+    plan_source_tables: List[str]  # GE 정합성을 이 테이블들로 스코핑해 읽는다
+    plan_business_grain: str       # SQL이 선언한 엔티티 grain (예: "one row per customer_unique_id")
     analysis_target: str        # 실제 df 컬럼으로 확정된 target (가설 6유형 앵커)
 
     # planner 결정 (하위호환 — 컨트롤러가 priority_metrics/focus를 여기 보관)

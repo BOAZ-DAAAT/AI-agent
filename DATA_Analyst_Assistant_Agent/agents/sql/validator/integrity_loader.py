@@ -70,7 +70,12 @@ def load_scoped_integrity_text(
     를 돌려 파이프라인을 막지 않는다. 기본은 fail_only=True(실패 검사만) + max_lines=100
     — 스코핑·fail_only로 실사용은 이미 유계(실측 29줄)지만, 100은 평소엔 절대 안 걸리는
     최후 방어선으로만 둔다(#123).
+
+    tables 가 비어 있으면(None/[]) 스코프할 테이블이 없다는 뜻이므로 ""를 돌린다 — 여기서
+    전체를 덤프하면 하위 스코핑 파서의 "필터 없음=전체" 규칙과 만나 토큰폭탄이 된다(#130).
     """
+    if not tables:
+        return ""
     try:
         data = load_integrity_json()
     except FileNotFoundError:

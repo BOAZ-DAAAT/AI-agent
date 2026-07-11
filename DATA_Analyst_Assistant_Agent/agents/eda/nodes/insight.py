@@ -13,6 +13,37 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import insight_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
+from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_integrity_text
+
+
+_GRAIN_TOKEN = re.compile(r"[a-z_]{3,}")
+_GRAIN_STOPWORDS = {"one", "row", "rows", "per", "the", "and", "grain", "level", "table", "unit"}
+
+
+def _grain_conflicts(declared_grain: str, detected_grain_hint: str) -> bool:
+    """SQL 선언 grain과 EDA 자체 추정 grain이 서로 다른 키를 가리키는지 보수적으로 판단.
+
+    둘에서 식별자 토큰(영문 소문자 3자+)을 뽑아, 선언 grain에 토큰이 있는데 추정 grain과 하나도
+    겹치지 않으면 충돌로 본다. 선언 grain이 비었거나 식별자 토큰이 없으면(한글 서술 등) 충돌 아님(폴백).
+    """
+    if not declared_grain:
+        return False
+    declared = {t for t in _GRAIN_TOKEN.findall(declared_grain.lower()) if t not in _GRAIN_STOPWORDS}
+    detected = {t for t in _GRAIN_TOKEN.findall((detected_grain_hint or "").lower()) if t not in _GRAIN_STOPWORDS}
+    # 한쪽이라도 식별자 토큰이 없으면 '불일치'가 아니라 '비교 불가' → false positive 방지(#130).
+    if not declared or not detected:
+        return False
+    return declared.isdisjoint(detected)
+
+
+def _fail_tables_from_integrity_text(text: str) -> list[str]:
+    """스코핑된 정합성 텍스트에서 이슈가 난 테이블명만 추출(중복 제거·순서 보존)."""
+    tables: list[str] = []
+    for match in re.finditer(r"\[[A-Z_]+\]\s+([A-Za-z_][A-Za-z0-9_]*)", text):
+        name = match.group(1)
+        if name != "dataset" and name not in tables:
+            tables.append(name)
+    return tables
 
 try:  # 제공자에 따라 openai 예외가 없을 수 있어 방어적으로 import
     from openai import RateLimitError
@@ -467,6 +498,15 @@ def insight_node(state: EDAState) -> dict:
         sample_reliability = assess_sample_reliability(
             df, key_col=key_col, count_col=count_col, data_level=data_level.get("level", "unknown"))
 
+        # SQL 선언 grain vs EDA 자체 추정 grain 교차검증(#130). EDA는 통계 휴리스틱만으로 grain을
+        # 추정해 오판할 수 있는데(near-unique를 1:1로 착각), SQL이 선언한 grain과 다르면 신뢰도를
+        # 낮추고 구조체 caution 을 남긴다. plan_business_grain 이 비면 조용히 스킵(폴백).
+        declared_grain = str(state.get("plan_business_grain") or "").strip()
+        grain_mismatch = _grain_conflicts(declared_grain, data_level.get("grain_hint", ""))
+        if grain_mismatch:
+            data_level["confidence"] = "low"
+            data_level["grain_conflict_with_sql"] = declared_grain
+
         # 집계본의 group key는 ID가 아니라 '묶는 기준' — classifier가 near-unique라 id로 오판하는 걸
         # 구조 사실(집계본 key_col)로 교정한다. semantic_type 체계의 정식 일부(집계 여부는 구조라 high).
         if data_level.get("is_aggregated") and key_col and isinstance(dist_stats.get(key_col), dict):
@@ -480,6 +520,33 @@ def insight_node(state: EDAState) -> dict:
         # rule 기반(결정론): 구조체 cautions + hard 계약(analysis_constraints)
         cautions = build_cautions(data_level, sample_reliability, corr_pairs, distribution=dist_stats)
         analysis_constraints = build_analysis_constraints(data_level)
+
+        # (#130) 상류 SQL 정합성/grain 컨텍스트를 구조체 caution 으로 남긴다 — 프롬프트뿐 아니라
+        # eda_summary.json 의 cautions 배열에 실려 하류(분석/리포트)가 구조적으로 읽을 수 있게.
+        if grain_mismatch:
+            cautions = cautions + [{
+                "code": "GRAIN_MISMATCH_WITH_SQL",
+                "source": "sql_integrity",
+                "severity": "high",
+                "message_ko": (
+                    f"SQL이 선언한 grain('{declared_grain}')과 EDA가 추정한 데이터 단위"
+                    f"('{data_level.get('grain_hint', '')}')가 일치하지 않습니다. 집계 단위 해석에 주의가 필요합니다."
+                ),
+                "recommended_action": ["verify_grain_before_group_analysis"],
+            }]
+        # 상류 원천 테이블의 GE 정합성 이슈(스코핑+fail_only+100줄 캡, #123 함수 재사용). 없으면 "".
+        integrity_text = load_scoped_integrity_text(state.get("plan_source_tables") or [])
+        if integrity_text:
+            fail_tables = _fail_tables_from_integrity_text(integrity_text)
+            tbls = ", ".join(fail_tables) if fail_tables else "원천 테이블"
+            cautions = cautions + [{
+                "code": "UPSTREAM_INTEGRITY_ISSUE",
+                "source": "sql_integrity",
+                "severity": "medium",
+                "message_ko": f"원천 테이블({tbls})에서 정합성 이슈가 확인되었습니다.",
+                "recommended_action": ["treat_as_interpretation_limit", "report_conclusions_conservatively"],
+                "details": integrity_text,  # 원문은 요약과 분리해 details 로(프롬프트/UI가 필요시 참조)
+            }]
 
         # LLM 천장(soft 탐지): rule이 못 잡은 추가 주의사항. 실패해도 rule cautions는 유지.
         numeric_summary = {
