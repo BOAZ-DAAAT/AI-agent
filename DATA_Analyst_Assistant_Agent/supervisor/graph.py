@@ -44,8 +44,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     reject_pending_result,
     stage_candidate_result,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
+    _check_completion_readiness,
     validate_subagent_result as validate_subagent_result_contract,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.evidence import (
@@ -231,13 +232,53 @@ def make_decide_next_action_node(model: Any | None):
         except Exception as exc:
             return _decision_failure_updates(state, "decide_next_action", exc)
 
-        return {
+        updates: SupervisorState = {
             "next_action": decision.next_action,
             "current_step": "decide_next_action",
             "llm_decisions": _append_llm_decision(state, "decide_next_action", decision),
         }
+        if decision.next_action == "fail":
+            reason = f"Supervisor가 명시적으로 fail을 선택했습니다: {decision.reason}"
+            updates.update(
+                {
+                    "terminal_state": SupervisorTerminalState.failed_terminal.value,
+                    "next_action": "finalize",
+                    "final_answer": reason,
+                }
+            )
+        return updates
 
     return decide_next_action_node
+
+
+def make_completion_guard_node():
+    def completion_guard_node(state: SupervisorState) -> SupervisorState:
+        current_terminal_state = state.get("terminal_state")
+        if current_terminal_state in FINALIZE_PROTECTED_TERMINAL_STATES:
+            return {
+                "next_action": "finalize",
+                "current_step": "completion_guard",
+            }
+
+        decision = _check_completion_readiness(state)
+        if decision.status == "ready":
+            return {
+                "next_action": "finalize",
+                "current_step": "completion_guard",
+            }
+        if decision.status == "report_required":
+            return {
+                "next_action": "call_report_agent",
+                "current_step": "completion_guard",
+            }
+        return {
+            "terminal_state": SupervisorTerminalState.failed_terminal.value,
+            "next_action": "finalize",
+            "final_answer": decision.reason,
+            "current_step": "completion_guard",
+        }
+
+    return completion_guard_node
 
 
 def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
@@ -289,7 +330,36 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 llm_decisions=llm_decisions,
             )
 
-        tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
+        try:
+            tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
+        except AgentContractError as exc:
+            message = f"{agent_name} 결과의 에이전트 계약 검증에 실패했습니다: {exc}"
+            failed_agents = list(state.get("failed_agents", []))
+            if agent_name not in failed_agents:
+                failed_agents.append(agent_name)
+            return _terminal_failure_updates(
+                state,
+                "execute_subagent",
+                message,
+                llm_decisions=llm_decisions,
+                extra_updates={
+                    "pending_result": None,
+                    "last_agent_result": {},
+                    "failed_agents": failed_agents,
+                    "completed_agents": list(state.get("completed_agents", [])),
+                    "accepted_evidence": {
+                        agent: list(items)
+                        for agent, items in state.get("accepted_evidence", {}).items()
+                    },
+                    "error_state": {
+                        "node": "execute_subagent",
+                        "message": message,
+                        "reason_code": "agent_contract_mismatch",
+                        "retryable": False,
+                    },
+                },
+            )
+
         updates = stage_candidate_result(state, tool_result.agent_result, tool_result.state_updates)
         updates["last_agent_result"] = tool_result.agent_result.model_dump(mode="json")
         updates["current_step"] = "executed_subagent"
@@ -782,6 +852,11 @@ def make_finalize_node(model: Any | None):
             terminal_state = current_terminal_state
 
         final_answer = state.get("final_answer") or decision.final_answer
+        if terminal_state == SupervisorTerminalState.completed.value:
+            completion = _check_completion_readiness(state)
+            if completion.status != "ready":
+                terminal_state = SupervisorTerminalState.failed_terminal.value
+                final_answer = completion.reason
         return {
             "terminal_state": terminal_state,
             "final_answer": final_answer,
@@ -829,6 +904,10 @@ def finalize_node(state: SupervisorState) -> SupervisorState:
     return make_finalize_node(None)(state)
 
 
+def completion_guard_node(state: SupervisorState) -> SupervisorState:
+    return make_completion_guard_node()(state)
+
+
 def build_graph(
     subagent_adapter: Any,
     model: Any | None = None,
@@ -851,6 +930,7 @@ def build_graph(
     graph.add_node("collect_clarification", make_collect_clarification_node())
     graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
+    graph.add_node("completion_guard", make_completion_guard_node())
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
     graph.add_node("generate_report", make_generate_report_node(report_generator))
     graph.add_node("stage_candidate", make_stage_candidate_node())
@@ -882,6 +962,7 @@ def build_graph(
         {
             "execute_subagent": "execute_subagent",
             "generate_report": "generate_report",
+            "completion_guard": "completion_guard",
             "finalize": "finalize",
         },
     )
@@ -892,6 +973,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_report": "generate_report",
             "stage_candidate": "stage_candidate",
+            "completion_guard": "completion_guard",
             "finalize": "finalize",
         },
     )
@@ -925,7 +1007,11 @@ def build_graph(
     graph.add_conditional_edges(
         "resolve_candidate",
         _route_after_resolve_candidate,
-        {"summarize_step": "summarize_step", "finalize": "finalize"},
+        {
+            "summarize_step": "summarize_step",
+            "completion_guard": "completion_guard",
+            "finalize": "finalize",
+        },
     )
     graph.add_conditional_edges(
         "summarize_step",
@@ -933,6 +1019,15 @@ def build_graph(
         {
             "decide_next_action": "decide_next_action",
             "execute_subagent": "execute_subagent",
+            "generate_report": "generate_report",
+            "completion_guard": "completion_guard",
+            "finalize": "finalize",
+        },
+    )
+    graph.add_conditional_edges(
+        "completion_guard",
+        _route_after_completion_guard,
+        {
             "generate_report": "generate_report",
             "finalize": "finalize",
         },
@@ -1058,7 +1153,7 @@ def _route_after_decide(state: SupervisorState) -> str:
         return "generate_report"
     if state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
-    return "finalize"
+    return "completion_guard"
 
 
 def _route_after_execute(state: SupervisorState) -> str:
@@ -1070,7 +1165,7 @@ def _route_after_execute(state: SupervisorState) -> str:
         return "generate_report"
     if state.get("current_step") == "guard_blocked" and state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
-    return "finalize"
+    return "completion_guard"
 
 
 def _route_after_validate(state: SupervisorState) -> str:
@@ -1097,8 +1192,10 @@ def _route_after_semantic_validate(state: SupervisorState) -> str:
 
 
 def _route_after_resolve_candidate(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES or state.get("next_action") == "finalize":
+    if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
+    if state.get("next_action") == "finalize":
+        return "completion_guard"
     return "summarize_step"
 
 
@@ -1114,11 +1211,17 @@ def _route_after_summarize(state: SupervisorState) -> str:
     if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     if next_action in {"finalize", "fail"}:
-        return "finalize"
+        return "completion_guard"
 
     raise ValueError(
         f"summarize_step 이후 지원하지 않는 next_action입니다: {next_action!r}"
     )
+
+
+def _route_after_completion_guard(state: SupervisorState) -> str:
+    if state.get("next_action") == "call_report_agent":
+        return "generate_report"
+    return "finalize"
 
 
 def _default_final_answer_for_terminal_state(

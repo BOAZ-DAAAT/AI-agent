@@ -12,6 +12,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ValidationFinding,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
+    _check_completion_readiness,
     guard_agent_preconditions,
     validate_subagent_result,
 )
@@ -24,6 +25,67 @@ def _state():
         user_query="월별 매출 추이를 분석해줘",
         datasource_id=None,
     )
+
+
+def test_completion_readiness_rejects_state_without_analysis_evidence() -> None:
+    decision = _check_completion_readiness(_state())
+
+    assert decision.status == "invalid"
+    assert "근거" in decision.reason
+
+
+def test_completion_readiness_requires_report_after_analysis_evidence() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "sql_agent": [{"artifact_id": "artifact_sql"}],
+    }
+    state["completed_agents"] = ["sql_agent"]
+
+    decision = _check_completion_readiness(state)
+
+    assert decision.status == "report_required"
+    assert "리포트" in decision.reason
+
+
+def test_completion_readiness_rejects_report_completion_without_artifact() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+    }
+    state["completed_agents"] = ["analysis_agent", "report_agent"]
+
+    decision = _check_completion_readiness(state)
+
+    assert decision.status == "invalid"
+    assert "아티팩트" in decision.reason
+
+
+def test_completion_readiness_rejects_report_artifact_without_completion() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "report_agent": [{"artifact_id": "artifact_report"}],
+    }
+    state["completed_agents"] = ["analysis_agent"]
+
+    decision = _check_completion_readiness(state)
+
+    assert decision.status == "invalid"
+    assert "완료 표식" in decision.reason
+
+
+def test_completion_readiness_allows_promoted_report_with_analysis_evidence() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "report_agent": [{"artifact_id": "artifact_report"}],
+    }
+    state["completed_agents"] = ["analysis_agent", "report_agent"]
+
+    decision = _check_completion_readiness(state)
+
+    assert decision.status == "ready"
+    assert "완료" in decision.reason
 
 
 def test_guard_blocks_eda_without_sql_artifact() -> None:

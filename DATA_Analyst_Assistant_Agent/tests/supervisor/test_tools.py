@@ -19,7 +19,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state
 from DATA_Analyst_Assistant_Agent.supervisor import tools
-from DATA_Analyst_Assistant_Agent.supervisor.tools import SubAgentAdapter
+from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, SubAgentAdapter
 from DATA_Analyst_Assistant_Agent.supervisor.validation import validate_subagent_result
 
 
@@ -371,10 +371,10 @@ class RaisingAgent:
     name = "eda_agent"
 
     def run(self, state: OrchestrationState, runtime) -> AgentEnvelope:
+        state.generated_sql = "SELECT partial_result FROM unsafe_state"
         raise RuntimeError("missing upstream SQL artifact")
 
 
-@pytest.mark.xfail(reason="SubAgentAdapter should convert agent exceptions into failed AgentCompactResult.")
 def test_subagent_adapter_converts_agent_exception_to_failed_contract() -> None:
     adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"eda_agent": RaisingAgent()})
 
@@ -383,7 +383,14 @@ def test_subagent_adapter_converts_agent_exception_to_failed_contract() -> None:
     assert result.agent_result.agent == "eda_agent"
     assert result.agent_result.status == "failed"
     assert result.agent_result.retryable is True
+    assert result.agent_result.retry_hint.retryable is True
+    assert result.agent_result.retry_hint.reason_code == "agent_execution_exception"
+    assert result.agent_result.retry_hint.details == {
+        "failure_reason": "missing upstream SQL artifact",
+        "exception_type": "RuntimeError",
+    }
     assert "missing upstream SQL artifact" in result.agent_result.error
+    assert result.state_updates == {}
 
 
 class MismatchedNameAgent:
@@ -393,11 +400,10 @@ class MismatchedNameAgent:
         return AgentEnvelope(status=AgentStatus.success, agent_name="eda_agent", summary="wrong envelope")
 
 
-@pytest.mark.xfail(reason="SubAgentAdapter should reject envelopes whose agent_name differs from the called agent.")
 def test_subagent_adapter_rejects_mismatched_agent_name() -> None:
     adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"sql_agent": MismatchedNameAgent()})
 
-    with pytest.raises(ValueError, match="agent_name"):
+    with pytest.raises(AgentContractError, match="sql_agent.*eda_agent"):
         adapter.call("sql_agent", _state())
 
 
