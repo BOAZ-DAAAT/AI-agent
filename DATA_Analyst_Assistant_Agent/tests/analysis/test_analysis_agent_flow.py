@@ -180,6 +180,94 @@ def test_agent_skips_binary_eda_chart_artifacts(adapter: BackendAdapter) -> None
     assert parsed.evidence[0].statistics["top_category"] == "B"
 
 
+def test_agent_reads_chart_when_numeric_summary_loses_shape_information(adapter: BackendAdapter) -> None:
+    run = adapter.create_run()
+    sql_ref = adapter.register_artifact(
+        run.run_id,
+        ArtifactType.sql_result,
+        content_text="category,revenue\nA,10\nA,12\nB,20\nB,220\n",
+        filename="result.csv",
+        created_by_tool="test.sql",
+        preview={"row_count": 4, "columns": ["category", "revenue"]},
+    )
+    chart_ref = adapter.register_artifact(
+        run.run_id,
+        ArtifactType.chart,
+        content_bytes=b"\x89PNG\r\n\x1a\nfake-png",
+        filename="revenue_dist.png",
+        created_by_tool="test.eda",
+        parent_ids=[sql_ref.artifact_id],
+    )
+    eda_ref = adapter.register_artifact(
+        run.run_id,
+        ArtifactType.data_profile,
+        content_text=json.dumps({
+            "profile": {
+                "quality_status": "usable",
+                "numeric_summary": {
+                    "revenue": {
+                        "count": 4.0,
+                        "mean": 65.5,
+                        "std": 103.1,
+                        "min": 10.0,
+                        "25%": 11.5,
+                        "50%": 16.0,
+                        "75%": 70.0,
+                        "max": 220.0,
+                    }
+                },
+            },
+            "key_charts": [{
+                "filename": "revenue_dist.png",
+                "artifact_id": chart_ref.artifact_id,
+                "chart_type": "histogram",
+            }],
+        }),
+        filename="eda_summary.json",
+        created_by_tool="test.eda",
+        parent_ids=[sql_ref.artifact_id, chart_ref.artifact_id],
+        metadata={"kind": "eda_summary"},
+    )
+    state = OrchestrationState(
+        run_id=run.run_id,
+        user_query="which category has the most revenue",
+        goal="which category has the most revenue",
+        route_kind="comprehensive",
+        plan=AnalysisPlan(goal="revenue by category", metric="revenue", dimension="category", route_kind="comprehensive"),
+    )
+    state.artifact_ids = {"sql_agent": [sql_ref.artifact_id], "eda_agent": [eda_ref.artifact_id, chart_ref.artifact_id]}
+    loaded_artifacts: list[str] = []
+
+    def loader(artifact_id: str) -> bytes:
+        loaded_artifacts.append(artifact_id)
+        return adapter.read_artifact_bytes(artifact_id)
+
+    def reader(chart: dict, image_bytes: bytes, _state: dict) -> dict:
+        return {
+            "status": "read_success",
+            "multimodal_summary": f"{chart['filename']} read with {len(image_bytes)} bytes",
+            "cautions": [],
+        }
+
+    envelope = AnalysisAgent().run(
+        state,
+        AgentRuntime(adapter),
+        planner_model=_FakeModel([AnalysisIntent(objective="revenue by category", domain="finance", metric_hints=["revenue"], dimension_hints=["category"])]),
+        code_generator_model=_FakeModel([_GOOD_CODE]),
+        critic_model=_FakeModel([CodeCritique(verdict="pass")]),
+        chart_artifact_loader=loader,
+        chart_reader=reader,
+    )
+
+    public_payload = json.loads(adapter.read_artifact_text(envelope.artifact_ids()[0]))
+    parsed = AnalysisResult.model_validate(public_payload)
+    assert loaded_artifacts == [chart_ref.artifact_id]
+    assert parsed.chart_status == "read_success"
+    assert parsed.chart_requests[0]["related_keys"] == ["profile.numeric_summary.revenue"]
+    assert parsed.chart_requests[0]["information_loss"]
+    assert parsed.visual_evidence[0].status == "read_success"
+
+
 def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: BackendAdapter) -> None:
     run = adapter.create_run()
     sql_ref = adapter.register_artifact(

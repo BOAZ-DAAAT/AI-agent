@@ -113,13 +113,29 @@ def _build_chart_requests(profiles: list[dict[str, Any]]) -> list[dict[str, Any]
         for name, stats in distribution.items():
             if not isinstance(stats, dict) or stats.get("type") != "numeric":
                 continue
-            if _distribution_needs_chart(stats):
+            information_loss_reasons = _distribution_information_loss_reasons(stats)
+            if information_loss_reasons:
                 requests.append({
                     "related_block": "distribution",
                     "related_keys": [f"distribution.{name}"],
                     "variables": [name],
                     "preferred_chart_types": ["histogram", "box", "violin"],
-                    "reason": "distribution is skewed, heavy-tailed, or has notable outliers",
+                    "reason": "numeric summary may hide distribution shape, tail, or outlier patterns",
+                    "information_loss": information_loss_reasons,
+                })
+
+        for name, stats in _numeric_summary_items(profile).items():
+            if not isinstance(stats, dict) or name in distribution:
+                continue
+            information_loss_reasons = _distribution_information_loss_reasons(stats)
+            if information_loss_reasons:
+                requests.append({
+                    "related_block": "distribution",
+                    "related_keys": [f"profile.numeric_summary.{name}"],
+                    "variables": [name],
+                    "preferred_chart_types": ["histogram", "box", "violin"],
+                    "reason": "basic numeric summary may hide distribution shape, tail, or outlier patterns",
+                    "information_loss": information_loss_reasons,
                 })
 
         relationships = metadata.get("correlation_pairs", {}) or {}
@@ -230,11 +246,46 @@ def _chart_identity(chart: dict[str, Any]) -> dict[str, Any]:
 
 
 def _distribution_needs_chart(stats: dict[str, Any]) -> bool:
-    return (
-        abs(float(stats.get("skewness") or 0)) >= 1
-        or float(stats.get("outlier_rate_iqr") or 0) >= 0.05
-        or stats.get("normality") in {"skewed", "heavy_tailed"}
-    )
+    return bool(_distribution_information_loss_reasons(stats))
+
+
+def _distribution_information_loss_reasons(stats: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    skewness = _to_float(stats.get("skewness"))
+    outlier_rate = _to_float(stats.get("outlier_rate_iqr"))
+    normality = str(stats.get("normality") or "").casefold()
+
+    if skewness is not None and abs(skewness) >= 1:
+        reasons.append("skewness suggests mean/median alone would hide asymmetric tails")
+    if outlier_rate is not None and outlier_rate >= 0.05:
+        reasons.append("IQR outlier rate suggests extrema may materially affect interpretation")
+    if normality in {"skewed", "heavy_tailed"}:
+        reasons.append("distribution is marked as skewed or heavy-tailed")
+
+    q1 = _first_float(stats, "q1", "25%", "p25")
+    median = _first_float(stats, "median", "50%", "p50")
+    q3 = _first_float(stats, "q3", "75%", "p75")
+    mean = _to_float(stats.get("mean"))
+    minimum = _first_float(stats, "min", "minimum")
+    maximum = _first_float(stats, "max", "maximum")
+    std = _to_float(stats.get("std"))
+
+    if q1 is not None and q3 is not None:
+        iqr = q3 - q1
+        if iqr > 0:
+            if mean is not None and median is not None and abs(mean - median) / iqr >= 0.5:
+                reasons.append("mean and median diverge enough that central tendency may be misleading")
+            if maximum is not None and maximum > q3 + 1.5 * iqr:
+                reasons.append("upper tail extends beyond the IQR fence")
+            if minimum is not None and minimum < q1 - 1.5 * iqr:
+                reasons.append("lower tail extends beyond the IQR fence")
+            if maximum is not None and minimum is not None and (maximum - minimum) / iqr >= 10:
+                reasons.append("range is much wider than the interquartile range")
+    elif mean is not None and median is not None and std not in (None, 0):
+        if abs(mean - median) / abs(std) >= 0.5:
+            reasons.append("mean and median diverge relative to standard deviation")
+
+    return reasons
 
 
 def _relationship_needs_chart(stats: dict[str, Any]) -> bool:
@@ -254,6 +305,12 @@ def _comparison_needs_chart(stats: dict[str, Any]) -> bool:
 def _looks_like_time_profile(profile: dict[str, Any], metadata: dict[str, Any]) -> bool:
     text = " ".join(str(item).casefold() for item in profile.get("profile", {}).get("columns", []) or [])
     return any(token in text for token in ("month", "date", "time", "year")) and bool(profile.get("key_charts"))
+
+
+def _numeric_summary_items(profile: dict[str, Any]) -> dict[str, Any]:
+    nested_profile = profile.get("profile") or {}
+    summary = profile.get("numeric_summary") or nested_profile.get("numeric_summary") or {}
+    return summary if isinstance(summary, dict) else {}
 
 
 def _variables_from_corr_key(key: str) -> list[str]:
@@ -313,3 +370,20 @@ def _dedupe_requests(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(key)
             deduped.append(request)
     return deduped
+
+
+def _first_float(stats: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _to_float(stats.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
