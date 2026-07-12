@@ -37,7 +37,12 @@ class AnalysisAgent:
         parent_ids = state.artifact_ids.get("eda_agent", []) + state.artifact_ids.get("sql_agent", [])
         eda_profiles = []
         for artifact_id in state.artifact_ids.get("eda_agent", []):
-            payload = read_json_artifact(runtime, artifact_id)
+            if not _is_json_profile_artifact(runtime, artifact_id):
+                continue
+            try:
+                payload = read_json_artifact(runtime, artifact_id)
+            except Exception:
+                continue
             eda_profiles.append(payload)
         csvs = load_analysis_inputs(state, runtime)
         result, local_checks, terminal_reason = run_analysis_workflow(
@@ -152,6 +157,21 @@ def _analysis_failure_reason(result: dict[str, Any], terminal_reason: str) -> st
     if limitations:
         return limitations[0]
     return terminal_reason
+
+
+def _is_json_profile_artifact(runtime: AgentRuntime, artifact_id: str) -> bool:
+    try:
+        artifact = runtime.adapter.get_artifact(artifact_id)
+    except Exception:
+        return False
+    metadata = getattr(artifact, "metadata", None) or {}
+    filename = str(getattr(artifact, "filename", "") or "").lower()
+    artifact_type = str(getattr(artifact, "type", "") or "")
+    if metadata.get("kind") == "eda_summary":
+        return True
+    if filename.endswith(".json"):
+        return True
+    return artifact_type.endswith("data_profile")
 
 
 def _debug_payload(result: dict[str, Any], terminal_reason: str) -> dict[str, Any]:
