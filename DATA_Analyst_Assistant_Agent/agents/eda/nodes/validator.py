@@ -71,10 +71,12 @@ def validator_node(state: EDAState) -> dict:
 
     # ── 1) 결정론 체크 ──
     det = _deterministic_fail(state)
+    capped_failure_reason = None
     if det and not cap_reached:
         target, reason = det
         verdict = {"status": "retry", "retry_target": target, "reason": reason, "feedback": reason}
     elif det:  # 실패지만 재시도 소진 → 기록만 하고 통과
+        capped_failure_reason = det[1]
         verdict = {"status": "pass", "retry_target": "none",
                    "reason": f"검증 미통과(재시도 소진): {det[1]}", "feedback": ""}
     else:
@@ -114,6 +116,18 @@ def validator_node(state: EDAState) -> dict:
         update["validation_feedback"] = verdict.get("feedback") or verdict.get("reason", "")
     else:
         update["validation_feedback"] = ""  # 통과 시 피드백 초기화
+
+    # 결정론적 실패가 재시도 소진으로 강제 통과됐을 때, 신호를 죽이지 않고 cautions로
+    # 흘려서 supervisor까지 도달하게 한다(cautions → local_checks → validation_errors).
+    if capped_failure_reason:
+        update["cautions"] = list(state.get("cautions", []) or []) + [{
+            "code": "EDA_SELF_VALIDATION_FAILED",
+            "source": "eda_validator",
+            "severity": "high",
+            "message_ko": f"EDA 자체 검증 실패(재시도 소진): {capped_failure_reason}",
+            "recommended_action": ["review_eda_before_use"],
+        }]
+
     return update
 
 

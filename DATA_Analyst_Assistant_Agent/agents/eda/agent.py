@@ -118,7 +118,9 @@ class EDAAgent:
             agent_name=self.name,
             summary=payload["final_summary"] or "EDA LangGraph analysis completed.",
             artifact_refs=[ref, *key_chart_refs],
-            validation=ValidationBlock(local_checks=run_eda_self_check(source_ids, profile)),
+            validation=ValidationBlock(
+                local_checks=run_eda_self_check(source_ids, profile, payload["cautions"])
+            ),
             # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
         )
 
@@ -243,7 +245,18 @@ def _categorical_top_values(df: pd.DataFrame) -> dict[str, dict[str, int]]:
     return categorical
 
 
-def run_eda_self_check(source_artifact_ids: list[str], profile: dict) -> list[LocalCheck]:
+def run_eda_self_check(
+    source_artifact_ids: list[str], profile: dict, cautions: list[dict] | None = None
+) -> list[LocalCheck]:
+    cautions = cautions or []
+    validator_failure = next(
+        (
+            c.get("message_ko", "")
+            for c in cautions
+            if isinstance(c, dict) and c.get("code") == "EDA_SELF_VALIDATION_FAILED"
+        ),
+        None,
+    )
     return [
         LocalCheck(
             name="source_artifact_present",
@@ -262,5 +275,11 @@ def run_eda_self_check(source_artifact_ids: list[str], profile: dict) -> list[Lo
             passed=bool(profile.get("columns")),
             severity="warning" if not profile.get("columns") else "info",
             detail="Column metadata should be available for downstream analysis.",
+        ),
+        LocalCheck(
+            name="eda_self_validation",
+            passed=validator_failure is None,
+            severity="error" if validator_failure is not None else "info",
+            detail=validator_failure or "EDA internal validator passed.",
         ),
     ]
