@@ -83,7 +83,7 @@ class CodeCritique(BaseModel):
     is fed back into the next generate attempt.
     """
 
-    verdict: Literal["pass", "fail"] = "pass"
+    verdict: Literal["pass", "review_required", "fail"] = "pass"
     method_issues: list[str] = Field(default_factory=list)
     feedback: str = ""
 
@@ -133,12 +133,43 @@ class AnalysisExecutionPlan(BaseModel):
 
 class AnalysisEvidence(BaseModel):
     tool_name: str
-    status: Literal["success", "failed"] = "success"
+    status: Literal["success", "review_required", "failed"] = "success"
     method: str
     inputs: dict[str, Any] = Field(default_factory=dict)
     statistics: dict[str, Any] = Field(default_factory=dict)
     finding: str
     caveats: list[str] = Field(default_factory=list)
+
+
+class HypothesisTestResult(BaseModel):
+    hypothesis: str
+    test_name: str
+    null_hypothesis: str = ""
+    alternative_hypothesis: str = ""
+    statistic: float | None = None
+    p_value: float | None = None
+    effect_size: float | None = None
+    n: int | None = None
+    decision: Literal["supported", "inconclusive", "not_supported"] = "inconclusive"
+    caveats: list[str] = Field(default_factory=list)
+
+
+class EvidenceTable(BaseModel):
+    title: str
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ReviewRequest(BaseModel):
+    decision_type: str = ""
+    question: str = ""
+    proposal: str = ""
+    rationale: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    options: list[str] = Field(default_factory=list)
+    recommended_option: str = ""
+    impact_if_approved: str = ""
+    requires_followup_analysis: bool = False
 
 
 class VisualEvidence(BaseModel):
@@ -202,6 +233,15 @@ class AnalysisResult(BaseModel):
     chart_status: str = "not_needed"
     human_review: HumanReview = Field(default_factory=HumanReview)
     answer_coverage: AnswerCoverage = Field(default_factory=AnswerCoverage)
+    status: Literal["success", "review_required", "failed"] = "success"
+    title: str = ""
+    executive_summary: str = ""
+    hypothesis_tests: list[HypothesisTestResult] = Field(default_factory=list)
+    evidence_tables: list[EvidenceTable] = Field(default_factory=list)
+    interpretation: list[str] = Field(default_factory=list)
+    review_request: ReviewRequest | None = None
+    method_notes: list[str] = Field(default_factory=list)
+    debug_artifact_id: str | None = None
 
     # Codegen-path additions (optional; empty on the legacy tool-dispatch path).
     intent: AnalysisIntent | None = None

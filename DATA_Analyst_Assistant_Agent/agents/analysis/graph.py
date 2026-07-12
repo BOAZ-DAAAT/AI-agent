@@ -95,7 +95,7 @@ def assemble_node(state: AnalysisWorkflowState) -> dict[str, Any]:
         state["dataframe"],
         state.get("eda_profiles", []),
     )
-    passed = outcome.status == "passed"
+    passed = outcome.status in {"passed", "review_required"}
     return {
         "result": result,
         "local_checks": _local_checks(outcome),
@@ -125,6 +125,12 @@ def finalize_node(state: AnalysisWorkflowState) -> dict[str, Any]:
 
 def _local_checks(outcome: AnalysisOutcome) -> list[LocalCheck]:
     issues = outcome.critique.method_issues if outcome.critique else []
+    method_passed = outcome.status in {"passed", "review_required"}
+    method_detail = "; ".join(issues) or (
+        "Generated analysis requires review before operational interpretation."
+        if outcome.status == "review_required"
+        else "Generated analysis must pass adversarial method review."
+    )
     return [
         LocalCheck(
             name="analysis_code_executed",
@@ -134,9 +140,9 @@ def _local_checks(outcome: AnalysisOutcome) -> list[LocalCheck]:
         ),
         LocalCheck(
             name="method_review_passed",
-            passed=outcome.status == "passed",
-            severity="error",
-            detail="; ".join(issues) or "Generated analysis must pass adversarial method review.",
+            passed=method_passed,
+            severity="warning" if outcome.status == "review_required" else "error",
+            detail=method_detail,
         ),
     ]
 

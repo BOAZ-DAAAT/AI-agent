@@ -37,7 +37,12 @@ class AnalysisAgent:
         parent_ids = state.artifact_ids.get("eda_agent", []) + state.artifact_ids.get("sql_agent", [])
         eda_profiles = []
         for artifact_id in state.artifact_ids.get("eda_agent", []):
-            payload = read_json_artifact(runtime, artifact_id)
+            if not _is_json_profile_artifact(runtime, artifact_id):
+                continue
+            try:
+                payload = read_json_artifact(runtime, artifact_id)
+            except Exception:
+                continue
             eda_profiles.append(payload)
         csvs = load_analysis_inputs(state, runtime)
         result, local_checks, terminal_reason = run_analysis_workflow(
@@ -51,10 +56,33 @@ class AnalysisAgent:
             chart_artifact_loader=chart_artifact_loader,
             chart_reader=chart_reader,
         )
+        debug_payload = _debug_payload(result, terminal_reason)
+        debug_ref = runtime.adapter.register_artifact(
+            state.run_id,
+            ArtifactType.file,
+            content_text=json.dumps(debug_payload, ensure_ascii=False, indent=2),
+            filename="analysis_debug.json",
+            created_by_tool="DATA_Analyst_Assistant_Agent.analysis.debug",
+            context=context,
+            parent_ids=parent_ids,
+            lineage_edge_type="derived_from",
+            metadata={
+                "kind": "analysis_debug",
+                "source_artifact_count": len(parent_ids),
+                "terminal_reason": terminal_reason,
+            },
+            preview={
+                "terminal_reason": terminal_reason,
+                "codegen_attempts": debug_payload.get("codegen_attempts", 0),
+                "critique_verdict": (debug_payload.get("code_critique") or {}).get("verdict"),
+            },
+        )
+
+        public_result = _public_result_payload(result, debug_ref.artifact_id)
         ref = runtime.adapter.register_artifact(
             state.run_id,
             ArtifactType.file,
-            content_text=json.dumps(result, ensure_ascii=False, indent=2),
+            content_text=json.dumps(public_result, ensure_ascii=False, indent=2),
             filename="analysis_result.json",
             created_by_tool="DATA_Analyst_Assistant_Agent.analysis",
             context=context,
@@ -66,16 +94,19 @@ class AnalysisAgent:
                 "terminal_reason": terminal_reason,
             },
             preview={
-                "method_summary": result["method_summary"],
-                "key_findings": result["key_findings"],
-                "limitations": result["limitations"],
-                "data_quality_notes": result["data_quality_notes"],
-                "analysis_kind": result["plan"]["analysis_kind"],
-                "tool_names": result["plan"]["tool_names"],
-                "human_review": result["human_review"],
+                "status": public_result.get("status"),
+                "status_label": _status_label(public_result.get("status")),
+                "title": public_result.get("title"),
+                "executive_summary": public_result.get("executive_summary"),
+                "key_findings": public_result.get("key_findings", [])[:5],
+                "limitations": public_result.get("limitations", [])[:5],
+                "method_notes": public_result.get("method_notes", [])[:5],
+                "top_evidence_tables": public_result.get("evidence_tables", [])[:2],
+                "review_request": _review_request_preview(public_result.get("review_request")),
+                "human_review": public_result["human_review"],
             },
         )
-        review = result["human_review"]
+        review = public_result["human_review"]
         workflow_failed = terminal_reason != "validated_result"
         codegen_attempts = int(result.get("codegen_attempts") or 0)
         failure_reason = _analysis_failure_reason(result, terminal_reason)
@@ -87,7 +118,7 @@ class AnalysisAgent:
                 if workflow_failed
                 else "Analysis result generated from SQL result CSV and EDA profile artifacts."
             ),
-            artifact_refs=[ref],
+            artifact_refs=[ref, debug_ref],
             validation=ValidationBlock(local_checks=local_checks),
             retry_hint=RetryHint(
                 retryable=workflow_failed,
@@ -126,3 +157,69 @@ def _analysis_failure_reason(result: dict[str, Any], terminal_reason: str) -> st
     if limitations:
         return limitations[0]
     return terminal_reason
+
+
+def _is_json_profile_artifact(runtime: AgentRuntime, artifact_id: str) -> bool:
+    try:
+        artifact = runtime.adapter.get_artifact(artifact_id)
+    except Exception:
+        return False
+    metadata = getattr(artifact, "metadata", None) or {}
+    filename = str(getattr(artifact, "filename", "") or "").lower()
+    artifact_type = str(getattr(artifact, "type", "") or "")
+    if metadata.get("kind") == "eda_summary":
+        return True
+    if filename.endswith(".json"):
+        return True
+    return artifact_type.endswith("data_profile")
+
+
+def _debug_payload(result: dict[str, Any], terminal_reason: str) -> dict[str, Any]:
+    return {
+        "run_id": result.get("run_id"),
+        "status": result.get("status"),
+        "terminal_reason": terminal_reason,
+        "generated_code": result.get("generated_code", ""),
+        "code_critique": result.get("code_critique"),
+        "codegen_attempts": result.get("codegen_attempts", 0),
+        "answer_coverage": result.get("answer_coverage"),
+        "raw_statistics": [
+            evidence.get("statistics", {})
+            for evidence in result.get("evidence", [])
+            if isinstance(evidence, dict)
+        ],
+        "source_artifacts": result.get("source_artifacts", {}),
+        "hypothesis_tests": result.get("hypothesis_tests", []),
+        "review_request": result.get("review_request"),
+        "method_notes": result.get("method_notes", []),
+    }
+
+
+def _public_result_payload(result: dict[str, Any], debug_artifact_id: str) -> dict[str, Any]:
+    payload = dict(result)
+    payload["debug_artifact_id"] = debug_artifact_id
+    payload["generated_code"] = ""
+    payload["code_critique"] = None
+    return payload
+
+
+def _status_label(status: object) -> str:
+    if status == "success":
+        return "Analysis completed"
+    if status == "review_required":
+        return "Analysis completed; analysis decision review required"
+    if status == "failed":
+        return "Analysis failed"
+    return "Analysis status unknown"
+
+
+def _review_request_preview(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "decision_type": value.get("decision_type", ""),
+        "question": value.get("question", ""),
+        "proposal": value.get("proposal", ""),
+        "recommended_option": value.get("recommended_option", ""),
+        "requires_followup_analysis": value.get("requires_followup_analysis", False),
+    }

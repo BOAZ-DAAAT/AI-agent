@@ -50,6 +50,29 @@ _GOOD_CODE = GeneratedAnalysisCode(
         "'statistics': {'sum': total}, 'limitations': []}\n"
     ),
 )
+_REVIEW_CODE = GeneratedAnalysisCode(
+    rationale="sum with actionable review request",
+    code=(
+        "total = int(df['x'].sum())\n"
+        "result = {\n"
+        "  'summary': f'sum={total}',\n"
+        "  'findings': [f'sum={total}'],\n"
+        "  'statistics': {'sum': total},\n"
+        "  'limitations': [],\n"
+        "  'review_request': {\n"
+        "    'decision_type': 'metric_definition',\n"
+        "    'question': 'Use sum(x) as the follow-up metric?',\n"
+        "    'proposal': 'Use sum(x) as the operational metric.',\n"
+        "    'rationale': ['The column is complete in this fixture.'],\n"
+        "    'evidence': {'sum': total},\n"
+        "    'options': ['Use sum(x)', 'Use average x instead'],\n"
+        "    'recommended_option': 'Use sum(x)',\n"
+        "    'impact_if_approved': 'Follow-up analysis will use sum(x).',\n"
+        "    'requires_followup_analysis': True\n"
+        "  }\n"
+        "}\n"
+    ),
+)
 _BAD_CODE = GeneratedAnalysisCode(rationale="broken", code="result = df['missing'].sum()")
 
 
@@ -73,6 +96,44 @@ def test_critic_failure_reflects_then_passes() -> None:
     assert outcome.status == "passed"
     assert outcome.attempts == 2
     assert outcome.error_history[0]["stage"] == "critic"
+
+
+def test_review_required_preserves_result_without_retry() -> None:
+    gen = _FakeModel([_REVIEW_CODE, _BAD_CODE])
+    crit = _FakeModel([
+        CodeCritique(
+            verdict="review_required",
+            method_issues=["proxy label needs operational review"],
+            feedback="interpret proxy label cautiously",
+        )
+    ])
+
+    outcome = run_analysis(_intent(), _context(), _df(), code_generator_model=gen, critic_model=crit)
+
+    assert outcome.status == "review_required"
+    assert outcome.attempts == 1
+    assert outcome.result["statistics"]["sum"] == 6
+    assert outcome.result["review_request"]["question"] == "Use sum(x) as the follow-up metric?"
+    assert outcome.critique.verdict == "review_required"
+
+
+def test_review_required_without_actionable_request_becomes_method_note() -> None:
+    gen = _FakeModel([_GOOD_CODE, _BAD_CODE])
+    crit = _FakeModel([
+        CodeCritique(
+            verdict="review_required",
+            method_issues=["small sample"],
+            feedback="sample size is small",
+        )
+    ])
+
+    outcome = run_analysis(_intent(), _context(), _df(), code_generator_model=gen, critic_model=crit)
+
+    assert outcome.status == "passed"
+    assert outcome.attempts == 1
+    assert outcome.result["statistics"]["sum"] == 6
+    assert outcome.result["method_notes"] == ["sample size is small"]
+    assert outcome.critique.verdict == "pass"
 
 
 def test_deterministic_precheck_reflects_before_critic() -> None:
