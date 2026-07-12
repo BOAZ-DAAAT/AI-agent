@@ -86,17 +86,21 @@ def validator_node(state: EDAState) -> dict:
 
     # ── 1) 결정론 체크 ──
     det = _deterministic_fail(state)
-    capped_failure = None
-    if det and not cap_reached:
-        target, reason, _code = det
-        verdict = {"status": "retry", "retry_target": target, "reason": reason, "feedback": reason}
-    elif det:  # 실패지만 재시도 소진 → 기록만 하고 통과
-        _target, reason, code = det
+    stopped_failure = None
+    if det:
+        target, reason, code = det
         classification = _classify_deterministic_failure(code)
-        capped_failure = {"reason": reason, **classification}
-        verdict = {"status": "pass", "retry_target": "none",
-                   "reason": f"검증 미통과(재시도 소진): {reason}", "feedback": "",
-                   **classification}
+        if not cap_reached and classification["retryable"]:
+            # 다시 해볼 가치가 있는 실패(insight/hypothesis fallback)만 내부 재시도.
+            verdict = {"status": "retry", "retry_target": target, "reason": reason, "feedback": reason}
+        else:
+            # 캡 소진 또는 구조적 실패(분석 0건/통계없음) → 헛재시도 없이 즉시 통과+신호.
+            # 구조적 실패는 cap_reached가 아니어도 여기로 온다(1회차 얼리스탑).
+            stop_reason = "재시도 소진" if classification["retryable"] else "재시도 무의미(구조적 실패)"
+            stopped_failure = {"reason": reason, **classification}
+            verdict = {"status": "pass", "retry_target": "none",
+                       "reason": f"검증 미통과({stop_reason}): {reason}", "feedback": "",
+                       **classification}
     else:
         # ── 2) LLM 감사 (깐깐하게) ──
         prompt = validator_prompt(
@@ -135,19 +139,19 @@ def validator_node(state: EDAState) -> dict:
     else:
         update["validation_feedback"] = ""  # 통과 시 피드백 초기화
 
-    # 결정론적 실패가 재시도 소진으로 강제 통과됐을 때, 신호를 죽이지 않고 cautions로
-    # 흘려서 supervisor까지 도달하게 한다(cautions → local_checks → validation_errors).
+    # 결정론적 실패로 재시도를 멈췄을 때(캡 소진 또는 구조적 실패 얼리스탑), 신호를 죽이지 않고
+    # cautions로 흘려서 supervisor까지 도달하게 한다(cautions → local_checks → validation_errors).
     # failure_code/retryable은 EDAAgent.run()이 retry_hint를 세팅할 때 참고한다.
-    if capped_failure:
+    if stopped_failure:
         update["cautions"] = list(state.get("cautions", []) or []) + [{
             "code": "EDA_SELF_VALIDATION_FAILED",
             "source": "eda_validator",
             "severity": "high",
-            "message_ko": f"EDA 자체 검증 실패(재시도 소진): {capped_failure['reason']}",
+            "message_ko": f"EDA 자체 검증 실패: {stopped_failure['reason']}",
             "recommended_action": ["review_eda_before_use"],
             "details": {
-                "failure_code": capped_failure["failure_code"],
-                "retryable": capped_failure["retryable"],
+                "failure_code": stopped_failure["failure_code"],
+                "retryable": stopped_failure["retryable"],
             },
         }]
 

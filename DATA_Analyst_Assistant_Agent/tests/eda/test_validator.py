@@ -82,14 +82,46 @@ def test_capped_failure_caution_preserves_existing_cautions() -> None:
     assert codes == ["OTHER", "EDA_SELF_VALIDATION_FAILED"]
 
 
-def test_non_capped_deterministic_failure_still_retries() -> None:
+def test_non_capped_retryable_failure_still_retries() -> None:
     state = _capped_fail_state()
-    state["validation_retries"] = 0
+    state["validation_retries"] = 0  # insight_fallback → 재시도 가치 있으므로 재시도
 
     update = validator_node(state)
 
     assert update["validation_result"]["status"] == "retry"
     assert "cautions" not in update
+
+
+def test_structural_failure_early_stops_without_retry() -> None:
+    # 캡이 안 걸렸어도(retries=0) 구조적 실패는 헛재시도 없이 즉시 멈춘다.
+    state = _capped_fail_state()
+    state["validation_retries"] = 0
+    state["insight_result"] = "정상 인사이트"
+    state["hypotheses"] = "정상 가설"
+    state["controller_log"] = []  # no_completed_analyses (non-retryable)
+
+    update = validator_node(state)
+
+    assert update["validation_result"]["status"] == "pass"
+    assert update["validation_result"]["failure_code"] == "no_completed_analyses"
+    # 재시도를 아예 안 했으니 카운터가 올라가지 않아야 한다.
+    assert "validation_retries" not in update
+    codes = [c["code"] for c in update["cautions"]]
+    assert "EDA_SELF_VALIDATION_FAILED" in codes
+
+
+def test_missing_statistical_metadata_early_stops_without_retry() -> None:
+    state = _capped_fail_state()
+    state["validation_retries"] = 0
+    state["insight_result"] = "정상 인사이트"
+    state["hypotheses"] = "정상 가설"
+    state["statistical_metadata"] = {}  # missing_statistical_metadata (non-retryable)
+
+    update = validator_node(state)
+
+    assert update["validation_result"]["status"] == "pass"
+    assert update["validation_result"]["failure_code"] == "missing_statistical_metadata"
+    assert "validation_retries" not in update
 
 
 def test_run_eda_self_check_flags_validator_failure() -> None:
