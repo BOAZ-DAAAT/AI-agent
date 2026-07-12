@@ -11,7 +11,13 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, load_analysis_inputs
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    LocalCheck,
+    OrchestrationState,
+    RetryHint,
+    ValidationBlock,
+)
 
 
 def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, context, captions=None):
@@ -121,6 +127,7 @@ class EDAAgent:
             validation=ValidationBlock(
                 local_checks=run_eda_self_check(source_ids, profile, payload["cautions"])
             ),
+            retry_hint=_build_retry_hint(eda_result.get("validation_result", {})),
             # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
         )
 
@@ -283,3 +290,22 @@ def run_eda_self_check(
             detail=validator_failure or "EDA internal validator passed.",
         ),
     ]
+
+
+def _build_retry_hint(validation_result: dict | None) -> RetryHint:
+    """validator_node가 남긴 failure_code/retryable을 supervisor의 retry_hint로 변환한다.
+
+    retryable=True인 경우에만 supervisor가 eda_agent를 통째로 1회 더 호출한다
+    (supervisor/validation.py의 기존 재시도 엔진 재사용, 그 외 필드는 기본값 유지)."""
+    validation_result = validation_result or {}
+    if not validation_result.get("retryable"):
+        return RetryHint()
+    return RetryHint(
+        retryable=True,
+        reason_code="eda_self_validation_failed_retryable",
+        suggested_action="rerun_eda_agent",
+        details={
+            "failure_code": validation_result.get("failure_code", ""),
+            "failure_reason": validation_result.get("reason", ""),
+        },
+    )

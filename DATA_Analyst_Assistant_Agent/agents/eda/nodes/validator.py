@@ -21,6 +21,11 @@ MAX_VALIDATION_RETRIES = 2          # 총 재시도 캡 (무한 루프 방지)
 _RETRY_TARGETS = {"planner", "insight", "hypothesis"}
 _FALLBACK_TEXTS = {"", "인사이트 생성 실패", "가설 생성 실패", "요약 생성 실패", "분석 스킵 (오류로 인해 생략됨)"}
 
+# 재시도 소진 시 강제 통과되는 결정론적 실패 중, EDA 전체를 다시 돌리면 나아질 가능성이
+# 큰 것만(LLM 호출성 fallback) supervisor에게 "retryable"로 알린다. planner 계열(분석
+# 미실행/통계메타 없음)은 데이터·라우팅 구조 문제일 가능성이 커서 비재시도로 둔다.
+_RETRYABLE_FAILURE_CODES = {"insight_fallback", "hypothesis_fallback"}
+
 
 def _completed_analyses(state: EDAState) -> list:
     log = state.get("controller_log", []) or []
@@ -28,18 +33,28 @@ def _completed_analyses(state: EDAState) -> list:
 
 
 def _deterministic_fail(state: EDAState):
-    """코드로 잡히는 명백한 실패 → (retry_target, reason) 또는 None."""
+    """코드로 잡히는 명백한 실패 → (retry_target, reason, failure_code) 또는 None."""
     insight = (state.get("insight_result") or "").strip()
     hyp = (state.get("hypotheses") or "").strip()
     if insight in _FALLBACK_TEXTS:
-        return "insight", "insight가 생성되지 않음(빈 값/실패)"
+        return "insight", "insight가 생성되지 않음(빈 값/실패)", "insight_fallback"
     if hyp in _FALLBACK_TEXTS:
-        return "hypothesis", "가설이 생성되지 않음(빈 값/실패)"
+        return "hypothesis", "가설이 생성되지 않음(빈 값/실패)", "hypothesis_fallback"
     if not _completed_analyses(state):
-        return "planner", "분석이 하나도 실행되지 않음"
+        return "planner", "분석이 하나도 실행되지 않음", "no_completed_analyses"
     if not state.get("statistical_metadata"):
-        return "planner", "통계 메타데이터가 비어있음"
+        return "planner", "통계 메타데이터가 비어있음", "missing_statistical_metadata"
     return None
+
+
+def _classify_deterministic_failure(failure_code: str) -> Dict[str, Any]:
+    """failure_code로 재시도 가치를 판단한다: {failure_code, retryable, suggested_action}."""
+    retryable = failure_code in _RETRYABLE_FAILURE_CODES
+    return {
+        "failure_code": failure_code,
+        "retryable": retryable,
+        "suggested_action": "rerun_eda_agent" if retryable else "manual_review",
+    }
 
 
 def _check_chart_requests(state: EDAState) -> list:
@@ -71,14 +86,17 @@ def validator_node(state: EDAState) -> dict:
 
     # ── 1) 결정론 체크 ──
     det = _deterministic_fail(state)
-    capped_failure_reason = None
+    capped_failure = None
     if det and not cap_reached:
-        target, reason = det
+        target, reason, _code = det
         verdict = {"status": "retry", "retry_target": target, "reason": reason, "feedback": reason}
     elif det:  # 실패지만 재시도 소진 → 기록만 하고 통과
-        capped_failure_reason = det[1]
+        _target, reason, code = det
+        classification = _classify_deterministic_failure(code)
+        capped_failure = {"reason": reason, **classification}
         verdict = {"status": "pass", "retry_target": "none",
-                   "reason": f"검증 미통과(재시도 소진): {det[1]}", "feedback": ""}
+                   "reason": f"검증 미통과(재시도 소진): {reason}", "feedback": "",
+                   **classification}
     else:
         # ── 2) LLM 감사 (깐깐하게) ──
         prompt = validator_prompt(
@@ -119,13 +137,18 @@ def validator_node(state: EDAState) -> dict:
 
     # 결정론적 실패가 재시도 소진으로 강제 통과됐을 때, 신호를 죽이지 않고 cautions로
     # 흘려서 supervisor까지 도달하게 한다(cautions → local_checks → validation_errors).
-    if capped_failure_reason:
+    # failure_code/retryable은 EDAAgent.run()이 retry_hint를 세팅할 때 참고한다.
+    if capped_failure:
         update["cautions"] = list(state.get("cautions", []) or []) + [{
             "code": "EDA_SELF_VALIDATION_FAILED",
             "source": "eda_validator",
             "severity": "high",
-            "message_ko": f"EDA 자체 검증 실패(재시도 소진): {capped_failure_reason}",
+            "message_ko": f"EDA 자체 검증 실패(재시도 소진): {capped_failure['reason']}",
             "recommended_action": ["review_eda_before_use"],
+            "details": {
+                "failure_code": capped_failure["failure_code"],
+                "retryable": capped_failure["retryable"],
+            },
         }]
 
     return update

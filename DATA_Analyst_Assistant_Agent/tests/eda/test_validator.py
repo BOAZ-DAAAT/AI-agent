@@ -27,6 +27,51 @@ def test_capped_deterministic_failure_surfaces_as_caution() -> None:
     assert "EDA_SELF_VALIDATION_FAILED" in codes
 
 
+def test_insight_fallback_is_classified_retryable() -> None:
+    update = validator_node(_capped_fail_state())
+
+    verdict = update["validation_result"]
+    assert verdict["failure_code"] == "insight_fallback"
+    assert verdict["retryable"] is True
+    caution = next(c for c in update["cautions"] if c["code"] == "EDA_SELF_VALIDATION_FAILED")
+    assert caution["details"] == {"failure_code": "insight_fallback", "retryable": True}
+
+
+def test_hypothesis_fallback_is_classified_retryable() -> None:
+    state = _capped_fail_state()
+    state["insight_result"] = "정상 인사이트"
+    state["hypotheses"] = "가설 생성 실패"
+
+    verdict = validator_node(state)["validation_result"]
+
+    assert verdict["failure_code"] == "hypothesis_fallback"
+    assert verdict["retryable"] is True
+
+
+def test_no_completed_analyses_is_classified_non_retryable() -> None:
+    state = _capped_fail_state()
+    state["insight_result"] = "정상 인사이트"
+    state["hypotheses"] = "정상 가설"
+    state["controller_log"] = []
+
+    verdict = validator_node(state)["validation_result"]
+
+    assert verdict["failure_code"] == "no_completed_analyses"
+    assert verdict["retryable"] is False
+
+
+def test_missing_statistical_metadata_is_classified_non_retryable() -> None:
+    state = _capped_fail_state()
+    state["insight_result"] = "정상 인사이트"
+    state["hypotheses"] = "정상 가설"
+    state["statistical_metadata"] = {}
+
+    verdict = validator_node(state)["validation_result"]
+
+    assert verdict["failure_code"] == "missing_statistical_metadata"
+    assert verdict["retryable"] is False
+
+
 def test_capped_failure_caution_preserves_existing_cautions() -> None:
     state = _capped_fail_state()
     state["cautions"] = [{"code": "OTHER", "source": "x"}]
