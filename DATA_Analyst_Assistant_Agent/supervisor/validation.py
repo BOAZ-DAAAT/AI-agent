@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -12,7 +12,42 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     artifact_ids_by_agent,
 )
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    SupervisorTerminalState,
+    ValidationFinding,
+)
+
+
+ValidationDisposition = Literal[
+    "accept",
+    "accept_with_limitations",
+    "retry",
+    "await_approval",
+    "reject",
+]
+
+
+class ValidationCheckResult(BaseModel):
+    name: Literal["contract", "result", "evidence", "semantic"]
+    passed: bool
+    findings: list[ValidationFinding] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ValidationOutcome(BaseModel):
+    disposition: ValidationDisposition
+    reason: str = ""
+    reason_code: str = "none"
+    retry_target: AgentName | None = None
+    terminal_state: str = "running"
+
+
+class ValidationRecord(BaseModel):
+    candidate_id: str
+    validation_id: str
+    agent: AgentName
+    outcome: ValidationOutcome
+    checks: list[ValidationCheckResult] = Field(default_factory=list)
 
 
 class GuardDecision(BaseModel):
@@ -37,6 +72,42 @@ class ResultValidationDecision(BaseModel):
 class CompletionReadinessDecision(BaseModel):
     status: Literal["ready", "report_required", "invalid"]
     reason: str
+
+
+def contract_check_from_decision(
+    result: AgentCompactResult,
+    decision: ResultValidationDecision,
+) -> ValidationCheckResult:
+    """기존 결정론 검증 결과를 통합 검사 형식으로 변환한다."""
+    passed = decision.decision in {"accept", "accept_with_limitations", "await_approval"}
+    return ValidationCheckResult(
+        name="result",
+        passed=passed,
+        findings=list(result.findings),
+        details={
+            "status": result.status,
+            "validation_errors": list(result.validation_errors),
+            "validation_warnings": list(result.validation_warnings),
+            "fallback_used": result.fallback_used,
+            "failure_reason": decision.failure_reason,
+            "repeated_failure": decision.repeated_failure,
+            "failure_streak": decision.failure_streak,
+        },
+    )
+
+
+def outcome_from_contract_decision(
+    agent: AgentName,
+    decision: ResultValidationDecision,
+) -> ValidationOutcome:
+    """기존 라우팅 결정을 그래프 독립적인 통합 outcome으로 변환한다."""
+    return ValidationOutcome(
+        disposition=decision.decision,
+        reason=decision.reason,
+        reason_code=decision.reason_code,
+        retry_target=agent if decision.decision == "retry" else None,
+        terminal_state=decision.terminal_state,
+    )
 
 
 _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {

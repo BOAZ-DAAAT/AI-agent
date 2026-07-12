@@ -16,9 +16,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     make_execute_subagent_node,
     make_finalize_node,
     make_resolve_candidate_node,
-    make_semantic_validate_subagent_result_node,
     make_summarize_step_node,
-    make_validate_subagent_result_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -330,18 +328,18 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
         "create_analysis_plan",
         "decide_next_action",
         "execute_subagent",
-        "semantic_validate_subagent_result",
+        "validate_candidate",
         "summarize_step",
         "decide_next_action",
         "execute_subagent",
-        "semantic_validate_subagent_result",
+        "validate_candidate",
         "summarize_step",
         "decide_next_action",
         "execute_subagent",
-        "semantic_validate_subagent_result",
+        "validate_candidate",
             "summarize_step",
             "decide_next_action",
-            "semantic_validate_subagent_result",
+            "validate_candidate",
             "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
@@ -977,113 +975,6 @@ def test_repeated_analysis_failure_stops_after_second_call_with_recoverable_cont
     assert "analysis_agent" not in result["completed_agents"]
 
 
-def test_validate_node_records_failure_streak_and_shared_rejection_metadata() -> None:
-    backend = RecordingBackendAdapter()
-    result = AgentCompactResult(
-        agent="analysis_agent",
-        status="failed",
-        summary="분석 실패",
-        retry_hint=RetryHint(
-            retryable=True,
-            reason_code="method_review_failed",
-            details={"failure_reason": "wrong method"},
-        ),
-    )
-    state = stage_candidate_result(_state(), result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None, backend)(state)
-
-    expected_metadata = {
-        "agent": "analysis_agent",
-        "reason_code": "method_review_failed",
-        "failure_reason": "wrong method",
-        "repeated_failure": False,
-    }
-    assert updates["failure_streaks"]["analysis_agent"]["consecutive_count"] == 1
-    assert updates["validation_results"][-1] | expected_metadata == updates["validation_results"][-1]
-    internal_event = updates["run_events"][-1]
-    assert internal_event["type"] == "validation.rejected"
-    assert internal_event | expected_metadata == internal_event
-    assert backend.events[-1]["event_type"] == "validation.rejected"
-    assert backend.events[-1]["metadata"] | expected_metadata == backend.events[-1]["metadata"]
-
-
-@pytest.mark.parametrize(
-    ("agent", "has_sql_context", "expected_terminal"),
-    [
-        ("analysis_agent", True, "failed_with_recoverable_context"),
-        ("analysis_agent", False, "failed_terminal"),
-        ("sql_agent", True, "failed_terminal"),
-        ("eda_agent", True, "failed_terminal"),
-        ("report_agent", True, "failed_terminal"),
-    ],
-)
-def test_validate_node_honors_repeated_failure_terminal_policy(
-    agent: str,
-    has_sql_context: bool,
-    expected_terminal: str,
-) -> None:
-    state = _state()
-    if has_sql_context:
-        state = merge_agent_result(
-            state,
-            AgentCompactResult(
-                agent="sql_agent",
-                status="success",
-                summary="SQL 완료",
-                artifact_ids=["artifact_sql"],
-            ),
-        )
-    state["failure_streaks"] = {
-        agent: {
-            "reason_code": "method_review_failed",
-            "failure_reason": "wrong method",
-            "signature": '["method_review_failed", "wrong method"]',
-            "consecutive_count": 1,
-        }
-    }
-    result = AgentCompactResult(
-        agent=agent,
-        status="failed",
-        summary="실패",
-        retry_hint=RetryHint(
-            retryable=True,
-            reason_code="method_review_failed",
-            details={"failure_reason": "wrong method"},
-        ),
-    )
-    state = stage_candidate_result(state, result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None)(state)
-
-    assert updates["terminal_state"] == expected_terminal
-    assert updates["next_action"] == "finalize"
-    assert updates["validation_results"][-1]["repeated_failure"] is True
-    assert updates["final_answer"] == (
-        f"{agent} 실패 [method_review_failed]: wrong method (repeated_failure=true)"
-    )
-
-
-def test_failed_result_with_required_approval_is_rejected_not_awaited() -> None:
-    result = AgentCompactResult(
-        agent="analysis_agent",
-        status="failed",
-        summary="분석 실패",
-        retryable=False,
-        approval=ApprovalRequirement(required=True, reason="승인 필요"),
-    )
-    state = stage_candidate_result(_state(), result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None)(state)
-
-    assert updates["validation_results"][-1]["decision"] == "reject"
-    assert updates["terminal_state"] == "failed_terminal"
-    assert updates.get("pending_approval") is None
-
-
 def test_resolve_candidate_uses_only_approval_required_flag() -> None:
     state = stage_candidate_result(
         _state(),
@@ -1165,17 +1056,6 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
     assert result["pending_result"]["state_updates"]["analysis_plan"]["route_kind"] == "updated"
 
 
-def test_validate_subagent_result_node_handles_corrupt_last_agent_result_as_terminal_failure() -> None:
-    state = _state()
-    state["last_agent_result"] = {"agent": "sql_agent"}
-
-    result = make_validate_subagent_result_node(SequencedDecisionModel([]))(state)
-
-    assert result["terminal_state"] == "failed_terminal"
-    assert result["next_action"] == "finalize"
-    assert result["final_answer"] == "에이전트 실행 결과 형식이 올바르지 않습니다."
-
-
 def test_report_success_without_artifact_fails_terminally_without_validation_llm() -> None:
     adapter = FakeSubAgentAdapter(
         {
@@ -1221,95 +1101,6 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
     assert len(model.messages) == len(result["llm_decisions"])
 
 
-def test_semantic_validation_invalid_result_blocks_candidate() -> None:
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql"],
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": True,
-            "next_action": "decide_next_action",
-            "terminal_state": "running",
-            "reason": "hard validation 통과",
-        }
-    ]
-    state["next_action"] = "decide_next_action"
-    model = SequencedDecisionModel(
-        [_semantic_decision(semantic_valid=False, severity="warning", recommended_next_action="call_sql_agent")]
-    )
-    node = make_semantic_validate_subagent_result_node(model)
-
-    result = node(state)
-
-    assert result["next_action"] == "finalize"
-    assert result["terminal_state"] == "failed_terminal"
-    assert result["semantic_validation_results"][0]["recommended_next_action"] == "call_sql_agent"
-    assert result["semantic_validation_results"][0]["semantic_valid"] is False
-    assert result["llm_decisions"][0]["node"] == "semantic_validate_subagent_result"
-
-
-def test_semantic_validation_skips_when_hard_validation_failed() -> None:
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="failed",
-        summary="SQL 실패",
-        retryable=True,
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": False,
-            "next_action": "call_sql_agent",
-            "terminal_state": "running",
-            "reason": "hard validation 실패",
-        }
-    ]
-    state["next_action"] = "call_sql_agent"
-    model = SequencedDecisionModel([_semantic_decision()])
-    node = make_semantic_validate_subagent_result_node(model)
-
-    result = node(state)
-
-    assert result["semantic_validation_results"] == []
-    assert result["llm_decisions"] == []
-    assert model.messages == []
-
-
-def test_semantic_validation_failure_retries_once() -> None:
-    class FailingModel:
-        def invoke(self, messages):
-            raise RuntimeError("semantic model unavailable")
-
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql"],
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": True,
-            "next_action": "decide_next_action",
-            "terminal_state": "running",
-            "reason": "hard validation 통과",
-        }
-    ]
-    state.pop("next_action")
-
-    result = make_semantic_validate_subagent_result_node(FailingModel())(state)
-
-    assert result["current_step"] == "semantic_validate_retry"
-    assert list(result["semantic_retry_counts"].values()) == [1]
-
-
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
     state = stage_candidate_result(
         _state(),
@@ -1321,13 +1112,25 @@ def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
         ),
         {},
     )
-    state["semantic_validation_results"] = [
+    state["validation_history"] = [
         {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
             "agent": "sql_agent",
-            "semantic_valid": True,
-            "severity": "info",
-            "recommended_next_action": "call_eda_agent",
-            "missing_evidence": [],
+            "outcome": {"disposition": "accept"},
+            "checks": [
+                {
+                    "name": "semantic",
+                    "passed": True,
+                    "findings": [],
+                    "details": {
+                        "semantic_valid": True,
+                        "severity": "info",
+                        "recommended_next_action": "call_eda_agent",
+                        "missing_evidence": [],
+                    },
+                }
+            ],
         }
     ]
 

@@ -100,9 +100,7 @@ class SupervisorState(TypedDict, total=False):
     agent_results: list[dict[str, Any]]
     last_agent_result: dict[str, Any]
     artifacts: dict[str, list[dict[str, Any]]]
-    validation_results: list[dict[str, Any]]
-    semantic_validation_results: list[dict[str, Any]]
-    evidence_validation_results: list[dict[str, Any]]
+    validation_history: list[dict[str, Any]]
     step_summaries: list[dict[str, Any]]
     completed_agents: list[str]
     failed_agents: list[str]
@@ -115,6 +113,7 @@ class SupervisorState(TypedDict, total=False):
     llm_decisions: list[dict[str, Any]]
     decision_errors: list[dict[str, Any]]
     pending_result: dict[str, Any] | None
+    pending_validation: dict[str, Any] | None
     result_history: list[dict[str, Any]]
     accepted_evidence: dict[str, list[dict[str, Any]]]
     rejected_results: list[dict[str, Any]]
@@ -161,9 +160,7 @@ def empty_supervisor_state(
         "agent_results": [],
         "last_agent_result": {},
         "artifacts": {},
-        "validation_results": [],
-        "semantic_validation_results": [],
-        "evidence_validation_results": [],
+        "validation_history": [],
         "step_summaries": [],
         "completed_agents": [],
         "failed_agents": [],
@@ -176,11 +173,12 @@ def empty_supervisor_state(
         "llm_decisions": [],
         "decision_errors": [],
         "pending_result": None,
+        "pending_validation": None,
         "result_history": [],
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 2,
+        "state_schema_version": 3,
         "semantic_retry_counts": {},
         "run_events": [],
     }
@@ -345,7 +343,8 @@ def reject_pending_result(
 
 
 def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
-    if int(state.get("state_schema_version", 0) or 0) >= 2:
+    schema_version = int(state.get("state_schema_version", 0) or 0)
+    if schema_version >= 2:
         accepted_evidence = {
             agent: list(items) for agent, items in state.get("accepted_evidence", {}).items()
         }
@@ -354,6 +353,9 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             agent = str(result.get("agent") or "")
             if result.get("status") in {"success", "warning"} and agent and agent not in completed_agents:
                 completed_agents.append(agent)
+        validation_history = list(state.get("validation_history", []))
+        if schema_version == 2 and not validation_history:
+            validation_history = _migrate_v2_validation_history(state)
         normalized: SupervisorState = {
             **state,
             "pending_result": state.get("pending_result"),
@@ -367,10 +369,14 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                 for agent, streak in state.get("failure_streaks", {}).items()
             },
             "run_events": list(state.get("run_events", [])),
-            "state_schema_version": 2,
+            "validation_history": validation_history,
+            "state_schema_version": 3,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
         }
+        normalized.pop("validation_results", None)
+        normalized.pop("evidence_validation_results", None)
+        normalized.pop("semantic_validation_results", None)
         return _ensure_json_serializable(normalized)
 
     quarantined = list(state.get("quarantined_artifacts", []))
@@ -379,7 +385,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
     normalized = {
         **state,
-        "state_schema_version": 2,
+        "state_schema_version": 3,
+        "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),
         "accepted_evidence": {},
@@ -393,6 +400,65 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "completed_agents": [],
     }
     return _ensure_json_serializable(normalized)
+
+
+def _migrate_v2_validation_history(state: SupervisorState) -> list[dict[str, Any]]:
+    hard_results = list(state.get("validation_results", []))
+    evidence_results = list(state.get("evidence_validation_results", []))
+    semantic_results = list(state.get("semantic_validation_results", []))
+    records: list[dict[str, Any]] = []
+    for index, hard in enumerate(hard_results):
+        legacy_id = f"legacy_validation_{index}"
+        disposition = str(hard.get("decision") or ("accept" if hard.get("valid") else "reject"))
+        if disposition not in {
+            "accept", "accept_with_limitations", "retry", "await_approval", "reject"
+        }:
+            disposition = "reject"
+        checks = [
+            {
+                "name": "result",
+                "passed": bool(hard.get("hard_valid", hard.get("valid"))),
+                "findings": list(hard.get("findings", [])),
+                "details": dict(hard),
+            }
+        ]
+        if index < len(evidence_results):
+            evidence = evidence_results[index]
+            checks.append(
+                {
+                    "name": "evidence",
+                    "passed": bool(evidence.get("valid")),
+                    "findings": list(evidence.get("findings", [])),
+                    "details": dict(evidence),
+                }
+            )
+        if index < len(semantic_results):
+            semantic = semantic_results[index]
+            checks.append(
+                {
+                    "name": "semantic",
+                    "passed": bool(semantic.get("semantic_valid")),
+                    "findings": [],
+                    "details": dict(semantic),
+                }
+            )
+        candidate_id = str(hard.get("candidate_id") or legacy_id)
+        records.append(
+            {
+                "candidate_id": candidate_id,
+                "validation_id": str(hard.get("validation_id") or legacy_id),
+                "agent": str(hard.get("agent") or "sql_agent"),
+                "outcome": {
+                    "disposition": disposition,
+                    "reason": str(hard.get("reason") or ""),
+                    "reason_code": str(hard.get("reason_code") or "none"),
+                    "retry_target": hard.get("agent") if disposition == "retry" else None,
+                    "terminal_state": str(hard.get("terminal_state") or "running"),
+                },
+                "checks": checks,
+            }
+        )
+    return records
 
 
 def _apply_candidate_state_updates(state: SupervisorState, updates: dict[str, Any]) -> SupervisorState:

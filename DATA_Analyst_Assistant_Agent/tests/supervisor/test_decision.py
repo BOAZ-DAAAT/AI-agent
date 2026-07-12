@@ -516,3 +516,45 @@ def test_summarize_agent_step_truncates_summary_to_1000_chars() -> None:
     summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
 
     assert len(summary.summary) == 1000
+
+
+def test_context_derives_legacy_payload_keys_from_validation_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    state["validation_history"] = [
+        {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "agent": "analysis_agent",
+            "outcome": {
+                "disposition": "accept",
+                "reason": "검증 통과",
+                "reason_code": "none",
+                "retry_target": None,
+                "terminal_state": "running",
+            },
+            "checks": [
+                {"name": "result", "passed": True, "findings": [], "details": {}},
+                {
+                    "name": "semantic",
+                    "passed": True,
+                    "findings": [],
+                    "details": {
+                        "semantic_valid": True,
+                        "recommended_next_action": "call_report_agent",
+                    },
+                },
+            ],
+        }
+    ]
+
+    context = build_next_action_context(state)
+
+    assert context["validation_results"][0]["agent"] == "analysis_agent"
+    assert context["validation_results"][0]["decision"] == "accept"
+    assert context["semantic_validation_results"][0]["semantic_valid"] is True
+    assert "validation_history" not in context

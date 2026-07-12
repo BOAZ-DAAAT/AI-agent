@@ -6,7 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState, ValidationFinding
 from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     AnalysisPlanDecision,
     ClarificationDecision,
@@ -46,7 +46,12 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
+    ValidationCheckResult,
+    ValidationOutcome,
+    ValidationRecord,
     _check_completion_readiness,
+    contract_check_from_decision,
+    outcome_from_contract_decision,
     validate_subagent_result as validate_subagent_result_contract,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.evidence import (
@@ -438,248 +443,346 @@ def make_stage_candidate_node():
     return stage_candidate_node
 
 
-def make_validate_subagent_result_node(model: Any | None, backend_adapter: Any | None = None):
-    def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
-        payload = state.get("last_agent_result") or {}
-        if not payload:
+def make_validate_candidate_node(model: Any | None, backend_adapter: Any | None = None):
+    def validate_candidate_node(state: SupervisorState) -> SupervisorState:
+        pending = state.get("pending_result")
+        payload = pending.get("result") if isinstance(pending, dict) else None
+        if not isinstance(payload, dict):
             return _terminal_failure_updates(
                 state,
-                "validate_subagent_result",
-                "검증할 에이전트 결과가 없습니다.",
+                "validate_candidate",
+                "검증할 후보 결과가 없습니다.",
             )
 
         try:
             result = AgentCompactResult.model_validate(payload)
-        except Exception:
+        except Exception as exc:
             return _terminal_failure_updates(
                 state,
-                "validate_subagent_result",
-                "에이전트 실행 결과 형식이 올바르지 않습니다.",
-                extra_updates={"last_agent_result": {}},
+                "validate_candidate",
+                f"에이전트 실행 결과 형식이 올바르지 않습니다: {exc}",
             )
 
-        decision = validate_subagent_result_contract(state, result)
-        raw_next_action = decision.next_action
-        next_action = raw_next_action
-        terminal_state = state.get("terminal_state") or "running"
-        final_answer = ""
-
-        hard_valid = decision.valid or decision.decision == "await_approval"
-        if raw_next_action == "fail":
-            terminal_state = decision.terminal_state
-            next_action = "finalize"
-            final_answer = decision.final_answer or decision.reason
-        elif terminal_state in TERMINAL_STATES:
-            next_action = "finalize"
-        else:
-            terminal_state = "running"
-
-        validation_results = list(state.get("validation_results", []))
-        validation_results.append(
-            {
-                "agent": result.agent,
-                "valid": decision.valid,
-                "hard_valid": hard_valid,
-                "decision": decision.decision,
-                "next_action": next_action,
-                "terminal_state": terminal_state,
-                "reason": decision.reason,
-                "reason_code": decision.reason_code,
-                "failure_reason": decision.failure_reason,
-                "repeated_failure": decision.repeated_failure,
-            }
+        approval_contract_valid = not (
+            result.status == "approval_required" and not result.approval.required
         )
-
-        updates: SupervisorState = {
-            "validation_results": validation_results,
-            "next_action": next_action,
-            "terminal_state": terminal_state,
-            "current_step": "validate_subagent_result",
-        }
-        if decision.failure_streak is not None:
-            failure_streaks = {
-                agent: dict(streak)
-                for agent, streak in state.get("failure_streaks", {}).items()
-            }
-            failure_streaks[result.agent] = dict(decision.failure_streak)
-            updates["failure_streaks"] = failure_streaks
-        if final_answer:
-            updates["final_answer"] = final_answer
-
-        if not hard_valid:
-            failure_metadata = {
-                "agent": result.agent,
-                "reason_code": decision.reason_code,
-                "failure_reason": decision.failure_reason,
-                "repeated_failure": decision.repeated_failure,
-            }
-            rejected = reject_pending_result(
-                {**state, **updates},
-                decision.reason,
-                metadata=failure_metadata,
+        contract_findings = [] if approval_contract_valid else [
+            ValidationFinding(
+                code="approval_contract_mismatch",
+                source="supervisor",
+                severity="error",
+                disposition="blocking",
+                message="status=approval_required이지만 approval.required=false입니다.",
             )
-            updates.update(rejected)
-            failed = list(updates.get("failed_agents", []))
-            if raw_next_action == "fail" and result.agent not in failed:
-                failed.append(result.agent)
-            updates["failed_agents"] = failed
-            _emit_run_event(
-                backend_adapter,
-                state,
-                "validation.rejected",
-                decision.reason,
-                metadata={
-                    "candidate_id": (state.get("pending_result") or {}).get("candidate_id"),
-                    **failure_metadata,
+        ]
+        checks = [
+            ValidationCheckResult(
+                name="contract",
+                passed=approval_contract_valid,
+                findings=contract_findings,
+                details={
+                    "schema": "AgentCompactResult",
+                    "approval_contract_valid": approval_contract_valid,
                 },
             )
+        ]
+        if not approval_contract_valid:
+            return _validation_candidate_updates(
+                state,
+                result,
+                checks,
+                ValidationOutcome(
+                    disposition="reject",
+                    reason=contract_findings[0].message,
+                    reason_code="approval_contract_mismatch",
+                    terminal_state=SupervisorTerminalState.failed_terminal.value,
+                ),
+            )
+        decision = validate_subagent_result_contract(state, result)
+        checks.append(contract_check_from_decision(result, decision))
+        outcome = outcome_from_contract_decision(result.agent, decision)
 
-        if not hard_valid and raw_next_action in SUBAGENT_ACTION_TO_AGENT:
-            retry_counts = dict(state.get("retry_counts", {}))
-            retry_counts[result.agent] = int(retry_counts.get(result.agent, 0)) + 1
-            updates["retry_counts"] = retry_counts
-        return updates
+        if outcome.disposition in {"retry", "reject"}:
+            return _validation_candidate_updates(state, result, checks, outcome)
 
-    return validate_subagent_result_node
+        verification = _verify_evidence(state, result, backend_adapter)
+        checks.append(
+            ValidationCheckResult(
+                name="evidence",
+                passed=verification.valid,
+                findings=list(verification.findings),
+                details={
+                    "decision": verification.decision,
+                    "content_hashes": dict(verification.content_hashes),
+                },
+            )
+        )
+        pending_updates: dict[str, Any] = {}
+        if isinstance(pending, dict):
+            updated_pending = dict(pending)
+            updated_pending["content_hashes"] = dict(verification.content_hashes)
+            pending_updates["pending_result"] = updated_pending
+        if not verification.valid:
+            reason = "; ".join(finding.message for finding in verification.findings)
+            outcome = ValidationOutcome(
+                disposition="reject",
+                reason=reason or "필수 근거 아티팩트가 없습니다.",
+                reason_code="evidence_validation_failed",
+                terminal_state=SupervisorTerminalState.failed_terminal.value,
+            )
+            return {
+                **_validation_candidate_updates(state, result, checks, outcome),
+                **pending_updates,
+            }
 
+        semantic_decision = None
+        semantic_error: Exception | None = None
+        semantic_failures = 0
+        provisional_record = ValidationRecord(
+            candidate_id=str(pending.get("candidate_id") or ""),
+            validation_id=str(pending.get("validation_id") or ""),
+            agent=result.agent,
+            outcome=outcome,
+            checks=checks,
+        ).model_dump(mode="json")
+        semantic_state = {
+            **state,
+            **pending_updates,
+            "validation_history": [
+                *list(state.get("validation_history", [])),
+                provisional_record,
+            ],
+        }
+        for _attempt in range(2):
+            try:
+                semantic_decision = invoke_supervisor_decision(
+                    semantic_state,
+                    model,
+                    SEMANTIC_VALIDATION_ADVISORY_PROMPT,
+                    SemanticValidationAdvisoryDecision,
+                    extra=build_result_validation_context(semantic_state),
+                )
+                semantic_error = None
+                break
+            except Exception as exc:
+                semantic_error = exc
+                semantic_failures += 1
 
-def make_evidence_validate_node(backend_adapter: Any | None):
-    def evidence_validate_node(state: SupervisorState) -> SupervisorState:
-        latest = (state.get("validation_results") or [{}])[-1]
-        if latest.get("hard_valid") is not True:
-            return {"current_step": "evidence_validate"}
-        if backend_adapter is None or not hasattr(backend_adapter, "get_artifact"):
-            result = AgentCompactResult.model_validate((state.get("pending_result") or {}).get("result") or {})
-            valid = bool(result.artifact_ids or result.artifacts)
-            verification = EvidenceVerification(
-                valid=valid,
-                decision="accept" if valid else "reject",
-                findings=[] if valid else [],
+        if semantic_decision is None:
+            reason = f"semantic validation 모델 호출에 반복 실패했습니다: {semantic_error}"
+            checks.append(
+                ValidationCheckResult(
+                    name="semantic",
+                    passed=False,
+                    findings=[
+                        ValidationFinding(
+                            code="semantic_model_failed",
+                            source="supervisor",
+                            severity="error",
+                            disposition="blocking",
+                            message=reason,
+                        )
+                    ],
+                    details={"attempts": 2},
+                )
+            )
+            outcome = ValidationOutcome(
+                disposition="reject",
+                reason=reason,
+                reason_code="semantic_model_failed",
+                terminal_state=SupervisorTerminalState.failed_with_recoverable_context.value,
+            )
+            failed_updates: SupervisorState = {
+                **_validation_candidate_updates(state, result, checks, outcome),
+                **pending_updates,
+            }
+            counts = dict(state.get("semantic_retry_counts", {}))
+            counts[str(pending.get("candidate_id") or result.agent)] = semantic_failures
+            failed_updates["semantic_retry_counts"] = counts
+            return failed_updates
+
+        semantic_invalid = (
+            not semantic_decision.semantic_valid
+            or semantic_decision.severity == "error"
+            or bool(semantic_decision.missing_evidence)
+            or not _semantic_action_allowed(result.agent, semantic_decision.recommended_next_action)
+        )
+        semantic_findings = []
+        if semantic_invalid:
+            semantic_findings.append(
+                ValidationFinding(
+                    code="semantic_validation_failed",
+                    source="supervisor",
+                    severity="error",
+                    disposition="blocking",
+                    message=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
+                    details={"missing_evidence": list(semantic_decision.missing_evidence)},
+                )
+            )
+        checks.append(
+            ValidationCheckResult(
+                name="semantic",
+                passed=not semantic_invalid,
+                findings=semantic_findings,
+                details=semantic_decision.model_dump(mode="json"),
+            )
+        )
+        if semantic_invalid:
+            outcome = ValidationOutcome(
+                disposition="reject",
+                reason=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
+                reason_code="semantic_validation_failed",
+                terminal_state=SupervisorTerminalState.failed_terminal.value,
+            )
+        elif decision.decision == "await_approval":
+            outcome = outcome_from_contract_decision(result.agent, decision)
+        elif decision.decision == "accept_with_limitations" or verification.decision == "accept_with_limitations":
+            outcome = ValidationOutcome(
+                disposition="accept_with_limitations",
+                reason=decision.reason,
             )
         else:
-            verification = verify_candidate_evidence(state, backend_adapter)
+            outcome = ValidationOutcome(disposition="accept", reason=decision.reason)
 
-        entries = list(state.get("evidence_validation_results", []))
-        payload = verification.model_dump(mode="json")
-        payload["candidate_id"] = (state.get("pending_result") or {}).get("candidate_id")
-        entries.append(payload)
-        updates: SupervisorState = {
-            "evidence_validation_results": entries,
-            "current_step": "evidence_validate",
+        validated_updates: SupervisorState = {
+            **_validation_candidate_updates(state, result, checks, outcome),
+            **pending_updates,
+            "llm_decisions": _append_llm_decision(state, "validate_candidate", semantic_decision),
         }
-        if isinstance(state.get("pending_result"), dict):
-            pending = dict(state["pending_result"])
-            pending["content_hashes"] = verification.content_hashes
-            updates["pending_result"] = pending
-        if not verification.valid:
-            reason = "; ".join(item.message for item in verification.findings) or "필수 근거 아티팩트가 없습니다."
-            rejected = reject_pending_result({**state, **updates}, reason)
-            updates.update(rejected)
-            updates.update(
-                {
-                    "terminal_state": SupervisorTerminalState.failed_terminal.value,
-                    "next_action": "finalize",
-                    "final_answer": reason,
-                }
-            )
-            _emit_run_event(
-                backend_adapter,
-                state,
-                "validation.rejected",
-                reason,
-                metadata={"candidate_id": (state.get("pending_result") or {}).get("candidate_id")},
-            )
-        return updates
-
-    return evidence_validate_node
-
-
-def make_semantic_validate_subagent_result_node(model: Any | None, backend_adapter: Any | None = None):
-    def semantic_validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
-        latest_validation = (state.get("validation_results") or [{}])[-1]
-        evidence_entries = state.get("evidence_validation_results") or []
-        latest_evidence = evidence_entries[-1] if evidence_entries else {"valid": True}
-        hard_valid = latest_validation.get("hard_valid", latest_validation.get("valid"))
-        if state.get("terminal_state") in TERMINAL_STATES or hard_valid is not True or latest_evidence.get("valid") is not True:
-            return {
-                "semantic_validation_results": list(state.get("semantic_validation_results", [])),
-                "llm_decisions": list(state.get("llm_decisions", [])),
-                "current_step": "semantic_validate_subagent_result",
-            }
-
-        payload = state.get("last_agent_result") or {}
-        agent = str(payload.get("agent") or latest_validation.get("agent") or "")
-        try:
-            decision = invoke_supervisor_decision(
-                state,
-                model,
-                SEMANTIC_VALIDATION_ADVISORY_PROMPT,
-                SemanticValidationAdvisoryDecision,
-                extra=build_result_validation_context(state),
-            )
-        except Exception as exc:
+        if semantic_failures:
             counts = dict(state.get("semantic_retry_counts", {}))
-            candidate_id = str((state.get("pending_result") or {}).get("candidate_id") or agent)
-            attempts = int(counts.get(candidate_id, 0)) + 1
-            counts[candidate_id] = attempts
-            if attempts <= 1:
-                return {
-                    "semantic_retry_counts": counts,
-                    "current_step": "semantic_validate_retry",
-                }
-            reason = f"semantic validation 모델 호출에 반복 실패했습니다: {exc}"
-            rejected = reject_pending_result(state, reason)
-            return {
-                **rejected,
-                "semantic_retry_counts": counts,
-                "terminal_state": SupervisorTerminalState.failed_with_recoverable_context.value,
-                "next_action": "finalize",
-                "final_answer": reason,
-                "current_step": "semantic_validate_subagent_result",
-            }
+            counts[str(pending.get("candidate_id") or result.agent)] = semantic_failures
+            validated_updates["semantic_retry_counts"] = counts
+        return validated_updates
 
-        advisory_result = decision.model_dump(mode="json")
-        advisory_result["agent"] = agent
-        advisory_result["source_validation_result"] = latest_validation
-        advisory_results = list(state.get("semantic_validation_results", []))
-        advisory_results.append(advisory_result)
-        updates: SupervisorState = {
-            "semantic_validation_results": advisory_results,
-            "terminal_state": state.get("terminal_state", "running"),
-            "current_step": "semantic_validate_subagent_result",
-            "llm_decisions": _append_llm_decision(
-                state,
-                "semantic_validate_subagent_result",
-                decision,
-            ),
-        }
-        invalid = (
-            not decision.semantic_valid
-            or decision.severity == "error"
-            or bool(decision.missing_evidence)
-            or not _semantic_action_allowed(agent, decision.recommended_next_action)
+    return validate_candidate_node
+
+
+def _verify_evidence(
+    state: SupervisorState,
+    result: AgentCompactResult,
+    backend_adapter: Any | None,
+) -> EvidenceVerification:
+    if backend_adapter is not None and hasattr(backend_adapter, "get_artifact"):
+        return verify_candidate_evidence(state, backend_adapter)
+    valid = bool(result.artifact_ids or result.artifacts)
+    findings = [] if valid else [
+        ValidationFinding(
+            code="required_evidence_missing",
+            source="evidence_verifier",
+            severity="error",
+            disposition="blocking",
+            message="필수 근거 아티팩트가 없습니다.",
         )
-        if invalid:
-            reason = decision.reason or "semantic validation을 통과하지 못했습니다."
-            rejected = reject_pending_result({**state, **updates}, reason)
-            updates.update(rejected)
-            updates.update(
-                {
-                    "terminal_state": SupervisorTerminalState.failed_terminal.value,
-                    "next_action": "finalize",
-                    "final_answer": reason,
-                }
-            )
-            _emit_run_event(
-                backend_adapter,
+    ]
+    return EvidenceVerification(
+        valid=valid,
+        decision="accept" if valid else "reject",
+        findings=findings,
+    )
+
+
+def _validation_candidate_updates(
+    state: SupervisorState,
+    result: AgentCompactResult,
+    checks: list[ValidationCheckResult],
+    outcome: ValidationOutcome,
+) -> SupervisorState:
+    pending = state.get("pending_result") or {}
+    record = ValidationRecord(
+        candidate_id=str(pending.get("candidate_id") or ""),
+        validation_id=str(pending.get("validation_id") or ""),
+        agent=result.agent,
+        outcome=outcome,
+        checks=checks,
+    )
+    return {
+        "pending_validation": record.model_dump(mode="json"),
+        "current_step": "validate_candidate",
+    }
+
+
+def make_resolve_validation_node(backend_adapter: Any | None = None):
+    def resolve_validation_node(state: SupervisorState) -> SupervisorState:
+        payload = state.get("pending_validation")
+        if not isinstance(payload, dict):
+            return _terminal_failure_updates(
                 state,
-                "validation.rejected",
-                reason,
-                metadata={"candidate_id": (state.get("pending_result") or {}).get("candidate_id")},
+                "resolve_validation",
+                "해결할 통합 검증 결과가 없습니다.",
             )
+        record = ValidationRecord.model_validate(payload)
+        history = list(state.get("validation_history", []))
+        history.append(record.model_dump(mode="json"))
+        updates: SupervisorState = {
+            "validation_history": history,
+            "pending_validation": None,
+            "current_step": "resolve_validation",
+        }
+
+        result_check = next((check for check in record.checks if check.name == "result"), None)
+        failure_streak = result_check.details.get("failure_streak") if result_check else None
+        if isinstance(failure_streak, dict):
+            streaks = {agent: dict(item) for agent, item in state.get("failure_streaks", {}).items()}
+            streaks[record.agent] = dict(failure_streak)
+            updates["failure_streaks"] = streaks
+
+        disposition = record.outcome.disposition
+        if disposition in {"accept", "accept_with_limitations", "await_approval"}:
+            updates["terminal_state"] = "running"
+            return updates
+
+        rejected = reject_pending_result(
+            {**state, **updates},
+            record.outcome.reason,
+            metadata={
+                "agent": record.agent,
+                "reason_code": record.outcome.reason_code,
+                "disposition": disposition,
+            },
+        )
+        updates.update(rejected)
+        updates["pending_validation"] = None
+        updates["current_step"] = "resolve_validation"
+        if disposition == "retry":
+            retry_counts = dict(state.get("retry_counts", {}))
+            retry_counts[record.agent] = int(retry_counts.get(record.agent, 0)) + 1
+            updates["retry_counts"] = retry_counts
+            updates["next_action"] = _action_for_agent(record.agent)
+            updates["terminal_state"] = "running"
+        else:
+            failed = list(updates.get("failed_agents", state.get("failed_agents", [])))
+            if record.agent not in failed:
+                failed.append(record.agent)
+            updates["failed_agents"] = failed
+            updates["next_action"] = "finalize"
+            updates["terminal_state"] = record.outcome.terminal_state
+            updates["final_answer"] = record.outcome.reason
+        _emit_run_event(
+            backend_adapter,
+            state,
+            "validation.rejected",
+            record.outcome.reason,
+            metadata={
+                "candidate_id": record.candidate_id,
+                "validation_id": record.validation_id,
+                "agent": record.agent,
+                "reason_code": record.outcome.reason_code,
+                "disposition": disposition,
+            },
+        )
         return updates
 
-    return semantic_validate_subagent_result_node
+    return resolve_validation_node
+
+
+def _action_for_agent(agent: AgentName) -> NextAction:
+    return {
+        "sql_agent": "call_sql_agent",
+        "eda_agent": "call_eda_agent",
+        "analysis_agent": "call_analysis_agent",
+        "report_agent": "call_report_agent",
+    }[agent]
 
 
 def make_resolve_candidate_node(backend_adapter: Any | None = None):
@@ -709,7 +812,15 @@ def make_resolve_candidate_node(backend_adapter: Any | None = None):
             }
         promoted = promote_pending_result(state)
         promoted["current_step"] = "resolve_candidate"
-        semantic_result = (state.get("semantic_validation_results") or [{}])[-1]
+        latest_record = (state.get("validation_history") or [{}])[-1]
+        semantic_result = next(
+            (
+                check.get("details", {})
+                for check in latest_record.get("checks", [])
+                if check.get("name") == "semantic"
+            ),
+            {},
+        )
         recommended_action = str(semantic_result.get("recommended_next_action") or "")
         if result.agent == "report_agent":
             promoted["next_action"] = "finalize"
@@ -880,18 +991,6 @@ def collect_clarification_node(state: SupervisorState) -> SupervisorState:
     return make_collect_clarification_node()(state)
 
 
-def validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
-    return make_validate_subagent_result_node(None)(state)
-
-
-def semantic_validate_subagent_result_node(state: SupervisorState) -> SupervisorState:
-    return make_semantic_validate_subagent_result_node(None)(state)
-
-
-def evidence_validate_node(state: SupervisorState) -> SupervisorState:
-    return make_evidence_validate_node(None)(state)
-
-
 def resolve_candidate_node(state: SupervisorState) -> SupervisorState:
     return make_resolve_candidate_node()(state)
 
@@ -934,12 +1033,8 @@ def build_graph(
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
     graph.add_node("generate_report", make_generate_report_node(report_generator))
     graph.add_node("stage_candidate", make_stage_candidate_node())
-    graph.add_node("hard_validate", make_validate_subagent_result_node(model, backend_adapter))
-    graph.add_node("evidence_validate", make_evidence_validate_node(backend_adapter))
-    graph.add_node(
-        "semantic_validate",
-        make_semantic_validate_subagent_result_node(model, backend_adapter),
-    )
+    graph.add_node("validate_candidate", make_validate_candidate_node(model, backend_adapter))
+    graph.add_node("resolve_validation", make_resolve_validation_node(backend_adapter))
     graph.add_node("summarize_step", make_summarize_step_node(model))
     graph.add_node("resolve_candidate", make_resolve_candidate_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model))
@@ -977,30 +1072,14 @@ def build_graph(
             "finalize": "finalize",
         },
     )
-    graph.add_edge("stage_candidate", "hard_validate")
+    graph.add_edge("stage_candidate", "validate_candidate")
+    graph.add_edge("validate_candidate", "resolve_validation")
     graph.add_conditional_edges(
-        "hard_validate",
-        _route_after_validate,
+        "resolve_validation",
+        _route_after_resolve_validation,
         {
-            "evidence_validate": "evidence_validate",
-            "summarize_step": "summarize_step",
-            "finalize": "finalize",
-        },
-    )
-    graph.add_conditional_edges(
-        "evidence_validate",
-        _route_after_evidence_validate,
-        {
-            "semantic_validate": "semantic_validate",
-            "finalize": "finalize",
-        },
-    )
-    graph.add_conditional_edges(
-        "semantic_validate",
-        _route_after_semantic_validate,
-        {
-            "semantic_validate": "semantic_validate",
             "resolve_candidate": "resolve_candidate",
+            "summarize_step": "summarize_step",
             "finalize": "finalize",
         },
     )
@@ -1168,26 +1247,15 @@ def _route_after_execute(state: SupervisorState) -> str:
     return "completion_guard"
 
 
-def _route_after_validate(state: SupervisorState) -> str:
+def _route_after_resolve_validation(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    latest_validation = (state.get("validation_results") or [{}])[-1]
-    if latest_validation.get("hard_valid") is True:
-        return "evidence_validate"
-    return "summarize_step"
-
-
-def _route_after_evidence_validate(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES:
+    latest = (state.get("validation_history") or [{}])[-1]
+    disposition = (latest.get("outcome") or {}).get("disposition")
+    if disposition == "retry":
+        return "summarize_step"
+    if disposition == "reject":
         return "finalize"
-    return "semantic_validate"
-
-
-def _route_after_semantic_validate(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES:
-        return "finalize"
-    if state.get("current_step") == "semantic_validate_retry":
-        return "semantic_validate"
     return "resolve_candidate"
 
 

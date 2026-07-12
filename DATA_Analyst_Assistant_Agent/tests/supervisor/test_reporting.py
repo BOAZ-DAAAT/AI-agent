@@ -364,7 +364,12 @@ def test_call_report_agent_routes_directly_to_generate_report(adapter: BackendAd
     assert subagents.calls == []
     assert report_generator.calls == 1
     assert result["completed_agents"] == ["sql_agent", "report_agent"]
-    assert result["semantic_validation_results"][0]["semantic_valid"] is True
+    semantic_check = next(
+        check
+        for check in result["validation_history"][0]["checks"]
+        if check["name"] == "semantic"
+    )
+    assert semantic_check["passed"] is True
     assert result["step_summaries"][-1]["step"] == "generate_report"
 
 

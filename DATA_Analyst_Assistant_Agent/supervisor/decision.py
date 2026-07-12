@@ -8,7 +8,13 @@ from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
-from DATA_Analyst_Assistant_Agent.supervisor.state import AgentName, NextAction, SupervisorState, artifact_ids_by_agent
+from DATA_Analyst_Assistant_Agent.supervisor.state import (
+    AgentName,
+    NextAction,
+    SupervisorState,
+    artifact_ids_by_agent,
+    normalize_supervisor_state,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.validation import ResultValidationDecision
 
 
@@ -142,6 +148,7 @@ def build_clarification_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_plan_context(state: SupervisorState) -> dict[str, Any]:
+    validation_results, _, _ = _validation_context_views(state)
     return _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
@@ -152,7 +159,7 @@ def build_plan_context(state: SupervisorState) -> dict[str, Any]:
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
             "artifacts": artifact_ids_by_agent(state),
-            "validation_results": list(state.get("validation_results", []))[-3:],
+            "validation_results": validation_results[-3:],
         },
         max_text=500,
         max_items=8,
@@ -161,6 +168,7 @@ def build_plan_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
+    validation_results, _, semantic_results = _validation_context_views(state)
     return _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
@@ -178,8 +186,8 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
             "artifacts": artifact_ids_by_agent(state),
-            "validation_results": list(state.get("validation_results", []))[-3:],
-            "semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
+            "validation_results": validation_results[-3:],
+            "semantic_validation_results": semantic_results[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
             "agent_capabilities": agent_capabilities_context(),
             "pending_approval": state.get("pending_approval"),
@@ -217,6 +225,7 @@ def build_execution_guard_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
+    validation_results, _, semantic_results = _validation_context_views(state)
     return _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
@@ -225,8 +234,8 @@ def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
             "last_agent_result": state.get("last_agent_result") or {},
             "analysis_plan": state.get("analysis_plan") or {},
             "artifacts": artifact_ids_by_agent(state),
-            "validation_results": list(state.get("validation_results", []))[-3:],
-            "recent_semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
+            "validation_results": validation_results[-3:],
+            "recent_semantic_validation_results": semantic_results[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-3:],
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
@@ -243,12 +252,13 @@ def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_step_summary_context(state: SupervisorState) -> dict[str, Any]:
+    validation_results, _, semantic_results = _validation_context_views(state)
     return _bounded_context(
         {
             "current_step": state.get("current_step", ""),
             "last_agent_result": state.get("last_agent_result") or {},
-            "latest_validation_result": (state.get("validation_results") or [{}])[-1],
-            "latest_semantic_validation_result": (state.get("semantic_validation_results") or [{}])[-1],
+            "latest_validation_result": (validation_results or [{}])[-1],
+            "latest_semantic_validation_result": (semantic_results or [{}])[-1],
             "next_action": state.get("next_action", ""),
             "existing_step_summaries": list(state.get("step_summaries", []))[-3:],
         },
@@ -259,7 +269,8 @@ def build_step_summary_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
-    latest_validation = (state.get("validation_results") or [{}])[-1]
+    validation_results, _, semantic_results = _validation_context_views(state)
+    latest_validation = (validation_results or [{}])[-1]
     latest_agent = str(latest_validation.get("agent") or "")
     recent_failure_streak = (state.get("failure_streaks") or {}).get(latest_agent)
     return _bounded_context(
@@ -274,8 +285,8 @@ def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
             "artifacts": artifact_ids_by_agent(state),
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
-            "validation_results": list(state.get("validation_results", []))[-3:],
-            "semantic_validation_results": list(state.get("semantic_validation_results", []))[-3:],
+            "validation_results": validation_results[-3:],
+            "semantic_validation_results": semantic_results[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
             "llm_decisions": list(state.get("llm_decisions", []))[-5:],
             "decision_errors": list(state.get("decision_errors", []))[-3:],
@@ -285,6 +296,69 @@ def build_finalization_context(state: SupervisorState) -> dict[str, Any]:
         max_items=8,
         depth=4,
     )
+
+
+def _validation_context_views(
+    state: SupervisorState,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    history = list(state.get("validation_history", []))
+    if not history and any(
+        state.get(key)
+        for key in (
+            "validation_results",
+            "evidence_validation_results",
+            "semantic_validation_results",
+        )
+    ):
+        legacy_state = {**state, "state_schema_version": 2, "validation_history": []}
+        history = list(normalize_supervisor_state(legacy_state).get("validation_history", []))
+
+    result_views: list[dict[str, Any]] = []
+    evidence_views: list[dict[str, Any]] = []
+    semantic_views: list[dict[str, Any]] = []
+    for record in history:
+        outcome = dict(record.get("outcome") or {})
+        checks = list(record.get("checks") or [])
+        result_check = next((item for item in checks if item.get("name") == "result"), {})
+        result_details = dict(result_check.get("details") or {})
+        result_views.append(
+            {
+                "agent": record.get("agent"),
+                "valid": bool(result_check.get("passed")),
+                "hard_valid": bool(result_check.get("passed")),
+                "decision": outcome.get("disposition", "reject"),
+                "reason": outcome.get("reason", ""),
+                "reason_code": outcome.get("reason_code", "none"),
+                "terminal_state": outcome.get("terminal_state", "running"),
+                "failure_reason": result_details.get("failure_reason", ""),
+                "repeated_failure": bool(result_details.get("repeated_failure", False)),
+                "candidate_id": record.get("candidate_id", ""),
+                "validation_id": record.get("validation_id", ""),
+            }
+        )
+        evidence_check = next((item for item in checks if item.get("name") == "evidence"), None)
+        if evidence_check is not None:
+            evidence_details = dict(evidence_check.get("details") or {})
+            evidence_views.append(
+                {
+                    **evidence_details,
+                    "valid": bool(evidence_check.get("passed")),
+                    "findings": list(evidence_check.get("findings") or []),
+                    "candidate_id": record.get("candidate_id", ""),
+                }
+            )
+        semantic_check = next((item for item in checks if item.get("name") == "semantic"), None)
+        if semantic_check is not None:
+            semantic_details = dict(semantic_check.get("details") or {})
+            semantic_views.append(
+                {
+                    **semantic_details,
+                    "semantic_valid": bool(semantic_check.get("passed")),
+                    "agent": record.get("agent"),
+                    "source_validation_result": result_views[-1],
+                }
+            )
+    return result_views, evidence_views, semantic_views
 
 
 def _decision_messages(prompt: str, payload: dict[str, Any]) -> list[dict[str, str]]:
