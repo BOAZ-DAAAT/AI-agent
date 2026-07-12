@@ -528,7 +528,7 @@ def test_resume_consumes_synthetic_approval_and_continues_graph(monkeypatch) -> 
                 "next_action": "call_sql_agent",
                 "final_answer": "",
             },
-            "summarize_step",
+                "decide_next_action",
         )
     ]
     assert graph.invocations == [
@@ -609,7 +609,7 @@ def test_resume_approval_with_matching_candidate_hash_promotes_without_agent_rer
     agent.resume("thread_sales_001", {"approved": True})
 
     _, updates, as_node = graph.state_updates[0]
-    assert as_node == "resolve_candidate"
+    assert as_node == "commit_candidate"
     assert updates["pending_result"] is None
     assert updates["completed_agents"] == ["sql_agent"]
     assert updates["agent_results"][-1]["status"] == "success"
@@ -650,8 +650,10 @@ def test_resume_approval_with_changed_hash_invalidates_and_revalidates(monkeypat
     agent.resume("thread_sales_001", {"approved": True})
 
     _, updates, as_node = graph.state_updates[0]
-    assert as_node == "stage_candidate"
+    assert as_node == "execute_subagent"
     assert updates["pending_approval"] is None
+    assert updates["pending_validation"] is None
+    assert updates["current_step"] == "execute_subagent"
     assert updates["run_events"][-1]["type"] == "approval.invalidated"
 
 

@@ -403,12 +403,7 @@ def test_execution_guard_redirect_to_report_skips_subagent_call(adapter: Backend
                 "requires_mart_review": False,
                 "reason": "계획 완료",
             },
-            {"next_action": "call_sql_agent", "reason": "SQL 검토"},
-                {
-                    "allowed": False,
-                    "next_action": "call_report_agent",
-                    "reason": "기존 근거로 보고서 생성",
-                },
+                {"next_action": "call_report_agent", "reason": "기존 근거로 보고서 생성"},
                 {
                     "semantic_valid": True,
                     "severity": "info",

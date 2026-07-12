@@ -17,12 +17,12 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.supervisor.checkpoint import open_sqlite_checkpointer
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
+from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
 from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
     normalize_supervisor_state,
-    promote_pending_result,
     to_orchestration_state,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import SubAgentAdapter
@@ -166,7 +166,7 @@ class SupervisorAgent:
             "next_action": next_action,
             "final_answer": "",
         }
-        returned_config = graph.update_state(config, updates, as_node="summarize_step")
+        returned_config = graph.update_state(config, updates, as_node="decide_next_action")
         return graph.invoke(None, returned_config or config)
 
     def _resume_validated_candidate(
@@ -196,7 +196,11 @@ class SupervisorAgent:
 
         normalized = normalize_supervisor_state(values)
         if hashes_match:
-            updates = promote_pending_result(normalized, approval_granted=True)
+            updates = commit_candidate(
+                normalized,
+                self.adapter,
+                approval_granted=True,
+            )
             updates.update(
                 {
                     "pending_approval": None,
@@ -204,7 +208,7 @@ class SupervisorAgent:
                     "final_answer": "",
                 }
             )
-            returned_config = graph.update_state(config, updates, as_node="resolve_candidate")
+            returned_config = graph.update_state(config, updates, as_node="commit_candidate")
             return graph.invoke(None, returned_config or config)
 
         events = list(normalized.get("run_events", []))
@@ -228,11 +232,18 @@ class SupervisorAgent:
         updates = {
             **normalized,
             "pending_approval": None,
+            "pending_validation": None,
             "terminal_state": "running",
             "final_answer": "",
+            "next_action": self._next_action_for_pending_agent(
+                (pending_result.get("result") or {}).get("agent")
+            ) or "finalize",
             "run_events": events,
         }
-        returned_config = graph.update_state(config, updates, as_node="stage_candidate")
+        agent_name = str((pending_result.get("result") or {}).get("agent") or "")
+        anchor = "generate_report" if agent_name == "report_agent" else "execute_subagent"
+        updates["current_step"] = anchor
+        returned_config = graph.update_state(config, updates, as_node=anchor)
         return graph.invoke(None, returned_config or config)
 
     @staticmethod
