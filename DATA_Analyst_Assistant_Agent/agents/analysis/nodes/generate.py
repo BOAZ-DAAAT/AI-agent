@@ -74,11 +74,41 @@ Rules:
 - For heavy specialized methods, call the provided primitives instead of
   reimplementing them: {primitives}. Each takes keyword column arguments.
 - Choose the statistically valid method for the stated objective and domain.
+- When defining or evaluating a heuristic metric, proxy label, operational
+  threshold, or segment (for example churn-risk groups), treat it as a
+  hypothesis-driven analysis:
+  - include `hypothesis_tests` in result, with items containing hypothesis,
+    test_name, null_hypothesis, alternative_hypothesis, statistic, p_value,
+    effect_size, n, decision (supported/inconclusive/not_supported), and caveats.
+  - use statistical tests where feasible, e.g. chi-square or two-proportion
+    tests for repurchase-rate differences, Kruskal-Wallis/Mann-Whitney for
+    skewed numeric group differences, Spearman correlation for ordered risk
+    levels, and weighted/descriptive trend models for cohorts.
+  - report effect sizes with p-values; do not make a strong finding from
+    p-values alone.
+  - if a threshold is central to the analysis, add sensitivity checks where
+    feasible and store them in statistics.
+- Only create `review_request` when a human answer can change the next analysis
+  path or definition. Examples: choosing a segment threshold, approving a proxy
+  label, selecting a cohort observation window, or choosing an exploratory
+  substitute when prediction/causal analysis is not supported by the data.
+- Do NOT create `review_request` for facts the user cannot fix by choosing an
+  option, such as small sample size, group imbalance, missing values, skewed
+  distributions, lack of validation set, lack of true label, short observation
+  window, weak effect size, or non-causal observational data. Put those in
+  `limitations` and/or `method_notes`.
 - If the data is time-based, resample/aggregate at the given time_grain before
   fitting a trend. If there are too few periods, say so in limitations rather
   than forcing a fit.
 - Set a variable `result` to a dict with keys: summary (str), findings (list of
   str), statistics (dict of computed numbers), limitations (list of str).
+  Optional but preferred keys: hypothesis_tests, evidence_tables, interpretation,
+  method_notes, review_request.
+- If included, `review_request` must be a dict with:
+  decision_type, question, proposal, rationale, evidence, options,
+  recommended_option, impact_if_approved, requires_followup_analysis.
+- Phrase unsupported or weak tests as inconclusive. Never claim prediction,
+  causality, or true churn labels unless those were directly measured and tested.
 - Do not read/write files, print, or mutate global state.
 """
 

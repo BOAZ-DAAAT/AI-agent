@@ -40,7 +40,7 @@ DEFAULT_MAX_ATTEMPTS = 3
 
 @dataclass
 class AnalysisOutcome:
-    status: str  # "passed" | "failed"
+    status: str  # "passed" | "review_required" | "failed"
     attempts: int
     code: GeneratedAnalysisCode | None = None
     result: dict[str, Any] | None = None
@@ -101,9 +101,50 @@ def run_analysis(
         last_result = result
         last_critique = critique
 
+        if critique.verdict == "pass" and _has_actionable_review_request(result):
+            return AnalysisOutcome(
+                status="review_required",
+                attempts=attempt,
+                code=code,
+                result=result,
+                critique=CodeCritique(
+                    verdict="review_required",
+                    method_issues=["analysis decision review requested"],
+                    feedback=str(result["review_request"].get("question") or "Review the proposed analysis decision."),
+                ),
+                error_history=history,
+            )
+
         if critique.verdict == "pass":
             return AnalysisOutcome(
                 status="passed",
+                attempts=attempt,
+                code=code,
+                result=result,
+                critique=critique,
+                error_history=history,
+            )
+        if critique.verdict == "review_required":
+            if not _has_actionable_review_request(result):
+                _append_method_note(
+                    result,
+                    critique.feedback or "; ".join(critique.method_issues)
+                    or "Method review noted non-actionable interpretation cautions.",
+                )
+                return AnalysisOutcome(
+                    status="passed",
+                    attempts=attempt,
+                    code=code,
+                    result=result,
+                    critique=CodeCritique(
+                        verdict="pass",
+                        method_issues=critique.method_issues,
+                        feedback=critique.feedback,
+                    ),
+                    error_history=history,
+                )
+            return AnalysisOutcome(
+                status="review_required",
                 attempts=attempt,
                 code=code,
                 result=result,
@@ -140,3 +181,30 @@ def _failure_signature(stage: str, error: str) -> tuple[str, str]:
     """Compact a failure so repeated unresolved problems can stop early."""
 
     return stage, " ".join(str(error or "").split()).lower()
+
+
+def _has_actionable_review_request(result: dict[str, Any]) -> bool:
+    request = result.get("review_request")
+    if not isinstance(request, dict):
+        return False
+    required_text = (
+        request.get("question"),
+        request.get("proposal"),
+        request.get("recommended_option"),
+    )
+    if not all(str(value or "").strip() for value in required_text):
+        return False
+    options = request.get("options")
+    return isinstance(options, list) and any(str(option or "").strip() for option in options)
+
+
+def _append_method_note(result: dict[str, Any], note: str) -> None:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return
+    notes = result.get("method_notes")
+    if not isinstance(notes, list):
+        notes = []
+    if normalized not in [str(item) for item in notes]:
+        notes.append(normalized)
+    result["method_notes"] = notes
