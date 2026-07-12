@@ -31,6 +31,25 @@ validity, not whether it matches the user's request (a separate agent owns inten
 
 Return the CodeCritique schema.
 
+Return verdict="review_required" only when the computation is valid and useful
+AND the result includes a concrete review_request for a human analysis decision
+whose answer can change the next analysis path or definition. Examples: selecting
+a segment/group threshold, approving a proxy label, choosing an operational
+metric definition, selecting a cohort observation window, or choosing an
+exploratory substitute when prediction/causal analysis is not supported.
+
+Heuristic definitions, proxy labels, operational metrics, and rule-based
+segments are not failures by themselves. For those cases, expect hypothesis
+tests, effect sizes, and limitations. If the code supplies those and avoids
+overclaiming, return pass unless the result explicitly proposes a human-choice
+review_request.
+
+Do NOT return review_required for non-actionable method/data cautions such as
+small sample size, group imbalance, missing values, skewed numeric distributions,
+short observation windows, weak or missing effect sizes, missing validation sets,
+missing true labels, or observational/non-causal data. Those should appear in
+limitations or method_notes, and the verdict should usually be pass.
+
 Fail (verdict="fail") if any of these hold:
 - The statistical method is wrong for the data (e.g. a t-test on paired/temporal
   data, correlation reported as causation, classification metrics on a regression).
@@ -41,6 +60,8 @@ Fail (verdict="fail") if any of these hold:
 - A required assumption or caveat is missing for the method used.
 - The code silently drops most of the data or divides by zero-prone quantities
   without guarding.
+- A heuristic/proxy segmentation is evaluated only with descriptive shares while
+  strong conclusions are stated, with no hypothesis tests or effect sizes.
 
 Otherwise verdict="pass". Be strict but concrete: list each problem in
 method_issues, and put actionable fix instructions in feedback (used to
@@ -70,6 +91,8 @@ def critique_analysis_code(
         f"- findings: {result.get('findings')}\n"
         f"- statistics: {result.get('statistics')}\n"
         f"- limitations: {result.get('limitations')}\n"
+        f"- method_notes: {result.get('method_notes')}\n"
+        f"- review_request: {result.get('review_request')}\n"
     )
     # 상류 SQL 원천 테이블의 알려진 정합성 이슈(#130) — 이를 감안 안 한 결론을 잡아내는 검토 근거.
     if context is not None and context.known_data_quality_issues:
