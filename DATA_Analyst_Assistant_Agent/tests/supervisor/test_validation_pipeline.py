@@ -25,11 +25,6 @@ class SemanticModel:
         return SimpleNamespace(content=json.dumps(self.payload, ensure_ascii=False))
 
 
-class ForbiddenBackend:
-    def get_artifact(self, _artifact_id: str):
-        raise AssertionError("결정론 검증 실패 뒤에는 Evidence 검증을 호출하면 안 됩니다.")
-
-
 class FailingSemanticModel:
     def __init__(self) -> None:
         self.calls = 0
@@ -79,11 +74,11 @@ def test_validate_candidate_runs_all_checks_in_order_and_accepts() -> None:
         artifact_ids=["analysis_001"],
     )
 
-    updates = make_validate_candidate_node(model, None)(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert [check["name"] for check in record["checks"]] == [
-        "contract", "result", "evidence", "semantic"
+        "contract", "result", "semantic"
     ]
     assert record["outcome"]["disposition"] == "accept"
     assert model.calls == 1
@@ -100,7 +95,7 @@ def test_validate_candidate_short_circuits_after_retryable_result_failure() -> N
         error="구문 오류",
     )
 
-    updates = make_validate_candidate_node(model, ForbiddenBackend())(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert [check["name"] for check in record["checks"]] == ["contract", "result"]
@@ -116,7 +111,7 @@ def test_approval_contract_mismatch_stops_before_result_validation() -> None:
         summary="잘못된 승인 계약",
     )
 
-    updates = make_validate_candidate_node(model, ForbiddenBackend())(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert [check["name"] for check in record["checks"]] == ["contract"]
@@ -125,7 +120,7 @@ def test_approval_contract_mismatch_stops_before_result_validation() -> None:
     assert model.calls == 0
 
 
-def test_approval_is_decided_only_after_evidence_and_semantic_checks() -> None:
+def test_approval_is_decided_only_after_result_and_semantic_checks() -> None:
     model = SemanticModel(_semantic_success())
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -135,11 +130,11 @@ def test_approval_is_decided_only_after_evidence_and_semantic_checks() -> None:
         approval=ApprovalRequirement(required=True, reason="검토가 필요합니다."),
     )
 
-    updates = make_validate_candidate_node(model, None)(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert [check["name"] for check in record["checks"]] == [
-        "contract", "result", "evidence", "semantic"
+        "contract", "result", "semantic"
     ]
     assert record["outcome"]["disposition"] == "await_approval"
 
@@ -161,14 +156,12 @@ def test_limitation_finding_becomes_accept_with_limitations() -> None:
         ],
     )
 
-    updates = make_validate_candidate_node(
-        SemanticModel(_semantic_success()), None
-    )(_state(result))
+    updates = make_validate_candidate_node(SemanticModel(_semantic_success()))(_state(result))
 
     assert updates["pending_validation"]["outcome"]["disposition"] == "accept_with_limitations"
 
 
-def test_missing_evidence_is_recorded_and_semantic_validation_is_skipped() -> None:
+def test_success_without_artifacts_reaches_semantic_validation() -> None:
     model = SemanticModel(_semantic_success())
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -176,13 +169,46 @@ def test_missing_evidence_is_recorded_and_semantic_validation_is_skipped() -> No
         summary="근거 없는 분석",
     )
 
-    updates = make_validate_candidate_node(model, None)(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert [check["name"] for check in record["checks"]] == [
-        "contract", "result", "evidence"
+        "contract", "result", "semantic"
+    ]
+    assert record["outcome"]["disposition"] == "accept"
+    assert model.calls == 1
+
+
+def test_semantic_missing_evidence_rejects_candidate() -> None:
+    model = SemanticModel({**_semantic_success(), "missing_evidence": ["analysis_table"]})
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="분석 완료",
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert [check["name"] for check in record["checks"]] == [
+        "contract", "result", "semantic"
     ]
     assert record["checks"][-1]["passed"] is False
+    assert record["outcome"]["disposition"] == "reject"
+
+
+def test_report_without_artifact_id_stops_before_semantic_validation() -> None:
+    model = SemanticModel(_semantic_success("finalize"))
+    result = AgentCompactResult(
+        agent="report_agent",
+        status="success",
+        summary="리포트 완료",
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert [check["name"] for check in record["checks"]] == ["contract", "result"]
     assert record["outcome"]["disposition"] == "reject"
     assert model.calls == 0
 
@@ -203,7 +229,7 @@ def test_semantic_rejection_is_recorded_in_single_validation_record() -> None:
         artifact_ids=["analysis_001"],
     )
 
-    updates = make_validate_candidate_node(model, None)(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
     assert record["checks"][-1]["name"] == "semantic"
@@ -220,7 +246,7 @@ def test_semantic_model_failure_retries_once_then_rejects() -> None:
         artifact_ids=["analysis_001"],
     )
 
-    updates = make_validate_candidate_node(model, None)(_state(result))
+    updates = make_validate_candidate_node(model)(_state(result))
 
     assert model.calls == 2
     assert updates["pending_validation"]["outcome"] == {
@@ -242,7 +268,7 @@ def test_semantic_model_first_failure_retries_once_and_accepts() -> None:
     )
     state = _state(result)
 
-    updates = make_validate_candidate_node(model, None)(state)
+    updates = make_validate_candidate_node(model)(state)
 
     candidate_id = state["pending_result"]["candidate_id"]
     assert model.calls == 2
@@ -259,7 +285,7 @@ def test_resolve_validation_records_and_rejects_retry_candidate_once() -> None:
         error="구문 오류",
     )
     state = _state(result)
-    validated = make_validate_candidate_node(SemanticModel(_semantic_success()), None)(state)
+    validated = make_validate_candidate_node(SemanticModel(_semantic_success()))(state)
 
     resolved = make_resolve_validation_node(None)({**state, **validated})
 
@@ -269,3 +295,29 @@ def test_resolve_validation_records_and_rejects_retry_candidate_once() -> None:
     assert resolved["retry_counts"] == {"sql_agent": 1}
     assert resolved["next_action"] == "call_sql_agent"
     assert resolved["pending_validation"] is None
+
+
+def test_validation_preserves_staged_content_hashes() -> None:
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="approval_required",
+        summary="승인 필요",
+        artifacts=[
+            {
+                "artifact_id": "analysis_001",
+                "type": "analysis",
+                "content_hash": "sha256:original",
+            }
+        ],
+        approval=ApprovalRequirement(required=True, reason="검토가 필요합니다."),
+    )
+    state = _state(result)
+
+    updates = make_validate_candidate_node(SemanticModel(_semantic_success()))(state)
+
+    assert state["pending_result"]["content_hashes"] == {
+        "analysis_001": "sha256:original"
+    }
+    assert updates["pending_result"]["content_hashes"] == {
+        "analysis_001": "sha256:original"
+    }

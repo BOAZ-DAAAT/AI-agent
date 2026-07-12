@@ -148,6 +148,11 @@ class RecordingBackendAdapter:
         )
 
 
+class ForbiddenArtifactBackend(RecordingBackendAdapter):
+    def get_artifact(self, _artifact_id: str) -> dict[str, Any]:
+        raise AssertionError("후보 검증에서 backend 아티팩트를 조회하면 안 됩니다.")
+
+
 def _clarify_decision(
     *,
     needs_clarification: bool = False,
@@ -333,6 +338,25 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
         "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
+
+
+def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation() -> None:
+    backend = ForbiddenArtifactBackend()
+    adapter = FakeSubAgentAdapter()
+    adapter.backend_adapter = backend
+    model = SequencedDecisionModel(
+        _agent_flow_decisions(
+            ["call_analysis_agent", "call_report_agent"],
+            summary_next_actions=["decide_next_action", "finalize"],
+        )
+    )
+    graph = build_graph(subagent_adapter=adapter, model=model)
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_no_artifact_read"}})
+
+    assert result["terminal_state"] == "completed"
+    assert result["completed_agents"] == ["analysis_agent", "report_agent"]
+    assert any(event["event_type"] == "evidence.promoted" for event in backend.events)
 
 
 def test_supervisor_graph_has_exactly_ten_nodes() -> None:

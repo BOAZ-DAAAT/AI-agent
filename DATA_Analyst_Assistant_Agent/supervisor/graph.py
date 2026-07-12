@@ -48,10 +48,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     outcome_from_contract_decision,
     validate_subagent_result as validate_subagent_result_contract,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.evidence import (
-    EvidenceVerification,
-    verify_candidate_evidence,
-)
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import (
     commit_candidate,
     validate_candidate,
@@ -425,33 +421,11 @@ def make_stage_candidate_node():
     return stage_candidate_node
 
 
-def make_validate_candidate_node(model: Any | None, backend_adapter: Any | None = None):
+def make_validate_candidate_node(model: Any | None):
     def validate_candidate_node(state: SupervisorState) -> SupervisorState:
-        return validate_candidate(state, model, backend_adapter)
+        return validate_candidate(state, model)
 
     return validate_candidate_node
-def _verify_evidence(
-    state: SupervisorState,
-    result: AgentCompactResult,
-    backend_adapter: Any | None,
-) -> EvidenceVerification:
-    if backend_adapter is not None and hasattr(backend_adapter, "get_artifact"):
-        return verify_candidate_evidence(state, backend_adapter)
-    valid = bool(result.artifact_ids or result.artifacts)
-    findings = [] if valid else [
-        ValidationFinding(
-            code="required_evidence_missing",
-            source="evidence_verifier",
-            severity="error",
-            disposition="blocking",
-            message="필수 근거 아티팩트가 없습니다.",
-        )
-    ]
-    return EvidenceVerification(
-        valid=valid,
-        decision="accept" if valid else "reject",
-        findings=findings,
-    )
 
 
 def _validation_candidate_updates(
@@ -750,7 +724,7 @@ def build_graph(
     graph.add_node("completion_guard", make_completion_guard_node())
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
     graph.add_node("generate_report", make_generate_report_node(report_generator))
-    graph.add_node("validate_candidate", make_validate_candidate_node(model, backend_adapter))
+    graph.add_node("validate_candidate", make_validate_candidate_node(model))
     graph.add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model))
 

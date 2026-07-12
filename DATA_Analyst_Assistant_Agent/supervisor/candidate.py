@@ -8,10 +8,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     build_result_validation_context,
     invoke_supervisor_decision,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.evidence import (
-    EvidenceVerification,
-    verify_candidate_evidence,
-)
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import SEMANTIC_VALIDATION_ADVISORY_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -65,9 +61,8 @@ def build_step_summary(
 def validate_candidate(
     state: SupervisorState,
     model: Any | None,
-    backend_adapter: Any | None,
 ) -> SupervisorState:
-    """격리 후보의 계약, 근거, 의미 검증 결과를 하나의 레코드로 만든다."""
+    """격리 후보의 계약, 결과, 의미 검증 결과를 하나의 레코드로 만든다."""
     pending = state.get("pending_result")
     payload = pending.get("result") if isinstance(pending, dict) else None
     if not isinstance(payload, dict):
@@ -123,36 +118,7 @@ def validate_candidate(
     if outcome.disposition in {"retry", "reject"}:
         return _validation_updates(pending, result, checks, outcome)
 
-    verification = _verify_evidence(state, result, backend_adapter)
-    checks.append(
-        ValidationCheckResult(
-            name="evidence",
-            passed=verification.valid,
-            findings=list(verification.findings),
-            details={
-                "decision": verification.decision,
-                "content_hashes": dict(verification.content_hashes),
-            },
-        )
-    )
     updated_pending = dict(pending)
-    updated_pending["content_hashes"] = dict(verification.content_hashes)
-    if not verification.valid:
-        reason = "; ".join(item.message for item in verification.findings)
-        return {
-            **_validation_updates(
-                pending,
-                result,
-                checks,
-                ValidationOutcome(
-                    disposition="reject",
-                    reason=reason or "필수 근거 아티팩트가 없습니다.",
-                    reason_code="evidence_validation_failed",
-                    terminal_state=SupervisorTerminalState.failed_terminal.value,
-                ),
-            ),
-            "pending_result": updated_pending,
-        }
 
     provisional = ValidationRecord(
         candidate_id=str(pending.get("candidate_id") or ""),
@@ -253,10 +219,7 @@ def validate_candidate(
         )
     elif contract_decision.decision == "await_approval":
         outcome = outcome_from_contract_decision(result.agent, contract_decision)
-    elif (
-        contract_decision.decision == "accept_with_limitations"
-        or verification.decision == "accept_with_limitations"
-    ):
+    elif contract_decision.decision == "accept_with_limitations":
         outcome = ValidationOutcome(
             disposition="accept_with_limitations",
             reason=contract_decision.reason,
@@ -478,29 +441,6 @@ def _semantic_action_allowed(agent: str, action: str) -> bool:
         "report_agent": {"call_report_agent"},
     }
     return action in allowed.get(agent, set())
-
-
-def _verify_evidence(
-    state: SupervisorState,
-    result: AgentCompactResult,
-    backend_adapter: Any | None,
-) -> EvidenceVerification:
-    if backend_adapter is not None and hasattr(backend_adapter, "get_artifact"):
-        return verify_candidate_evidence(state, backend_adapter)
-    valid = bool(result.artifact_ids or result.artifacts)
-    return EvidenceVerification(
-        valid=valid,
-        decision="accept" if valid else "reject",
-        findings=[] if valid else [
-            ValidationFinding(
-                code="required_evidence_missing",
-                source="evidence_verifier",
-                severity="error",
-                disposition="blocking",
-                message="필수 근거 아티팩트가 없습니다.",
-            )
-        ],
-    )
 
 
 def _validation_updates(
