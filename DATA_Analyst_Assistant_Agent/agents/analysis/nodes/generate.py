@@ -2,7 +2,7 @@
 
 This is the branch endpoint that replaces fixed tool code. The LLM produces a
 ``GeneratedAnalysisCode`` (structured, so no markdown-fence parsing), and the
-code runs in a sandbox that — unlike the legacy codegen path — allows a small
+code runs in a sandbox that, unlike the legacy codegen path, allows a small
 allowlist of statistical libraries (statsmodels/scipy/sklearn/lifelines) and
 exposes the vetted heavy tools as callable primitives so the model composes
 them instead of re-deriving PyMC/lifelines math.
@@ -158,7 +158,7 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         f"Sample rows: {context.sample_rows}\n"
     )
     if context.known_data_quality_issues:
-        # 상류 SQL 원천 테이블의 알려진 정합성 이슈(#130) — 코드가 이를 감안해 방어/한계 명시하게.
+        # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.
         joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)
         prompt += (
             "\nKnown upstream data quality issues (from SQL integrity check):\n"
@@ -213,15 +213,18 @@ def execute_generated_code(
         "np": np,
         "math": math,
         "primitives": _primitives(records),
+        "df": dataframe.copy(),
+        "result": None,
     }
-    locals_dict: dict[str, Any] = {"df": dataframe.copy(), "result": None}
     source = f"{code.imports}\n{code.code}" if code.imports else code.code
     try:
-        exec(compile(source, "<generated_analysis>", "exec"), globals_dict, locals_dict)
+        # Use a single namespace so comprehensions/generators can resolve
+        # top-level variables created by generated code.
+        exec(compile(source, "<generated_analysis>", "exec"), globals_dict)
     except Exception as exc:  # noqa: BLE001 - surfaced to the reflect loop
         raise AnalysisCodeError(f"generated code failed: {exc}") from exc
 
-    result = locals_dict.get("result")
+    result = globals_dict.get("result")
     if not isinstance(result, dict):
         raise AnalysisCodeError("generated code must set `result` to a dict.")
     missing = [key for key in REQUIRED_RESULT_KEYS if key not in result]
