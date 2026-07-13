@@ -1,4 +1,4 @@
-"""B-lane tests: SQL-Agent, planner, self-check, mart candidate, and Phase 2A routing."""
+﻿"""B-lane tests: SQL-Agent, planner, self-check, mart candidate, and Phase 2A routing."""
 
 from __future__ import annotations
 
@@ -17,9 +17,6 @@ from data_agent_backend.models.artifacts import ArtifactType
 from data_agent_backend.models.common import BackendError
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, run_sql_self_check
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
-from DATA_Analyst_Assistant_Agent.agents.sql import planner as planner_module
-from DATA_Analyst_Assistant_Agent.agents.sql.planner import build_sql_plan, SQLPlan
-from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 try:
@@ -125,111 +122,6 @@ class TestSQLStatementSplit:
 
 # ── planner tests ──
 
-class TestSQLPlanner:
-    def test_revenue_monthly_plan(self):
-        plan = build_sql_plan("월별 매출 추이")
-        assert plan.metric == "revenue"
-        assert plan.dimension == "month"
-        assert "SELECT" in plan.generated_sql
-        assert plan.reasoning
-
-    def test_simple_query_fallback(self):
-        plan = build_sql_plan("간단한 요약")
-        assert plan.generated_sql == "SELECT 1 AS sample_value"
-
-    def test_plan_has_structured_fields(self):
-        plan = build_sql_plan("monthly revenue trend")
-        assert isinstance(plan.selected_tables, list)
-        assert isinstance(plan.selected_columns, list)
-        assert plan.metric == "revenue"
-        assert plan.dimension == "month"
-
-    def test_trend_route_uses_cte_template(self):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-        ap = AnalysisPlan(goal="trend", route_kind="trend", metric="revenue", dimension="월")
-        plan = build_sql_plan("월별 매출 추이", ap)
-        assert "monthly_data" in plan.generated_sql
-        assert "ORDER BY" in plan.generated_sql
-        assert plan.route_kind == "trend"
-
-    def test_eda_route_uses_profile_template(self):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-        ap = AnalysisPlan(goal="eda", route_kind="eda")
-        plan = build_sql_plan("데이터 품질 프로파일", ap)
-        assert "column_name" in plan.generated_sql
-        assert "distinct_count" in plan.generated_sql
-        assert plan.route_kind == "eda"
-
-    def test_comprehensive_route_uses_cte_template(self):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-        ap = AnalysisPlan(goal="comprehensive", route_kind="comprehensive", metric="revenue", dimension="월")
-        plan = build_sql_plan("품질 프로파일하고 월별 매출 분석", ap)
-        assert "base_data" in plan.generated_sql
-        assert plan.route_kind == "comprehensive"
-
-    def test_simple_route_metric_only(self):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-        ap = AnalysisPlan(goal="simple", route_kind="simple")
-        plan = build_sql_plan("매출 요약", ap)
-        assert "revenue" in plan.generated_sql
-        assert plan.route_kind == "simple"
-
-    def test_llm_prompt_includes_catalog_and_previous_error(self):
-        prompt = planner_module._build_llm_system_prompt(
-            catalog_summary={
-                "database": "db",
-                "tables": {
-                    "orders": {
-                        "columns": {
-                            "order_date": {"type": "DATE", "nullable": False, "description": "secret"},
-                            "amount": {"type": "DECIMAL", "nullable": True},
-                        }
-                    }
-                },
-                "password": "should_not_leak",
-            },
-            retry_context={"code": "BAD_SQL", "message": "unknown column", "query": "SELECT bad", "datasource_id": "ds1"},
-        )
-        assert "<MYSQL_CATALOG_JSON>" in prompt
-        assert '"orders"' in prompt
-        assert '"order_date"' in prompt
-        assert "should_not_leak" not in prompt
-        assert "<PREVIOUS_ERROR>" in prompt
-        assert "unknown column" in prompt
-
-    def test_llm_json_response_converts_to_sql_plan(self):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-
-        ap = AnalysisPlan(goal="simple", route_kind="simple", planner_mode="llm")
-        raw = """
-        {
-          "selected_tables": ["orders"],
-          "selected_columns": ["order_date", "amount"],
-          "generated_sql": "SELECT order_date, amount FROM orders",
-          "reasoning": "answers the question",
-          "confidence": 0.85
-        }
-        """
-        plan = planner_module._parse_llm_sql_plan(raw, ap)
-        assert plan.planner_mode == "llm"
-        assert plan.selected_tables == ["orders"]
-        assert plan.generated_sql == "SELECT order_date, amount FROM orders"
-        assert plan.confidence == pytest.approx(0.85)
-
-    def test_malformed_llm_json_falls_back_to_deterministic(self, monkeypatch):
-        from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
-
-        monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-        monkeypatch.setattr(planner_module, "_call_llm_planner", lambda **kwargs: "{bad json")
-        ap = AnalysisPlan(goal="simple", route_kind="simple", planner_mode="llm")
-        plan = build_sql_plan("매출 요약", ap)
-        assert plan.planner_mode == "deterministic"
-        assert "revenue" in plan.generated_sql
-
-    def test_llm_forbidden_sql_is_still_blocked(self):
-        assert not is_sql_safe("DROP TABLE orders")
-
-
 class TestSQLLangGraphSmoke:
     def test_integrity_summary_compacts_legacy_and_ge_payloads(self, monkeypatch, tmp_path):
         from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
@@ -286,79 +178,35 @@ class TestSQLLangGraphSmoke:
         def fake_post_backend_json(base_url, path, payload):
             assert base_url == "http://backend.local"
             if path == "/integrity/ensure-tables-ready":
-                dataset_name = payload["dataset_name"]
-                tables = payload["tables"]
-                wait_timeout_s = payload["wait_timeout_s"]
-                metadata = payload["metadata"]
-                calls.append((dataset_name, list(tables), wait_timeout_s, metadata))
+                calls.append((payload["dataset_name"], list(payload["tables"]), payload["wait_timeout_s"], payload["metadata"]))
                 return {"ok": True, "data": {"ready": False}}
             if path == "/integrity/summary":
-                assert payload["dataset_name"] == "orders_ds"
-                assert payload["tables"] == ["orders"]
-                assert payload["include_pass"] is False
-                return {
-                    "ok": True,
-                    "data": {
-                        "tables": {
-                            "orders": {
-                                "checks": [
-                                    {"column": "order_id", "status": "PASS", "intent": "PK check", "observed": "all good"},
-                                    {
-                                        "column": "amount",
-                                        "status": "WARNING",
-                                        "intent": "null profile",
-                                        "observed": "amount has 2 nulls",
-                                    },
-                                ]
-                            }
-                        }
-                    },
-                }
+                return {"ok": True, "data": {"tables": {"orders": {"checks": [{"column": "order_id", "status": "PASS", "intent": "PK check", "observed": "all good"}, {"column": "amount", "status": "WARNING", "intent": "null profile", "observed": "amount has 2 nulls"}]}}}}
             raise AssertionError(f"unexpected path: {path}")
 
-        monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-            "integrity_text": 'legacy pass dump should be replaced'
-        })
-        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"simple query"}')
+                return DummyResponse('{"sql":"SELECT order_id, amount FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","amount"],"reasoning":"preview orders"}')
+
+        monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": 'legacy pass dump should be replaced'})
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
 
-        app = build_app()
-        result = app.invoke({
-            "user_question": "주문 데이터를 간단히 보여줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "integrity_dataset_name": "orders_ds",
-            "integrity_refresh": {},
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "validation_findings": [],
-            "retry_hint": {},
-            "validation_summary": {},
-            "retry_count": 0,
-            "max_retries": 1,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "?? ???? ??? ???", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "integrity_dataset_name": "orders_ds", "integrity_refresh": {}, "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "validation_findings": [], "retry_hint": {}, "validation_summary": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert calls == [("orders_ds", ["orders"], 0.0, {"source": "sql_agent"})]
         assert result["integrity_refresh"]["status"] == "queued"
         assert result["integrity_refresh"]["tables"] == ["orders"]
         assert result["integrity_refresh"]["ready"] is False
-        assert result["integrity_text"] == "legacy pass dump should be replaced"
+        assert result["integrity_refresh"]["local_snapshot_used"] is True
+        assert result["integrity_text"] == ""
 
     def test_preplan_integrity_gate_updates_planner_context(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -392,36 +240,23 @@ class TestSQLLangGraphSmoke:
     def test_build_app_simple_path_supports_future_input_fields(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}',
-            "integrity_text": '{}'
-        })
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}', "integrity_text": '{}'})
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, "2024-01-01")])
-        app = build_app()
 
-        result = app.invoke({
-            "user_question": "주문 데이터를 간단히 보여줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "retry_count": 0,
-            "max_retries": 1,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"simple query"}')
+                return DummyResponse('{"sql":"SELECT order_id, order_date FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","order_date"],"reasoning":"preview orders"}')
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        result = build_app().invoke({"user_question": "?? ???? ??? ???", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert result["plan"]["route_kind"] == "simple"
         assert result["sql_draft"]["sql_type"] == "select"
@@ -433,36 +268,21 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
-            "integrity_text": '{}'
-        })
-        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(4.2,)])
 
-        app = build_app()
-        result = app.invoke({
-            "user_question": "주문 완료일부터 배송 완료일까지 평균 소요일 계산",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "retry_count": 0,
-            "max_retries": 1,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}')
+                return DummyResponse('{"sql":"SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders WHERE order_approved_at IS NOT NULL AND order_delivered_customer_date IS NOT NULL;","sql_type":"select","source_tables":["orders"],"columns_used":["order_delivered_customer_date","order_approved_at"],"reasoning":"aggregate delivery query"}')
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        result = build_app().invoke({"user_question": "?? ????? ?? ????? ?? ??? ??", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert "AVG(DATEDIFF(order_delivered_customer_date, order_approved_at))" in result["sql_draft"]["sql"]
         assert "WHERE order_approved_at IS NOT NULL" in result["sql_draft"]["sql"]
@@ -473,10 +293,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
-            "integrity_text": '{}'
-        })
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -484,39 +301,12 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "planner다" in prompt:
-                    return DummyResponse(
-                        '{"route_kind":"simple","selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],'
-                        '"target_metric":"평균 소요일","dimensions":[],"filters":[],"time_condition":null,"reasoning":"평균 질문"}'
-                    )
-                return DummyResponse(
-                    '{"sql":"SELECT * FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id"],"reasoning":"잘못된 초안"}'
-                )
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}')
+                return DummyResponse('{"sql":"SELECT * FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id"],"reasoning":"bad draft"}')
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
-        app = build_app()
-        result = app.invoke({
-            "user_question": "주문 완료일부터 배송 완료일까지 평균 소요일 계산",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "retry_count": 0,
-            "max_retries": 0,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "?? ????? ?? ????? ?? ??? ??", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 2, "feedback": "", "error": "", "final_answer": ""})
 
         assert result["validation"]["result"] == "invalid"
         assert any(item["category"] == "intent_mismatch" for item in result["validation"]["findings"])
@@ -617,18 +407,62 @@ class TestSQLLangGraphSmoke:
     def test_build_app_comprehensive_path_generates_datamart_sql(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": '{}'})
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+        committed = []
+        monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
+
+        responses = iter([
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"datamart request"}',
+            '{"mart_name":"category_performance_analysis","target_schema":"analytics","grain":"order_id","base_grain":"order_id","source_tables":["orders"],"key_columns":["order_id"],"measure_columns":["amount"],"dimension_columns":["order_id"],"incremental_column":null,"load_strategy":"full_refresh","row_preserving_strategy":"order row preserving","aggregation_policy":"prefer_row_preserving","aggregation_rationale":"row level mart","design_reasoning":"order mart"}',
+            '{"sql":"CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;","sql_type":"create_table_as","target_table":"analytics.category_performance_analysis","source_tables":["orders"],"columns_used":["order_id","amount"],"postcheck_sql":"SELECT COUNT(*) FROM analytics.category_performance_analysis;","reasoning":"build mart"}'
+        ])
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                return DummyResponse(next(responses))
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        result = build_app().invoke({"user_question": "??? ??? ?????? ????", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "??? ??? ?? datamart ??", "schema_text": "", "integrity_text": "", "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
+
+        assert result["plan"]["route_kind"] == "comprehensive"
+        assert result["sql_draft"]["sql_type"] == "create_table_as"
+        assert committed and committed[0].lower().startswith("create table analytics.")
+        assert result["validation"]["result"] == "valid"
+        assert "datamart" in result["final_answer"]
+
+    def test_build_app_surfaces_mart_design_json_failure(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
             "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
             "integrity_text": '{}'
         })
-        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
-        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
-        committed = []
-        monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
-        app = build_app()
 
-        result = app.invoke({
+        responses = iter([
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"datamart request"}',
+            '{bad json',
+        ])
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                return DummyResponse(next(responses))
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+
+        result = build_app().invoke({
             "user_question": "재사용 가능한 데이터마트를 만들어줘",
             "required_db_schema": "",
             "clarification_request": "",
@@ -644,6 +478,73 @@ class TestSQLLangGraphSmoke:
             "postcheck_result": None,
             "mart_quality_result": {},
             "validation": {},
+            "validation_findings": [],
+            "retry_hint": {},
+            "validation_summary": {},
+            "retry_count": 0,
+            "max_retries": 0,
+            "feedback": "",
+            "error": "",
+            "final_answer": "",
+        })
+
+        assert result["mart_design"] == {}
+        assert result["validation"]["result"] == "invalid"
+        assert result["retry_hint"]["reason_code"] == "sql_mart_design_failed"
+        assert result["retry_hint"]["details"]["mart_design_reason_code"] == "llm_json_parse_failed"
+        assert "mart 설계 응답을 JSON으로 파싱하지 못했습니다" in result["final_answer"]
+
+    def test_build_app_retries_after_mart_design_failure(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
+
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
+            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+            "integrity_text": '{}'
+        })
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+        committed = []
+        monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
+
+        responses = iter([
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"plan 1"}',
+            '{bad json',
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"plan 2"}',
+            '{"mart_name":"category_performance_analysis","target_schema":"analytics","grain":"order_id","base_grain":"order_id","source_tables":["orders"],"key_columns":["order_id"],"measure_columns":["amount"],"dimension_columns":["order_id"],"incremental_column":null,"load_strategy":"full_refresh","row_preserving_strategy":"order row preserving","aggregation_policy":"prefer_row_preserving","aggregation_rationale":"row level mart","design_reasoning":"order mart"}',
+            '{"sql":"CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;","sql_type":"create_table_as","target_table":"analytics.category_performance_analysis","source_tables":["orders"],"columns_used":["order_id","amount"],"postcheck_sql":"SELECT COUNT(*) FROM analytics.category_performance_analysis;","reasoning":"build mart"}',
+        ])
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                return DummyResponse(next(responses))
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+
+        result = build_app().invoke({
+            "user_question": "재사용 가능한 데이터마트를 만들어줘",
+            "required_db_schema": "",
+            "clarification_request": "",
+            "planner_selection_reason": "복잡한 분석을 위한 datamart 필요",
+            "schema_text": "",
+            "integrity_text": "",
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+            "sql_result": None,
+            "row_count": 0,
+            "precheck_result": None,
+            "postcheck_result": None,
+            "mart_quality_result": {},
+            "validation": {},
+            "validation_findings": [],
+            "retry_hint": {},
+            "validation_summary": {},
             "retry_count": 0,
             "max_retries": 1,
             "feedback": "",
@@ -651,11 +552,10 @@ class TestSQLLangGraphSmoke:
             "final_answer": "",
         })
 
-        assert result["plan"]["route_kind"] == "comprehensive"
-        assert result["sql_draft"]["sql_type"] == "create_table_as"
-        assert committed and committed[0].lower().startswith("create table analytics.")
+        assert result["retry_count"] == 1
         assert result["validation"]["result"] == "valid"
-        assert "datamart" in result["final_answer"]
+        assert result["mart_design"]["mart_name"] == "category_performance_analysis"
+        assert committed and committed[0].lower().startswith("create table analytics.")
 
     def test_build_app_normalizes_object_based_mart_design_columns(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -731,7 +631,7 @@ class TestSQLLangGraphSmoke:
             "feedback": "",
             "error": "",
             "generation_source": "llm",
-            "fallback_reason": "",
+            "generation_failure_reason": "",
             "failed_statement_index": None,
             "failed_statement_sql": "",
             "final_answer": "",
@@ -747,16 +647,9 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
-            "integrity_text": '{}'
-        })
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
-
-        responses = iter([
-            '{"sql": "SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "1차 시도"}',
-            '{"sql": "SELECT DATEDIFF(order_delivered_customer_date, order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "2차 시도"}',
-        ])
+        responses = iter(['{"sql": "SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "1? ??"}', '{"sql": "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "columns_used": ["order_delivered_customer_date", "order_approved_at"], "reasoning": "2? ??"}'])
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -764,39 +657,16 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "MySQL SQL 작성기" in prompt:
-                    return DummyResponse(next(responses))
-                raise AssertionError("unexpected prompt")
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}')
+                return DummyResponse(next(responses))
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(3,)])
-
-        app = build_app()
-        result = app.invoke({
-            "user_question": "배송 소요일을 계산해줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {"route_kind": "simple", "selected_join_tables": ["orders"]},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "retry_count": 0,
-            "max_retries": 2,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "?? ???? ????", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "plan": {"route_kind": "simple", "selected_join_tables": ["orders"]}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert result["validation"]["result"] == "valid"
-        assert "DATEDIFF" in result["sql_draft"]["sql"]
+        assert "AVG(DATEDIFF" in result["sql_draft"]["sql"]
         assert result["retry_count"] == 1
 
     def test_build_app_executes_multi_statement_selects_sequentially(self, monkeypatch):
@@ -809,20 +679,18 @@ class TestSQLLangGraphSmoke:
             "integrity_text": '{}'
         })
 
+        responses = iter([
+            '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"two diagnostics"}',
+            '{"sql":"SELECT COUNT(*) AS total_orders FROM orders; SELECT COUNT(*) AS delivered_orders FROM orders WHERE order_status = \\"delivered\\";","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","order_status"],"reasoning":"두 개의 진단 질의"}',
+        ])
+
         class DummyResponse:
             def __init__(self, content: str):
                 self.content = content
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "MySQL SQL 작성기" in prompt:
-                    return DummyResponse(
-                        '{"sql":"SELECT COUNT(*) AS total_orders FROM orders; '
-                        'SELECT COUNT(*) AS delivered_orders FROM orders WHERE order_status = \\"delivered\\";",'
-                        '"sql_type":"select","source_tables":["orders"],'
-                        '"columns_used":["order_id","order_status"],"reasoning":"두 개의 진단 질의"}'
-                    )
-                raise AssertionError("unexpected prompt")
+                return DummyResponse(next(responses))
 
         executed: list[str] = []
 
@@ -861,7 +729,7 @@ class TestSQLLangGraphSmoke:
             "feedback": "",
             "error": "",
             "generation_source": "llm",
-            "fallback_reason": "",
+            "generation_failure_reason": "",
             "failed_statement_index": None,
             "failed_statement_sql": "",
             "final_answer": "",
@@ -887,9 +755,8 @@ class TestSQLLangGraphSmoke:
         })
 
         responses = iter([
-            '{"sql":"SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;",'
-            '"sql_type":"select","source_tables":["orders"],'
-            '"columns_used":["order_delivered_customer_date","order_approved_at"],"reasoning":"1차 시도"}',
+            '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}',
+            '{"sql":"SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;","sql_type":"select","source_tables":["orders"],"columns_used":["order_delivered_customer_date","order_approved_at"],"reasoning":"1차 시도"}',
             '{bad json',
         ])
 
@@ -899,9 +766,7 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "MySQL SQL 작성기" in prompt:
-                    return DummyResponse(next(responses))
-                raise AssertionError("unexpected prompt")
+                return DummyResponse(next(responses))
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(3,)])
@@ -928,29 +793,34 @@ class TestSQLLangGraphSmoke:
             "retry_hint": {},
             "validation_summary": {},
             "retry_count": 0,
-            "max_retries": 2,
+            "max_retries": 1,
             "feedback": "",
             "error": "",
             "generation_source": "llm",
-            "fallback_reason": "",
+            "generation_failure_reason": "",
             "failed_statement_index": None,
             "failed_statement_sql": "",
             "final_answer": "",
         })
 
-        assert result["generation_source"] == "fallback"
-        assert result["fallback_reason"] == "llm_json_parse_failed"
-        assert "fallback" in result["final_answer"].lower()
+        assert result["generation_source"] == "failed"
+        assert result["generation_failure_reason"] == "llm_json_parse_failed"
+        assert result["validation"]["result"] == "invalid"
+        assert result["retry_hint"]["reason_code"] == "sql_generation_failed"
+        assert result["retry_hint"]["details"]["generation_reason_code"] == "llm_json_parse_failed"
+        assert "LLM SQL" in result["final_answer"]
 
     def test_build_app_reports_failed_statement_metadata(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}',
-            "integrity_text": '{}'
-        })
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}', "integrity_text": '{}'})
+
+        responses = iter([
+            '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"two diagnostics"}',
+            '{"sql":"SELECT COUNT(*) AS total_orders FROM orders; SELECT COUNT(*) AS delivered_orders FROM orders WHERE order_status = \\\"delivered\\\";","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","order_status"],"reasoning":"two diagnostic queries"}'
+        ])
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -958,14 +828,7 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "MySQL SQL 작성기" in prompt:
-                    return DummyResponse(
-                        '{"sql":"SELECT COUNT(*) AS total_orders FROM orders; '
-                        'SELECT COUNT(*) AS delivered_orders FROM orders WHERE order_status = \\"delivered\\";",'
-                        '"sql_type":"select","source_tables":["orders"],'
-                        '"columns_used":["order_id","order_status"],"reasoning":"두 개의 진단 질의"}'
-                    )
-                raise AssertionError("unexpected prompt")
+                return DummyResponse(next(responses))
 
         def fake_fetch(sql: str):
             if "delivered_orders" in sql:
@@ -973,39 +836,10 @@ class TestSQLLangGraphSmoke:
             return [(10,)]
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", fake_fetch)
 
-        app = build_app()
-        result = app.invoke({
-            "user_question": "주문 수와 배송 완료 주문 수를 각각 보여줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {"route_kind": "simple", "selected_join_tables": ["orders"]},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "statement_results": [],
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "validation_findings": [],
-            "retry_hint": {},
-            "validation_summary": {},
-            "retry_count": 0,
-            "max_retries": 0,
-            "feedback": "",
-            "error": "",
-            "generation_source": "llm",
-            "fallback_reason": "",
-            "failed_statement_index": None,
-            "failed_statement_sql": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "?? ?? ?? ?? ?? ?? ?? ???", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "plan": {"route_kind": "simple", "selected_join_tables": ["orders"]}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "statement_results": [], "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "validation_findings": [], "retry_hint": {}, "validation_summary": {}, "retry_count": 0, "max_retries": 0, "feedback": "", "error": "", "generation_source": "llm", "generation_failure_reason": "", "failed_statement_index": None, "failed_statement_sql": "", "final_answer": ""})
 
         assert result["validation"]["result"] == "invalid"
         assert result["failed_statement_index"] == 1
@@ -1017,13 +851,16 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-            "integrity_text": '{}'
-        })
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": '{}'})
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         committed: list[str] = []
         executed_queries: list[str] = []
+
+        responses = iter([
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"datamart request"}',
+            '{"mart_name":"category_performance_analysis","target_schema":"analytics","grain":"order_id","base_grain":"order_id","source_tables":["orders"],"key_columns":["order_id"],"measure_columns":["amount"],"dimension_columns":["order_id"],"incremental_column":null,"load_strategy":"full_refresh","row_preserving_strategy":"order row preserving","aggregation_policy":"prefer_row_preserving","aggregation_rationale":"row level mart","design_reasoning":"order mart"}',
+            '{"sql":"CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;","sql_type":"create_table_as","target_table":"category_performance_analysis","source_tables":["orders"],"columns_used":["order_id","amount"],"postcheck_sql":"SELECT COUNT(*) FROM category_performance_analysis;","reasoning":"?? ??"}'
+        ])
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -1031,17 +868,7 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "MySQL SQL 작성기" in prompt:
-                    return DummyResponse(
-                        '{"sql": "CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;", '
-                        '"sql_type": "create_table_as", '
-                        '"target_table": "category_performance_analysis", '
-                        '"source_tables": ["orders"], '
-                        '"columns_used": ["order_id", "amount"], '
-                        '"postcheck_sql": "SELECT COUNT(*) FROM category_performance_analysis;", '
-                        '"reasoning": "마트 생성"}'
-                    )
-                raise AssertionError("unexpected prompt")
+                return DummyResponse(next(responses))
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: committed.append(sql))
@@ -1052,52 +879,12 @@ class TestSQLLangGraphSmoke:
 
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", fake_fetch)
 
-        app = build_app()
-        result = app.invoke({
-            "user_question": "재사용 가능한 데이터마트를 만들어줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "복잡한 분석을 위한 datamart 필요",
-            "schema_text": "",
-            "integrity_text": "",
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "retry_count": 0,
-            "max_retries": 1,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "??? ??? ?????? ????", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "??? ??? ?? datamart ??", "schema_text": "", "integrity_text": "", "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert result["sql_draft"]["target_table"] == "analytics.category_performance_analysis"
         assert result["sql_draft"]["postcheck_sql"] == "SELECT COUNT(*) FROM analytics.category_performance_analysis;"
         assert any("FROM analytics.category_performance_analysis" in query for query in executed_queries)
         assert committed
-
-# ── mart detection tests ──
-
-class TestMartDetection:
-    def test_korean_mart_keywords(self):
-        assert needs_mart_candidate("반복 조회용 데이터마트 저장")
-        assert needs_mart_candidate("재사용 가능한 마트")
-
-    def test_english_mart_keywords(self):
-        assert needs_mart_candidate("save as reusable datamart")
-        assert needs_mart_candidate("create a mart for repeat queries")
-
-    def test_no_mart_intent(self):
-        assert not needs_mart_candidate("간단한 매출 요약")
-        assert not needs_mart_candidate("show revenue summary")
-
-
-# ── Route detection tests (Phase 2A) ──
 
 @pytest.mark.skip(reason="레거시 SQLAgentSupervisor 라우팅 계약은 LangGraph Supervisor 테스트로 대체되었습니다.")
 class TestRouteDetection:
@@ -1446,9 +1233,7 @@ class TestSQLAgentIntegration:
     def test_backend_not_modified(self):
         changed = [
             "DATA_Analyst_Assistant_Agent/agents/sql/agent.py",
-            "DATA_Analyst_Assistant_Agent/agents/sql/planner.py",
             "DATA_Analyst_Assistant_Agent/agents/sql/self_check.py",
-            "DATA_Analyst_Assistant_Agent/agents/sql/mart.py",
             "DATA_Analyst_Assistant_Agent/mart/metadata.py",
             "DATA_Analyst_Assistant_Agent/mart/persistence.py",
             "DATA_Analyst_Assistant_Agent/supervisor.py",
@@ -1469,54 +1254,31 @@ class TestSQLAgentIntegration:
             if path == "/integrity/ensure-tables-ready":
                 return {"ok": True, "data": {"ready": True}}
             if path == "/integrity/summary":
-                return {
-                    "ok": True,
-                    "data": {
-                        "summaries": [
-                            {"table_name": "orders", "status": "warning", "summary": {"message": "amount has 2 nulls"}}
-                        ]
-                    },
-                }
+                return {"ok": True, "data": {"summaries": [{"table_name": "orders", "status": "warning", "summary": {"message": "amount has 2 nulls"}}]}}
             raise AssertionError(f"unexpected path: {path}")
 
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                if "planner" in prompt:
+                    return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"simple query"}')
+                return DummyResponse('{"sql":"SELECT order_id, amount FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","amount"],"reasoning":"preview orders"}')
+
         monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-            "integrity_text": 'legacy pass dump should be replaced'
-        })
-        monkeypatch.setattr(planner_support_module, "get_llm", lambda: (_ for _ in ()).throw(RuntimeError("llm disabled")))
+        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": 'legacy pass dump should be replaced'})
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
 
-        app = build_app()
-        result = app.invoke({
-            "user_question": "주문 데이터를 간단히 보여줘",
-            "required_db_schema": "",
-            "clarification_request": "",
-            "planner_selection_reason": "SQL 기반 질의 응답",
-            "schema_text": "",
-            "integrity_text": "",
-            "integrity_dataset_name": "orders_ds",
-            "integrity_refresh": {},
-            "plan": {},
-            "mart_design": {},
-            "sql_draft": {},
-            "sql_result": None,
-            "row_count": 0,
-            "precheck_result": None,
-            "postcheck_result": None,
-            "mart_quality_result": {},
-            "validation": {},
-            "validation_findings": [],
-            "retry_hint": {},
-            "validation_summary": {},
-            "retry_count": 0,
-            "max_retries": 1,
-            "feedback": "",
-            "error": "",
-            "final_answer": "",
-        })
+        result = build_app().invoke({"user_question": "?? ???? ??? ???", "required_db_schema": "", "clarification_request": "", "planner_selection_reason": "SQL ?? ?? ??", "schema_text": "", "integrity_text": "", "integrity_dataset_name": "orders_ds", "integrity_refresh": {}, "plan": {}, "mart_design": {}, "sql_draft": {}, "sql_result": None, "row_count": 0, "precheck_result": None, "postcheck_result": None, "mart_quality_result": {}, "validation": {}, "validation_findings": [], "retry_hint": {}, "validation_summary": {}, "retry_count": 0, "max_retries": 1, "feedback": "", "error": "", "final_answer": ""})
 
         assert result["integrity_refresh"]["status"] == "refreshed"
         assert result["integrity_refresh"]["ready"] is True
         assert "amount has 2 nulls" in result["integrity_text"]
         assert "legacy pass dump" not in result["integrity_text"]
+
+
+
+

@@ -125,18 +125,18 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
     for table_name in candidate_tables:
         bare_name = table_name.split(".")[-1]
         if bare_name not in available_tables and table_name not in available_tables:
-            findings.append({"category": "missing_table", "severity": "error", "retryable": True, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
+            findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
     for column_name in [str(c) for c in sql_draft.get("columns_used", []) if c]:
         bare_column_name = column_name.split(".")[-1]
         if not any(bare_column_name in cols for cols in available_columns.values()):
-            findings.append({"category": "missing_column", "severity": "error", "retryable": True, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
+            findings.append({"category": "missing_column", "severity": "error", "retryable": False, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
     sql_lower = sql.lower()
     for ref in re.findall(r"(?:from|join|into|table)\s+([a-zA-Z_][a-zA-Z0-9_\\.]*)", sql_lower):
         bare_name = ref.split(".")[-1]
         if bare_name in cte_names:
             continue
         if bare_name not in available_tables and not ref.startswith("analytics."):
-            findings.append({"category": "missing_table", "severity": "error", "retryable": True, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
+            findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
     return _dedupe_findings(findings)
 
 
@@ -180,10 +180,12 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
-    priority = {"mysql_dialect_error": 0, "missing_table": 1, "missing_column": 2, "intent_mismatch": 3, "result_shape_mismatch": 4, "invalid_join_plan": 5, "postcheck_failed": 6, "mart_summary_bias": 7, "mart_grain_missing": 8, "execution_error": 9}
+    priority = {"sql_generation_failed": 0, "mysql_dialect_error": 1, "missing_table": 2, "missing_column": 3, "intent_mismatch": 4, "result_shape_mismatch": 5, "invalid_join_plan": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_grain_missing": 9, "execution_error": 10}
     ranked_findings = sorted(findings, key=lambda item: priority.get(str(item.get("category")), 99))
-    category = ranked_findings[0].get("category", "validation_failed")
-    suggested_action = {
+    primary = ranked_findings[0]
+    category = primary.get("category", "validation_failed")
+    suggested_action = primary.get("suggested_action") or {
+        "sql_generation_failed": "regenerate_sql",
         "mysql_dialect_error": "rewrite_mysql_dialect",
         "missing_table": "reselect_table",
         "missing_column": "reselect_column",
@@ -195,10 +197,16 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "mart_grain_missing": "clarify_mart_grain",
     }.get(category, "fix_sql")
     return {
-        "retryable": any(item.get("retryable", False) for item in findings),
+        "retryable": bool(primary.get("retryable", False)),
         "suggested_action": suggested_action,
         "reason_code": category,
-        "details": {"categories": [item.get("category") for item in ranked_findings], "messages": [item.get("detail") for item in ranked_findings]},
+        "details": {
+            "categories": [item.get("category") for item in ranked_findings],
+            "messages": [item.get("detail") for item in ranked_findings],
+            "primary_code": primary.get("code") or category,
+            "generation_reason_code": (primary.get("code") or category) if category == "sql_generation_failed" else None,
+            "primary_details": dict(primary.get("details") or {}),
+        },
     }
 
 
