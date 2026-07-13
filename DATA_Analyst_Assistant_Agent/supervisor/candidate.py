@@ -15,9 +15,14 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     NextAction,
     StepSummary,
     SupervisorState,
+    PendingApproval,
     normalize_supervisor_state,
     promote_pending_result,
     reject_pending_result,
+)
+from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
+    InvalidAnalysisReviewRequest,
+    extract_analysis_review_request,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     ValidationCheckResult,
@@ -348,21 +353,59 @@ def commit_candidate(
         )
 
     if disposition == "await_approval" and not approval_granted:
-        approval = {
-            "approval_id": f"{working['current_run_id']}:{result.agent}:approval",
-            "agent": result.agent,
-            "reason": result.approval.reason or result.summary,
-            "approval_type": result.approval.approval_type or "agent_approval",
-            "candidate_id": record.candidate_id,
-            "validation_id": record.validation_id,
-            "content_hashes": dict(pending.get("content_hashes") or {}),
-        }
+        review_request = None
+        if result.agent == "analysis_agent" and result.approval.approval_type == "analysis.review":
+            try:
+                review_request = extract_analysis_review_request(result)
+            except InvalidAnalysisReviewRequest as exc:
+                return {
+                    **working,
+                    "terminal_state": SupervisorTerminalState.failed_terminal.value,
+                    "next_action": "finalize",
+                    "final_answer": str(exc),
+                    "error_state": {
+                        "node": "commit_candidate",
+                        "message": str(exc),
+                        "reason_code": "invalid_analysis_review_request",
+                        "retryable": False,
+                    },
+                }
+        is_structured_review = review_request is not None
+        approval = PendingApproval(
+            approval_id=(
+                f"{working['current_run_id']}:analysis_agent:{record.candidate_id}:approval"
+                if is_structured_review
+                else f"{working['current_run_id']}:{result.agent}:approval"
+            ),
+            agent=result.agent,
+            reason=result.approval.reason or result.summary,
+            approval_type=result.approval.approval_type or "agent_approval",
+            candidate_id=record.candidate_id,
+            validation_id=record.validation_id,
+            content_hashes=dict(pending.get("content_hashes") or {}),
+            review_request=(
+                review_request.model_dump(mode="json") if review_request is not None else None
+            ),
+            expected_resume=(
+                {
+                    "approval_id": "string",
+                    "selected_option_id": "string?",
+                    "free_text": "string?",
+                }
+                if is_structured_review
+                else {"approved": "boolean"}
+            ),
+        ).model_dump(mode="json")
         return {
             **working,
             "pending_approval": approval,
-            "terminal_state": SupervisorTerminalState.needs_user_approval.value,
-            "next_action": "finalize",
-            "final_answer": approval["reason"],
+            "terminal_state": (
+                "running"
+                if is_structured_review
+                else SupervisorTerminalState.needs_user_approval.value
+            ),
+            "next_action": "collect_analysis_review" if is_structured_review else "finalize",
+            "final_answer": "" if is_structured_review else approval["reason"],
         }
 
     if disposition == "recover":
@@ -427,6 +470,9 @@ def commit_candidate(
         )
 
     promoted = promote_pending_result(working, approval_granted=approval_granted)
+    if result.agent == "analysis_agent":
+        promoted["analysis_selection_response"] = None
+        promoted["analysis_selection_review_request"] = None
     next_action = _next_action(result, record)
     promoted["next_action"] = next_action
     promoted["current_step"] = "commit_candidate"

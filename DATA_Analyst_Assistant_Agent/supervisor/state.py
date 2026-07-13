@@ -27,6 +27,7 @@ NextAction = Literal[
     "call_eda_agent",
     "call_analysis_agent",
     "call_report_agent",
+    "collect_analysis_review",
     "finalize",
     "fail",
 ]
@@ -95,6 +96,10 @@ class PendingApproval(BaseModel):
     candidate_id: str = ""
     validation_id: str = ""
     content_hashes: dict[str, str] = Field(default_factory=dict)
+    review_request: dict[str, Any] | None = None
+    expected_resume: dict[str, str] = Field(
+        default_factory=lambda: {"approved": "boolean"}
+    )
 
 
 class SupervisorState(TypedDict, total=False):
@@ -140,6 +145,9 @@ class SupervisorState(TypedDict, total=False):
     semantic_recovery_attempts: dict[str, int]
     limitations: list[str]
     run_events: list[dict[str, Any]]
+    analysis_selection_response: dict[str, Any] | None
+    analysis_selection_review_request: dict[str, Any] | None
+    analysis_review_decisions: list[dict[str, Any]]
 
 
 def _ensure_json_serializable(state: SupervisorState) -> SupervisorState:
@@ -197,11 +205,14 @@ def empty_supervisor_state(
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 4,
+        "state_schema_version": 5,
         "semantic_retry_counts": {},
         "semantic_recovery_attempts": {},
         "limitations": [],
         "run_events": [],
+        "analysis_selection_response": None,
+        "analysis_selection_review_request": None,
+        "analysis_review_decisions": [],
     }
     return _ensure_json_serializable(state)
 
@@ -212,15 +223,15 @@ def merge_agent_result(state: SupervisorState, result: AgentCompactResult) -> Su
     staged = stage_candidate_result(state, result, {})
     if result.approval.required:
         candidate = staged["pending_result"] or {}
-        staged["pending_approval"] = {
-            "approval_id": f"{state['current_run_id']}:{result.agent}:approval",
-            "agent": result.agent,
-            "reason": result.approval.reason or result.summary,
-            "approval_type": result.approval.approval_type or "agent_approval",
-            "candidate_id": candidate.get("candidate_id", ""),
-            "validation_id": candidate.get("validation_id", ""),
-            "content_hashes": dict(candidate.get("content_hashes") or {}),
-        }
+        staged["pending_approval"] = PendingApproval(
+            approval_id=f"{state['current_run_id']}:{result.agent}:approval",
+            agent=result.agent,
+            reason=result.approval.reason or result.summary,
+            approval_type=result.approval.approval_type or "agent_approval",
+            candidate_id=str(candidate.get("candidate_id", "")),
+            validation_id=str(candidate.get("validation_id", "")),
+            content_hashes=dict(candidate.get("content_hashes") or {}),
+        ).model_dump(mode="json")
         staged["terminal_state"] = SupervisorTerminalState.needs_user_approval.value
         return _ensure_json_serializable(staged)
     return promote_pending_result(staged)
@@ -341,7 +352,7 @@ def reject_pending_result(
     if not isinstance(candidate, dict):
         return normalized
     rejected = list(normalized.get("rejected_results", []))
-    rejected.append({**candidate, "reason": reason})
+    rejected.append({**candidate, "reason": reason, "metadata": dict(metadata or {})})
     quarantined = list(normalized.get("quarantined_artifacts", []))
     result = candidate.get("result") or {}
     quarantined.extend(result.get("artifacts") or [])
@@ -379,8 +390,38 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         validation_history = list(state.get("validation_history", []))
         if schema_version == 2 and not validation_history:
             validation_history = _migrate_v2_validation_history(state)
+        pending_approval = state.get("pending_approval")
+        normalized_pending_approval = None
+        if isinstance(pending_approval, dict):
+            agent_name = str(pending_approval.get("agent") or "analysis_agent")
+            legacy_resume_fields = (
+                {
+                    "review_request": None,
+                    "expected_resume": {"approved": "boolean"},
+                }
+                if schema_version < 5
+                else {}
+            )
+            normalized_pending_approval = PendingApproval.model_validate(
+                {
+                    "approval_id": (
+                        pending_approval.get("approval_id")
+                        or f"{state.get('current_run_id', '')}:{agent_name}:approval"
+                    ),
+                    "agent": agent_name,
+                    "reason": (
+                        pending_approval.get("reason")
+                        or state.get("final_answer")
+                        or "사용자 승인이 필요합니다."
+                    ),
+                    "approval_type": pending_approval.get("approval_type") or "agent_approval",
+                    **pending_approval,
+                    **legacy_resume_fields,
+                }
+            ).model_dump(mode="json")
         normalized: SupervisorState = {
             **state,
+            "pending_approval": normalized_pending_approval,
             "pending_result": state.get("pending_result"),
             "result_history": list(state.get("result_history", [])),
             "accepted_evidence": accepted_evidence,
@@ -395,9 +436,18 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             },
             "run_events": list(state.get("run_events", [])),
             "validation_history": validation_history,
-            "state_schema_version": 4,
+            "state_schema_version": 5,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
+            "analysis_selection_response": (
+                state.get("analysis_selection_response") if schema_version >= 5 else None
+            ),
+            "analysis_selection_review_request": (
+                state.get("analysis_selection_review_request") if schema_version >= 5 else None
+            ),
+            "analysis_review_decisions": (
+                list(state.get("analysis_review_decisions", [])) if schema_version >= 5 else []
+            ),
         }
         normalized.pop("validation_results", None)
         normalized.pop("evidence_validation_results", None)
@@ -410,7 +460,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
     normalized = {
         **state,
-        "state_schema_version": 4,
+        "state_schema_version": 5,
         "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),
@@ -425,6 +475,9 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "artifacts": {},
         "agent_results": [],
         "completed_agents": [],
+        "analysis_selection_response": None,
+        "analysis_selection_review_request": None,
+        "analysis_review_decisions": [],
     }
     return _ensure_json_serializable(normalized)
 
@@ -627,4 +680,5 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         retry_counts=dict(state.get("retry_counts", {})),
         max_retry_per_agent=int(state.get("max_retry_per_agent", 1)),
         limitations=list(dict.fromkeys(limitations)),
+        analysis_review_decisions=list(state.get("analysis_review_decisions", [])),
     )

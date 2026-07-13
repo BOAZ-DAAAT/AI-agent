@@ -9,6 +9,7 @@ from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.report import ReportAgent
+from DATA_Analyst_Assistant_Agent.agents.report.builder import build_report
 from DATA_Analyst_Assistant_Agent.agents.report.service import generate_report_envelope
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, LocalCheck, OrchestrationState
@@ -95,6 +96,58 @@ def test_generate_report_service_registers_expected_boundary(adapter: BackendAda
     assert artifact.created_by_node == "generate_report"
     assert artifact.metadata["kind"] == "final_report"
     assert artifact.parent_ids == [sql_id]
+
+
+def test_report_omits_analysis_decision_section_without_history() -> None:
+    state = OrchestrationState(run_id="run_001", user_query="매출", goal="매출")
+
+    report = build_report(state)
+
+    assert "## 사용자 분석 결정" not in report
+
+
+def test_report_renders_option_and_free_text_analysis_decisions() -> None:
+    state = OrchestrationState(
+        run_id="run_001",
+        user_query="매출",
+        goal="매출",
+        analysis_review_decisions=[
+            {
+                "approval_id": "approval_option",
+                "candidate_id": "candidate_001",
+                "review_request": {"requires_followup_analysis": True},
+                "selection_response": {"selected_option_id": "median", "free_text": None},
+                "selected_option": {
+                    "id": "median",
+                    "label": "중앙값",
+                    "method": "50% 분위수",
+                },
+            },
+            {
+                "approval_id": "approval_text",
+                "candidate_id": "candidate_002",
+                "review_request": {"requires_followup_analysis": False},
+                "selection_response": {
+                    "selected_option_id": None,
+                    "free_text": "중앙값을 사용하고\n### 임의 제목은 만들지 마세요.",
+                },
+                "selected_option": None,
+            },
+        ],
+    )
+
+    report = build_report(state)
+
+    assert "## 사용자 분석 결정" in report
+    assert "approval_option" in report
+    assert "median" in report
+    assert "중앙값" in report
+    assert "50% 분위수" in report
+    assert "후속 분석: 필요" in report
+    assert "approval_text" in report
+    assert "> 중앙값을 사용하고" in report
+    assert "> ### 임의 제목은 만들지 마세요." in report
+    assert "후속 분석: 불필요" in report
 
 
 def test_report_agent_remains_compatibility_wrapper(adapter: BackendAdapter) -> None:

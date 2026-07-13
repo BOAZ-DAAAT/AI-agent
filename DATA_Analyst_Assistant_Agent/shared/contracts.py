@@ -3,7 +3,7 @@ from __future__ import annotations
 from data_agent_backend.models.common import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from data_agent_backend.models.artifacts import ArtifactRef
 
@@ -181,6 +181,7 @@ class OrchestrationState(BaseModel):
     retry_counts: dict[str, int] = Field(default_factory=dict)
     max_retry_per_agent: int = 1
     limitations: list[str] = Field(default_factory=list)
+    analysis_review_decisions: list[dict[str, Any]] = Field(default_factory=list)
 
     def add_artifacts(self, key: str, artifact_ids: list[str]) -> None:
         if not artifact_ids:
@@ -190,13 +191,36 @@ class OrchestrationState(BaseModel):
 
 
 class SupervisorInterruptPayload(BaseModel):
-    type: Literal["clarification"]
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["clarification", "analysis_review"]
     status: Literal["waiting_input"]
     run_id: str
     thread_id: str
     question: str
     node: str
     expected_resume: dict[str, str] = Field(default_factory=lambda: {"answer": "string"})
+    approval_id: str | None = None
+    review_request: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_type_specific_fields(self) -> "SupervisorInterruptPayload":
+        if self.type == "clarification":
+            if self.approval_id is not None or self.review_request is not None:
+                raise ValueError("clarification interrupt에는 analysis review 필드를 포함할 수 없습니다.")
+            if self.expected_resume != {"answer": "string"}:
+                raise ValueError("clarification interrupt의 expected_resume이 올바르지 않습니다.")
+            return self
+        if not (self.approval_id or "").strip() or not isinstance(self.review_request, dict):
+            raise ValueError("analysis_review interrupt에는 approval_id와 review_request가 필요합니다.")
+        expected = {
+            "approval_id": "string",
+            "selected_option_id": "string?",
+            "free_text": "string?",
+        }
+        if self.expected_resume != expected:
+            raise ValueError("analysis_review interrupt의 expected_resume이 올바르지 않습니다.")
+        return self
 
 
 class SupervisorRunResult(BaseModel):

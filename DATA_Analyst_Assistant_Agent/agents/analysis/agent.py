@@ -7,7 +7,10 @@ from data_agent_backend.models.artifacts import ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import first_dataframe, load_analysis_inputs, read_json_artifact
 from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
-from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisSelectionResponse
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisSelectionResponse,
+    ReviewRequest,
+)
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
@@ -34,6 +37,7 @@ class AnalysisAgent:
         chart_artifact_loader: Any | None = None,
         chart_reader: Any | None = None,
         selection_response: AnalysisSelectionResponse | None = None,
+        review_request: ReviewRequest | None = None,
     ) -> AgentEnvelope:
         context = runtime.context(state, node_name=self.name, tool_name="analysis_agent.result")
         _emit_progress(runtime, state, "workflow", "started", 0)
@@ -55,6 +59,7 @@ class AnalysisAgent:
             eda_profiles,
             question_type=question_type,
             selection_response=selection_response,
+            review_request=review_request,
             planner_model=planner_model,
             code_generator_model=code_generator_model,
             critic_model=critic_model,
@@ -258,12 +263,4 @@ def _status_label(status: object) -> str:
 def _review_request_preview(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    return {
-        "decision_type": value.get("decision_type", ""),
-        "question": value.get("question", ""),
-        "proposal": value.get("proposal", ""),
-        "recommended_option_id": value.get("recommended_option_id", ""),
-        "options": value.get("options", []),
-        "allow_free_text": value.get("allow_free_text", False),
-        "requires_followup_analysis": value.get("requires_followup_analysis", False),
-    }
+    return ReviewRequest.model_validate(value).model_dump(mode="json")
