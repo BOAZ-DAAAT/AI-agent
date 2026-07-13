@@ -120,6 +120,8 @@ class SupervisorState(TypedDict, total=False):
     quarantined_artifacts: list[dict[str, Any]]
     state_schema_version: int
     semantic_retry_counts: dict[str, int]
+    semantic_recovery_attempts: dict[str, int]
+    limitations: list[str]
     run_events: list[dict[str, Any]]
 
 
@@ -178,8 +180,10 @@ def empty_supervisor_state(
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 3,
+        "state_schema_version": 4,
         "semantic_retry_counts": {},
+        "semantic_recovery_attempts": {},
+        "limitations": [],
         "run_events": [],
     }
     return _ensure_json_serializable(state)
@@ -312,6 +316,8 @@ def reject_pending_result(
     state: SupervisorState,
     reason: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    event_type: str = "validation.rejected",
 ) -> SupervisorState:
     normalized = normalize_supervisor_state(state)
     candidate = normalized.get("pending_result")
@@ -325,7 +331,7 @@ def reject_pending_result(
     events = list(normalized.get("run_events", []))
     events.append(
         {
-            "type": "validation.rejected",
+            "type": event_type,
             "candidate_id": candidate.get("candidate_id"),
             "reason": reason,
             **dict(metadata or {}),
@@ -364,13 +370,15 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             "rejected_results": list(state.get("rejected_results", [])),
             "quarantined_artifacts": list(state.get("quarantined_artifacts", [])),
             "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+            "semantic_recovery_attempts": dict(state.get("semantic_recovery_attempts", {})),
+            "limitations": list(state.get("limitations", [])),
             "failure_streaks": {
                 agent: dict(streak)
                 for agent, streak in state.get("failure_streaks", {}).items()
             },
             "run_events": list(state.get("run_events", [])),
             "validation_history": validation_history,
-            "state_schema_version": 3,
+            "state_schema_version": 4,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
         }
@@ -385,7 +393,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
     normalized = {
         **state,
-        "state_schema_version": 3,
+        "state_schema_version": 4,
         "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),
@@ -393,6 +401,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "rejected_results": list(state.get("rejected_results", [])),
         "quarantined_artifacts": quarantined,
         "semantic_retry_counts": dict(state.get("semantic_retry_counts", {})),
+        "semantic_recovery_attempts": dict(state.get("semantic_recovery_attempts", {})),
+        "limitations": list(state.get("limitations", [])),
         "failure_streaks": {},
         "run_events": list(state.get("run_events", [])),
         "artifacts": {},
@@ -563,12 +573,13 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
         business_grain=plan_payload.get("business_grain") or None,
     )
-    limitations = [
+    limitations = [str(item) for item in state.get("limitations", []) if item]
+    limitations.extend(
         str(finding.get("message") or "")
         for result in state.get("agent_results", [])
         for finding in result.get("findings", [])
         if finding.get("disposition") == "limitation" and finding.get("message")
-    ]
+    )
 
     return OrchestrationState(
         run_id=state["current_run_id"],

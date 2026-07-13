@@ -21,6 +21,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 ValidationDisposition = Literal[
     "accept",
     "accept_with_limitations",
+    "recover",
     "retry",
     "await_approval",
     "reject",
@@ -39,6 +40,7 @@ class ValidationOutcome(BaseModel):
     reason: str = ""
     reason_code: str = "none"
     retry_target: AgentName | None = None
+    recovery_action: NextAction | None = None
     terminal_state: str = "running"
 
 

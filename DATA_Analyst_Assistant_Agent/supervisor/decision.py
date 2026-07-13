@@ -40,6 +40,16 @@ LLMSelectableNextAction = Literal[
     "finalize",
     "fail",
 ]
+SemanticRecoveryRecommendation = Literal[
+    "clarify",
+    "call_sql_agent",
+    "call_eda_agent",
+    "call_analysis_agent",
+    "call_report_agent",
+    "finalize",
+    "fail",
+    "",
+]
 DecisionModelT = TypeVar("DecisionModelT", bound=BaseModel)
 
 
@@ -75,7 +85,7 @@ class ExecutionGuardDecision(BaseModel):
 class SemanticValidationAdvisoryDecision(BaseModel):
     semantic_valid: bool
     severity: Literal["info", "warning", "error"] = "info"
-    recommended_next_action: LLMSelectableNextAction | Literal[""] = ""
+    recommended_next_action: SemanticRecoveryRecommendation = ""
     reason: str = ""
     missing_evidence: list[str] = Field(default_factory=list)
     alignment_notes: list[str] = Field(default_factory=list)

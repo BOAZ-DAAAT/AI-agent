@@ -340,6 +340,77 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
     assert len(model.messages) == len(result["llm_decisions"])
 
 
+def test_semantic_recovery_routes_analysis_candidate_to_sql_then_report() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(
+                semantic_valid=False,
+                severity="error",
+                recommended_next_action="call_sql_agent",
+            ),
+            _semantic_decision(recommended_next_action="call_report_agent"),
+            _semantic_decision(),
+            _final_decision("completed", "복구된 근거로 리포트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        report_generator=adapter,
+        model=model,
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_semantic_recovery"}})
+
+    assert adapter.calls == ["analysis_agent", "sql_agent"]
+    assert adapter.report_calls == 1
+    assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
+    assert result["completed_agents"] == ["sql_agent", "report_agent"]
+    assert result["failed_agents"] == []
+    assert result["accepted_evidence"].keys() == {"sql_agent", "report_agent"}
+    assert len(result["rejected_results"]) == 1
+    assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["terminal_state"] == "completed"
+
+
+def test_semantic_recovery_without_recommendation_generates_limited_report_from_accepted_evidence() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_sql_agent"),
+            _semantic_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(semantic_valid=False, severity="error"),
+            _semantic_decision(),
+            _final_decision("completed", "제한적 리포트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        report_generator=adapter,
+        model=model,
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_limited_report"}})
+
+    assert adapter.calls == ["sql_agent", "analysis_agent"]
+    assert adapter.report_calls == 1
+    assert result["semantic_recovery_attempts"] == {"report_agent": 1}
+    assert result["completed_agents"] == ["sql_agent", "report_agent"]
+    assert "analysis_agent" not in result["accepted_evidence"]
+    assert any("제한적 Report" in item for item in result["limitations"])
+    assert any(
+        event["type"] == "semantic_recovery.limited_report"
+        for event in result["run_events"]
+    )
+    assert result["terminal_state"] == "completed"
+
+
 def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation() -> None:
     backend = ForbiddenArtifactBackend()
     adapter = FakeSubAgentAdapter()

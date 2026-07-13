@@ -25,6 +25,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.validation import (
     ValidationRecord,
     contract_check_from_decision,
     outcome_from_contract_decision,
+    guard_agent_preconditions,
     validate_subagent_result,
 )
 
@@ -34,6 +35,9 @@ _ACTION_BY_AGENT: dict[AgentName, NextAction] = {
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
     "report_agent": "call_report_agent",
+}
+_AGENT_BY_ACTION: dict[str, AgentName] = {
+    action: agent for agent, action in _ACTION_BY_AGENT.items()
 }
 
 
@@ -186,43 +190,59 @@ def validate_candidate(
         updates["semantic_retry_counts"] = counts
         return updates
 
-    semantic_invalid = (
-        not semantic_decision.semantic_valid
-        or semantic_decision.severity == "error"
+    semantic_recover = (
+        semantic_decision.severity == "error"
         or bool(semantic_decision.missing_evidence)
-        or not _semantic_action_allowed(result.agent, semantic_decision.recommended_next_action)
-    )
-    semantic_findings = [] if not semantic_invalid else [
-        ValidationFinding(
-            code="semantic_validation_failed",
-            source="supervisor",
-            severity="error",
-            disposition="blocking",
-            message=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
-            details={"missing_evidence": list(semantic_decision.missing_evidence)},
+        or (
+            semantic_decision.severity == "info"
+            and not semantic_decision.semantic_valid
         )
-    ]
+    )
+    semantic_warning = semantic_decision.severity == "warning" and not semantic_decision.missing_evidence
+    if semantic_recover:
+        semantic_findings = [
+            ValidationFinding(
+                code="semantic_validation_failed",
+                source="supervisor",
+                severity="error",
+                disposition="blocking",
+                message=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
+                details={"missing_evidence": list(semantic_decision.missing_evidence)},
+            )
+        ]
+    elif semantic_warning:
+        semantic_findings = [
+            ValidationFinding(
+                code="semantic_validation_warning",
+                source="supervisor",
+                severity="warning",
+                disposition="limitation",
+                message=semantic_decision.reason or "semantic validation에 제한사항이 있습니다.",
+            )
+        ]
+    else:
+        semantic_findings = []
     checks.append(
         ValidationCheckResult(
             name="semantic",
-            passed=not semantic_invalid,
+            passed=not semantic_recover,
             findings=semantic_findings,
             details=semantic_decision.model_dump(mode="json"),
         )
     )
-    if semantic_invalid:
+    if semantic_recover:
         outcome = ValidationOutcome(
-            disposition="reject",
+            disposition="recover",
             reason=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
             reason_code="semantic_validation_failed",
-            terminal_state=SupervisorTerminalState.failed_terminal.value,
+            recovery_action=semantic_decision.recommended_next_action or None,
         )
     elif contract_decision.decision == "await_approval":
         outcome = outcome_from_contract_decision(result.agent, contract_decision)
-    elif contract_decision.decision == "accept_with_limitations":
+    elif semantic_warning or contract_decision.decision == "accept_with_limitations":
         outcome = ValidationOutcome(
             disposition="accept_with_limitations",
-            reason=contract_decision.reason,
+            reason=semantic_decision.reason if semantic_warning else contract_decision.reason,
         )
     else:
         outcome = ValidationOutcome(disposition="accept", reason=contract_decision.reason)
@@ -315,6 +335,18 @@ def commit_candidate(
         streaks[result.agent] = dict(failure_streak)
         working["failure_streaks"] = streaks
 
+    limitation_messages = [
+        finding.message
+        for check in record.checks
+        for finding in check.findings
+        if finding.disposition == "limitation" and finding.message
+    ]
+    if limitation_messages:
+        working["limitations"] = _append_unique(
+            working.get("limitations", []),
+            *limitation_messages,
+        )
+
     if disposition == "await_approval" and not approval_granted:
         approval = {
             "approval_id": f"{working['current_run_id']}:{result.agent}:approval",
@@ -332,6 +364,16 @@ def commit_candidate(
             "next_action": "finalize",
             "final_answer": approval["reason"],
         }
+
+    if disposition == "recover":
+        return _commit_semantic_recovery(
+            working,
+            pending,
+            record,
+            result,
+            backend_adapter,
+            already_committed=already_committed,
+        )
 
     if disposition in {"retry", "reject"}:
         rejected = reject_pending_result(
@@ -378,6 +420,12 @@ def commit_candidate(
     if disposition not in {"accept", "accept_with_limitations", "await_approval"}:
         return _failure(working, f"지원하지 않는 validation disposition입니다: {disposition}")
 
+    if disposition == "accept_with_limitations":
+        working["limitations"] = _append_unique(
+            working.get("limitations", []),
+            record.outcome.reason,
+        )
+
     promoted = promote_pending_result(working, approval_granted=approval_granted)
     next_action = _next_action(result, record)
     promoted["next_action"] = next_action
@@ -417,6 +465,394 @@ def commit_candidate(
             },
         )
     return promoted
+
+
+def _commit_semantic_recovery(
+    state: SupervisorState,
+    pending: dict[str, Any],
+    record: ValidationRecord,
+    result: AgentCompactResult,
+    backend_adapter: Any | None,
+    *,
+    already_committed: bool,
+) -> SupervisorState:
+    """Semantic 실패 후보를 격리하고 실행 가능한 1회 복구를 예약한다."""
+    original_action = record.outcome.recovery_action
+    semantic_check = next((check for check in record.checks if check.name == "semantic"), None)
+    missing_evidence = list((semantic_check.details if semantic_check else {}).get("missing_evidence", []))
+    limitations = list(state.get("limitations", []))
+    if missing_evidence:
+        limitations = _append_unique(
+            limitations,
+            f"누락 근거: {', '.join(str(item) for item in missing_evidence)}",
+        )
+    limitations = _append_unique(
+        limitations,
+        record.outcome.reason,
+        f"{result.agent} 후보를 Semantic 검증 실패로 격리했습니다.",
+    )
+
+    metadata = {
+        "candidate_id": record.candidate_id,
+        "validation_id": record.validation_id,
+        "agent": result.agent,
+        "action": original_action or "",
+        "attempt": 0,
+    }
+    recovered = reject_pending_result(
+        {**state, "limitations": limitations},
+        record.outcome.reason,
+        metadata=metadata,
+        event_type="semantic_recovery.quarantined",
+    )
+    recovered["pending_validation"] = None
+    recovered["current_step"] = "commit_candidate"
+    recovered["terminal_state"] = "running"
+    if not already_committed:
+        _emit_event(
+            backend_adapter,
+            state,
+            "semantic_recovery.quarantined",
+            record.outcome.reason,
+            metadata=metadata,
+        )
+
+    attempts = dict(recovered.get("semantic_recovery_attempts", {}))
+    if result.agent == "report_agent" and int(attempts.get("report_agent", 0)) >= 1:
+        reason = "제한적 Report 후보가 Semantic 검증을 통과하지 못했습니다."
+        recovered["limitations"] = _append_unique(recovered.get("limitations", []), reason)
+        recovered = _append_recovery_event(
+            recovered,
+            backend_adapter,
+            "semantic_recovery.budget_exhausted",
+            reason,
+            {
+                **metadata,
+                "agent": "report_agent",
+                "action": "call_report_agent",
+                "attempt": int(attempts.get("report_agent", 0)),
+            },
+        )
+        return _finish_semantic_recovery(
+            recovered,
+            record,
+            original_action=original_action,
+            path=[original_action] if original_action else [],
+            actual_action=None,
+            fallback_reason=reason,
+            terminal_state=SupervisorTerminalState.failed_with_recoverable_context.value,
+        )
+
+    actual_action, path, correction_reasons, unsafe_reason = _resolve_recovery_action(
+        original_action,
+        recovered,
+    )
+    for reason in correction_reasons:
+        recovered["limitations"] = _append_unique(recovered.get("limitations", []), reason)
+    if len(path) > 1:
+        adjustment_metadata = {
+            **metadata,
+            "action": actual_action or "",
+            "path": path,
+            "attempt": 0,
+        }
+        recovered = _append_recovery_event(
+            recovered,
+            backend_adapter,
+            "semantic_recovery.precondition_adjusted",
+            "Semantic 복구 대상의 선행 조건을 보정했습니다.",
+            adjustment_metadata,
+        )
+
+    if actual_action is not None:
+        target = _AGENT_BY_ACTION[actual_action]
+        current_attempt = int(attempts.get(target, 0))
+        if current_attempt == 0:
+            attempts[target] = 1
+            recovered["semantic_recovery_attempts"] = attempts
+            recovered["next_action"] = actual_action
+            recovered["terminal_state"] = "running"
+            recovered = _record_recovery_audit(
+                recovered,
+                record,
+                original_action=original_action,
+                path=path,
+                actual_action=actual_action,
+                attempt_before=0,
+                attempt_after=1,
+                correction_reasons=correction_reasons,
+            )
+            return _append_recovery_event(
+                recovered,
+                backend_adapter,
+                "semantic_recovery.scheduled",
+                f"{target} Semantic 복구를 예약했습니다.",
+                {
+                    **metadata,
+                    "agent": target,
+                    "action": actual_action,
+                    "attempt": 1,
+                    "path": path,
+                },
+            )
+
+        budget_reason = f"{target} Semantic 복구 예산이 이미 소진되었습니다."
+        recovered["limitations"] = _append_unique(recovered.get("limitations", []), budget_reason)
+        recovered = _append_recovery_event(
+            recovered,
+            backend_adapter,
+            "semantic_recovery.budget_exhausted",
+            budget_reason,
+            {
+                **metadata,
+                "agent": target,
+                "action": actual_action,
+                "attempt": current_attempt,
+                "path": path,
+            },
+        )
+        unsafe_reason = budget_reason
+
+    fallback_reason = unsafe_reason or "실행 가능한 Semantic 복구 권고가 없습니다."
+    recovered["limitations"] = _append_unique(recovered.get("limitations", []), fallback_reason)
+    return _schedule_limited_report_or_finish(
+        recovered,
+        record,
+        backend_adapter,
+        original_action=original_action,
+        path=path,
+        fallback_reason=fallback_reason,
+        correction_reasons=correction_reasons,
+    )
+
+
+def _resolve_recovery_action(
+    action: NextAction | None,
+    state: SupervisorState,
+) -> tuple[NextAction | None, list[str], list[str], str]:
+    if action not in _AGENT_BY_ACTION:
+        reason = (
+            f"Semantic 복구 권고 {action!r}는 실행 대상 에이전트가 아닙니다."
+            if action
+            else "Semantic 복구 권고가 없습니다."
+        )
+        return None, [action] if action else [], [], reason
+
+    current = action
+    path: list[str] = []
+    reasons: list[str] = []
+    seen: set[str] = set()
+    while current in _AGENT_BY_ACTION:
+        if current in seen:
+            return None, path, reasons, "Semantic 복구 선행 조건 보정이 반복되었습니다."
+        seen.add(current)
+        path.append(current)
+        target = _AGENT_BY_ACTION[current]
+        decision = guard_agent_preconditions(target, state)
+        if decision.allowed:
+            return current, path, reasons, ""
+        reasons.append(decision.reason)
+        if decision.next_action not in _AGENT_BY_ACTION:
+            return None, path, reasons, "Semantic 복구 선행 조건을 안전하게 보정할 수 없습니다."
+        current = decision.next_action
+    return None, path, reasons, "Semantic 복구 권고를 실행 대상으로 변환할 수 없습니다."
+
+
+def _schedule_limited_report_or_finish(
+    state: SupervisorState,
+    record: ValidationRecord,
+    backend_adapter: Any | None,
+    *,
+    original_action: NextAction | None,
+    path: list[str],
+    fallback_reason: str,
+    correction_reasons: list[str],
+) -> SupervisorState:
+    attempts = dict(state.get("semantic_recovery_attempts", {}))
+    has_evidence = any(
+        bool(str(item.get("artifact_id") or "").strip())
+        for agent in ("sql_agent", "eda_agent", "analysis_agent")
+        for item in state.get("accepted_evidence", {}).get(agent, [])
+        if isinstance(item, dict)
+    )
+    if not has_evidence:
+        return _finish_semantic_recovery(
+            state,
+            record,
+            original_action=original_action,
+            path=path,
+            actual_action=None,
+            fallback_reason=fallback_reason,
+            terminal_state=SupervisorTerminalState.failed_terminal.value,
+            correction_reasons=correction_reasons,
+        )
+
+    report_attempt = int(attempts.get("report_agent", 0))
+    if report_attempt >= 1:
+        reason = "제한적 Report Semantic 복구 예산이 이미 소진되었습니다."
+        state["limitations"] = _append_unique(state.get("limitations", []), reason)
+        state = _append_recovery_event(
+            state,
+            backend_adapter,
+            "semantic_recovery.budget_exhausted",
+            reason,
+            {
+                "candidate_id": record.candidate_id,
+                "validation_id": record.validation_id,
+                "agent": "report_agent",
+                "action": "call_report_agent",
+                "attempt": report_attempt,
+            },
+        )
+        return _finish_semantic_recovery(
+            state,
+            record,
+            original_action=original_action,
+            path=path,
+            actual_action=None,
+            fallback_reason=reason,
+            terminal_state=SupervisorTerminalState.failed_with_recoverable_context.value,
+            correction_reasons=correction_reasons,
+        )
+
+    attempts["report_agent"] = 1
+    state["semantic_recovery_attempts"] = attempts
+    state["next_action"] = "call_report_agent"
+    state["terminal_state"] = "running"
+    state["limitations"] = _append_unique(
+        state.get("limitations", []),
+        "승인된 기존 근거만 사용해 제한적 Report fallback을 생성합니다.",
+    )
+    state = _record_recovery_audit(
+        state,
+        record,
+        original_action=original_action,
+        path=path,
+        actual_action="call_report_agent",
+        attempt_before=0,
+        attempt_after=1,
+        fallback_reason=fallback_reason,
+        correction_reasons=correction_reasons,
+    )
+    return _append_recovery_event(
+        state,
+        backend_adapter,
+        "semantic_recovery.limited_report",
+        "승인된 기존 근거로 제한적 Report를 예약했습니다.",
+        {
+            "candidate_id": record.candidate_id,
+            "validation_id": record.validation_id,
+            "agent": "report_agent",
+            "action": "call_report_agent",
+            "attempt": 1,
+            "fallback_reason": fallback_reason,
+        },
+    )
+
+
+def _finish_semantic_recovery(
+    state: SupervisorState,
+    record: ValidationRecord,
+    *,
+    original_action: NextAction | None,
+    path: list[str | None],
+    actual_action: NextAction | None,
+    fallback_reason: str,
+    terminal_state: str,
+    correction_reasons: list[str] | None = None,
+) -> SupervisorState:
+    finished = _record_recovery_audit(
+        state,
+        record,
+        original_action=original_action,
+        path=[item for item in path if item],
+        actual_action=actual_action,
+        attempt_before=None,
+        attempt_after=None,
+        fallback_reason=fallback_reason,
+        correction_reasons=correction_reasons,
+    )
+    finished["terminal_state"] = terminal_state
+    finished["next_action"] = "finalize"
+    finished["final_answer"] = fallback_reason
+    finished["error_state"] = {
+        "node": "commit_candidate",
+        "message": fallback_reason,
+        "retryable": False,
+    }
+    return finished
+
+
+def _record_recovery_audit(
+    state: SupervisorState,
+    record: ValidationRecord,
+    *,
+    original_action: NextAction | None,
+    path: list[str],
+    actual_action: NextAction | None,
+    attempt_before: int | None,
+    attempt_after: int | None,
+    fallback_reason: str = "",
+    correction_reasons: list[str] | None = None,
+) -> SupervisorState:
+    history = [dict(item) for item in state.get("validation_history", [])]
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        if (
+            item.get("candidate_id") != record.candidate_id
+            or item.get("validation_id") != record.validation_id
+        ):
+            continue
+        updated = dict(item)
+        outcome = dict(updated.get("outcome") or {})
+        outcome["recovery_action"] = actual_action
+        updated["outcome"] = outcome
+        checks = [dict(check) for check in updated.get("checks", [])]
+        semantic = next((check for check in checks if check.get("name") == "semantic"), None)
+        if semantic is not None:
+            details = dict(semantic.get("details") or {})
+            details.update(
+                {
+                    "original_recovery_action": original_action,
+                    "precondition_path": path,
+                    "recovery_action": actual_action,
+                    "budget": {
+                        "agent": _AGENT_BY_ACTION.get(actual_action or ""),
+                        "attempt_before": attempt_before,
+                        "attempt_after": attempt_after,
+                    },
+                    "precondition_reasons": list(correction_reasons or []),
+                    "fallback_reason": fallback_reason,
+                }
+            )
+            semantic["details"] = details
+        updated["checks"] = checks
+        history[index] = updated
+        break
+    state["validation_history"] = history
+    return state
+
+
+def _append_unique(values: list[str], *items: str) -> list[str]:
+    merged = [str(value) for value in values if value]
+    for item in items:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _append_recovery_event(
+    state: SupervisorState,
+    backend_adapter: Any | None,
+    event_type: str,
+    message: str,
+    metadata: dict[str, Any],
+) -> SupervisorState:
+    events = list(state.get("run_events", []))
+    events.append({"type": event_type, **metadata})
+    state["run_events"] = events
+    _emit_event(backend_adapter, state, event_type, message, metadata=metadata)
+    return state
 
 
 def _next_action(result: AgentCompactResult, record: ValidationRecord) -> NextAction:

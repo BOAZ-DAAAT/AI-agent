@@ -51,6 +51,17 @@ def test_validation_record_uses_single_internal_contract() -> None:
     assert "decision" not in payload
 
 
+def test_validation_outcome_supports_semantic_recovery_action() -> None:
+    outcome = ValidationOutcome(
+        disposition="recover",
+        reason="필수 근거가 누락되었습니다.",
+        recovery_action="call_sql_agent",
+    )
+
+    assert outcome.disposition == "recover"
+    assert outcome.recovery_action == "call_sql_agent"
+
+
 def test_contract_decision_is_converted_without_legacy_routing_fields() -> None:
     result = AgentCompactResult(
         agent="eda_agent",

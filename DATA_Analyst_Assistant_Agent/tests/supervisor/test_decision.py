@@ -31,6 +31,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     DECIDE_NEXT_ACTION_PROMPT,
     RESULT_VALIDATION_DECISION_PROMPT,
+    SEMANTIC_VALIDATION_ADVISORY_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
@@ -293,6 +294,30 @@ def test_decide_next_action_propagates_invalid_model_action() -> None:
 def test_llm_selectable_decisions_reject_internal_redecision_action(schema, payload) -> None:
     with pytest.raises(ValidationError):
         schema.model_validate(payload)
+
+
+def test_semantic_validation_rejects_create_plan_recommendation() -> None:
+    with pytest.raises(ValidationError):
+        SemanticValidationAdvisoryDecision.model_validate(
+            {
+                "semantic_valid": False,
+                "severity": "error",
+                "recommended_next_action": "create_plan",
+                "reason": "계획을 다시 만드세요.",
+            }
+        )
+
+
+def test_semantic_validation_prompt_describes_warning_recovery_policy() -> None:
+    recommendation_section = SEMANTIC_VALIDATION_ADVISORY_PROMPT.split(
+        "허용 recommended_next_action:",
+        maxsplit=1,
+    )[1].split("반드시 JSON 객체만 반환하세요.", maxsplit=1)[0]
+
+    assert "warning이고 missing_evidence가 없으면 semantic_valid=false여도" in (
+        SEMANTIC_VALIDATION_ADVISORY_PROMPT
+    )
+    assert "- create_plan" not in recommendation_section
 
 
 @pytest.mark.parametrize("schema", [ResultValidationDecision, StepSummaryDecision])
