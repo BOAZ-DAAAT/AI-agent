@@ -41,7 +41,7 @@ _GOOD_CODE = GeneratedAnalysisCode(
     code=(
         "total = int(df['revenue'].sum())\n"
         "result = {'summary': f'total revenue {total}', 'findings': [f'total revenue {total}'], "
-        "'statistics': {'total_revenue': total}, 'limitations': ['single run']}\n"
+        "'statistics': {'total_revenue': total}, 'method_decision': {'selected_method': 'sum', 'rationale': 'The objective requests total revenue.', 'assumptions_checked': [], 'fallbacks_considered': []}, 'limitations': ['single run']}\n"
     ),
 )
 
@@ -53,6 +53,7 @@ _HYPOTHESIS_CODE = GeneratedAnalysisCode(
         "  'summary': f'total revenue {total}',\n"
         "  'findings': [f'total revenue {total}'],\n"
         "  'statistics': {'total_revenue': total},\n"
+        "  'method_decision': {'selected_method': 'sum', 'rationale': 'The objective requests total revenue.', 'assumptions_checked': [], 'fallbacks_considered': []},\n"
         "  'hypothesis_tests': [{\n"
         "    'hypothesis': 'revenue is positive',\n"
         "    'test_name': 'one-sample descriptive check',\n"
@@ -69,8 +70,11 @@ _HYPOTHESIS_CODE = GeneratedAnalysisCode(
         "    'proposal': 'Use total revenue as the operational metric for the next analysis.',\n"
         "    'rationale': ['The metric is directly computed from the requested revenue column.'],\n"
         "    'evidence': {'total_revenue': total},\n"
-        "    'options': ['Use total revenue', 'Use average revenue'],\n"
-        "    'recommended_option': 'Use total revenue',\n"
+        "    'options': [\n"
+        "      {'id': 'total', 'label': 'Use total revenue', 'method': 'sum', 'assumptions': [], 'advantages': ['Measures overall scale.'], 'limitations': ['Favors larger groups.'], 'impact': 'Follow-up compares total revenue.', 'recommended': True},\n"
+        "      {'id': 'average', 'label': 'Use average revenue', 'method': 'mean', 'assumptions': [], 'advantages': ['Normalizes group size.'], 'limitations': ['Does not measure total scale.'], 'impact': 'Follow-up compares average revenue.', 'recommended': False}\n"
+        "    ],\n"
+        "    'recommended_option_id': 'total',\n"
         "    'impact_if_approved': 'Follow-up analysis will use total revenue.',\n"
         "    'requires_followup_analysis': True\n"
         "  },\n"
@@ -146,7 +150,7 @@ def test_graph_review_required_is_validated_result_with_hypothesis_tests() -> No
     assert parsed.human_review.required is True
     assert parsed.human_review.reason == "Use total revenue as the follow-up metric?"
     assert parsed.review_request is not None
-    assert parsed.review_request.recommended_option == "Use total revenue"
+    assert parsed.review_request.recommended_option_id == "total"
     assert parsed.evidence[0].status == "review_required"
     assert parsed.hypothesis_tests[0].decision == "supported"
     assert parsed.evidence_tables[0].title == "summary"

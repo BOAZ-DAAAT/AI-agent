@@ -22,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisKind,
     AnalysisResult,
     HumanReview,
+    MethodDecision,
     ReviewRequest,
 )
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
@@ -87,6 +88,7 @@ def build_result_from_outcome(
     limitations = [str(item) for item in (result_payload.get("limitations") or [])]
     method_notes = [str(item) for item in (result_payload.get("method_notes") or [])]
     review_request = _review_request_from_payload(result_payload.get("review_request"))
+    method_decision = _method_decision_from_payload(result_payload.get("method_decision"))
     if outcome.status == "failed":
         reason = outcome.critique.feedback if outcome.critique else "did not pass method review"
         limitations.append(f"Analysis did not pass method review after {outcome.attempts} attempts: {reason}")
@@ -137,6 +139,7 @@ def build_result_from_outcome(
         interpretation=[str(item) for item in (result_payload.get("interpretation") or [])],
         review_request=review_request,
         method_notes=list(dict.fromkeys(method_notes)),
+        method_decision=method_decision,
         intent=intent,
         generated_code=(outcome.code.code if outcome.code else ""),
         code_critique=outcome.critique,
@@ -154,9 +157,18 @@ def _review_request_from_payload(value: Any) -> ReviewRequest | None:
         return None
     if not request.question.strip() or not request.proposal.strip():
         return None
-    if not any(option.strip() for option in request.options):
+    if not any(option.id.strip() and option.label.strip() for option in request.options):
         return None
     return request
+
+
+def _method_decision_from_payload(value: Any) -> MethodDecision | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return MethodDecision.model_validate(value)
+    except Exception:
+        return None
 
 
 def _review_reason(

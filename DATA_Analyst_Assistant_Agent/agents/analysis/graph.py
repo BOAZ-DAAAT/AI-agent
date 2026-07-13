@@ -8,7 +8,7 @@ graph) attaches multimodal visual evidence when EDA charts are available.
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
@@ -27,7 +27,11 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.chart import (
     fetch_chart_artifacts,
     read_chart_artifacts,
 )
-from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext, AnalysisIntent
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
+    AnalysisIntent,
+    AnalysisSelectionResponse,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import LocalCheck, OrchestrationState
 
 
@@ -36,9 +40,11 @@ class AnalysisWorkflowState(TypedDict, total=False):
     dataframe: pd.DataFrame
     eda_profiles: list[dict[str, Any]]
     question_type: str | None
+    selection_response: AnalysisSelectionResponse | None
     classify_model: Any | None
     code_generator_model: Any | None
     critic_model: Any | None
+    progress_callback: Callable[[str, str, int], None] | None
     chart_artifact_loader: Any | None
     chart_reader: Any | None
     max_attempts: int
@@ -63,6 +69,7 @@ def classify_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             state["dataframe"],
             state.get("eda_profiles", []),
             question_type=state.get("question_type"),
+            selection_response=state.get("selection_response"),
         )
         intent = classify_intent(context, state["dataframe"], model=state.get("classify_model"))
         return {"analysis_context": context, "intent": intent, "error": "", "terminal_reason": ""}
@@ -79,6 +86,7 @@ def analyze_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             code_generator_model=state.get("code_generator_model"),
             critic_model=state.get("critic_model"),
             max_attempts=state.get("max_attempts", 3),
+            progress_callback=state.get("progress_callback"),
         )
         return {"outcome": outcome, "error": "", "terminal_reason": ""}
     except Exception as exc:  # noqa: BLE001
@@ -191,11 +199,13 @@ def run_analysis_workflow(
     eda_profiles: list[dict[str, Any]],
     *,
     question_type: str | None = None,
+    selection_response: AnalysisSelectionResponse | None = None,
     planner_model: Any | None = None,
     chart_artifact_loader: Any | None = None,
     chart_reader: Any | None = None,
     code_generator_model: Any | None = None,
     critic_model: Any | None = None,
+    progress_callback: Callable[[str, str, int], None] | None = None,
 ) -> tuple[dict[str, Any], list[LocalCheck], str]:
     """Run the analysis graph. `planner_model` maps to the classify step."""
 
@@ -204,9 +214,11 @@ def run_analysis_workflow(
         "dataframe": dataframe,
         "eda_profiles": eda_profiles,
         "question_type": question_type,
+        "selection_response": selection_response,
         "classify_model": planner_model,
         "code_generator_model": code_generator_model,
         "critic_model": critic_model,
+        "progress_callback": progress_callback,
         "chart_artifact_loader": chart_artifact_loader,
         "chart_reader": chart_reader,
         "max_attempts": state.max_retry_per_agent + 2,

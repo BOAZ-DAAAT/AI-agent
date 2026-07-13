@@ -47,7 +47,7 @@ _GOOD_CODE = GeneratedAnalysisCode(
     code=(
         "total = int(df['x'].sum())\n"
         "result = {'summary': f'sum={total}', 'findings': [f'sum={total}'], "
-        "'statistics': {'sum': total}, 'limitations': []}\n"
+        "'statistics': {'sum': total}, 'method_decision': {'selected_method': 'sum', 'rationale': 'The objective requests a total.', 'assumptions_checked': [], 'fallbacks_considered': []}, 'limitations': []}\n"
     ),
 )
 _REVIEW_CODE = GeneratedAnalysisCode(
@@ -58,6 +58,7 @@ _REVIEW_CODE = GeneratedAnalysisCode(
         "  'summary': f'sum={total}',\n"
         "  'findings': [f'sum={total}'],\n"
         "  'statistics': {'sum': total},\n"
+        "  'method_decision': {'selected_method': 'sum', 'rationale': 'The objective requests a total.', 'assumptions_checked': [], 'fallbacks_considered': []},\n"
         "  'limitations': [],\n"
         "  'review_request': {\n"
         "    'decision_type': 'metric_definition',\n"
@@ -65,8 +66,11 @@ _REVIEW_CODE = GeneratedAnalysisCode(
         "    'proposal': 'Use sum(x) as the operational metric.',\n"
         "    'rationale': ['The column is complete in this fixture.'],\n"
         "    'evidence': {'sum': total},\n"
-        "    'options': ['Use sum(x)', 'Use average x instead'],\n"
-        "    'recommended_option': 'Use sum(x)',\n"
+        "    'options': [\n"
+        "      {'id': 'sum', 'label': 'Use sum(x)', 'method': 'sum', 'assumptions': [], 'advantages': ['Measures total volume.'], 'limitations': ['Sensitive to scale.'], 'impact': 'Follow-up uses total volume.', 'recommended': True},\n"
+        "      {'id': 'mean', 'label': 'Use average x instead', 'method': 'mean', 'assumptions': [], 'advantages': ['Normalizes by observations.'], 'limitations': ['Does not measure total volume.'], 'impact': 'Follow-up uses average value.', 'recommended': False}\n"
+        "    ],\n"
+        "    'recommended_option_id': 'sum',\n"
         "    'impact_if_approved': 'Follow-up analysis will use sum(x).',\n"
         "    'requires_followup_analysis': True\n"
         "  }\n"
@@ -96,6 +100,28 @@ def test_critic_failure_reflects_then_passes() -> None:
     assert outcome.status == "passed"
     assert outcome.attempts == 2
     assert outcome.error_history[0]["stage"] == "critic"
+
+
+def test_progress_callback_reports_completed_stages() -> None:
+    events: list[tuple[str, str, int]] = []
+    outcome = run_analysis(
+        _intent(),
+        _context(),
+        _df(),
+        code_generator_model=_FakeModel([_GOOD_CODE]),
+        critic_model=_FakeModel([CodeCritique(verdict="pass")]),
+        progress_callback=lambda stage, status, attempt: events.append((stage, status, attempt)),
+    )
+
+    assert outcome.status == "passed"
+    assert events == [
+        ("generate", "started", 1),
+        ("generate", "completed", 1),
+        ("execute", "started", 1),
+        ("execute", "completed", 1),
+        ("critic", "started", 1),
+        ("critic", "completed", 1),
+    ]
 
 
 def test_review_required_preserves_result_without_retry() -> None:
@@ -140,17 +166,17 @@ def test_deterministic_precheck_reflects_before_critic() -> None:
     wrong_code = GeneratedAnalysisCode(
         rationale="wrong metric",
         code=(
-            "total = int(df['x'].sum())\n"
-            "result = {'summary': 'sum x', 'findings': ['sum x'], "
-            "'statistics': {'sum_x': total}, 'limitations': []}\n"
+                "total = int(df['x'].sum())\n"
+                "result = {'summary': 'sum x', 'findings': ['sum x'], "
+                "'statistics': {'sum_x': total}, 'method_decision': {'selected_method': 'sum', 'rationale': 'fixture', 'assumptions_checked': [], 'fallbacks_considered': []}, 'limitations': []}\n"
         ),
     )
     right_code = GeneratedAnalysisCode(
         rationale="right metric",
         code=(
-            "total = int(df['revenue'].sum())\n"
-            "result = {'summary': 'sum revenue', 'findings': ['sum revenue'], "
-            "'statistics': {'sum_revenue': total}, 'limitations': []}\n"
+                "total = int(df['revenue'].sum())\n"
+                "result = {'summary': 'sum revenue', 'findings': ['sum revenue'], "
+                "'statistics': {'sum_revenue': total}, 'method_decision': {'selected_method': 'sum', 'rationale': 'fixture', 'assumptions_checked': [], 'fallbacks_considered': []}, 'limitations': []}\n"
         ),
     )
     intent = AnalysisIntent(objective="sum revenue", metric_hints=["revenue"])
@@ -172,6 +198,36 @@ def test_deterministic_precheck_reflects_before_critic() -> None:
     assert outcome.error_history[0]["stage"] == "critic"
     assert "pre-check" in outcome.error_history[0]["error"]
     assert outcome.result["statistics"]["sum_revenue"] == 60
+
+
+def test_numeric_only_review_options_are_rejected_before_critic() -> None:
+    result = {
+        "summary": "ok",
+        "findings": ["ok"],
+        "statistics": {"n": 3},
+        "method_decision": {"selected_method": "summary", "rationale": "fixture"},
+        "limitations": [],
+        "review_request": {
+            "decision_type": "threshold",
+            "question": "Which threshold?",
+            "proposal": "Choose a threshold.",
+            "rationale": ["fixture"],
+            "evidence": {"n": 3},
+            "options": [
+                {"id": "30", "label": "30", "method": "threshold", "impact": "same", "recommended": True},
+                {"id": "50", "label": "50", "method": "threshold", "impact": "same", "recommended": False},
+            ],
+            "recommended_option_id": "30",
+            "impact_if_approved": "Apply selected threshold.",
+            "requires_followup_analysis": True,
+        },
+    }
+
+    critique = critic_module.deterministic_precheck(_intent(), _context(), _GOOD_CODE, result)
+
+    assert critique is not None
+    assert critique.verdict == "fail"
+    assert any("numeric thresholds" in issue for issue in critique.method_issues)
 
 
 def test_repeated_critic_failure_stops_early() -> None:

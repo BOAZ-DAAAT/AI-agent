@@ -54,7 +54,7 @@ _GOOD_CODE = GeneratedAnalysisCode(
         "by_cat = df.groupby('category')['revenue'].sum().sort_values(ascending=False)\n"
         "top = str(by_cat.index[0])\n"
         "result = {'summary': f'top category {top}', 'findings': [f'top category {top}'], "
-        "'statistics': {'top_category': top}, 'limitations': ['single run']}\n"
+        "'statistics': {'top_category': top}, 'method_decision': {'selected_method': 'grouped sum', 'rationale': 'The objective is to compare category revenue.', 'assumptions_checked': [], 'fallbacks_considered': []}, 'limitations': ['single run']}\n"
     ),
 )
 _REVIEW_CODE = GeneratedAnalysisCode(
@@ -66,6 +66,7 @@ _REVIEW_CODE = GeneratedAnalysisCode(
         "  'summary': f'top category {top}',\n"
         "  'findings': [f'top category {top}'],\n"
         "  'statistics': {'top_category': top},\n"
+        "  'method_decision': {'selected_method': 'grouped sum', 'rationale': 'The objective is to compare category revenue.', 'assumptions_checked': [], 'fallbacks_considered': []},\n"
         "  'evidence_tables': [{'title': 'category revenue', 'columns': ['category', 'revenue'], 'rows': [{'category': str(k), 'revenue': int(v)} for k, v in by_cat.items()]}],\n"
         "  'review_request': {\n"
         "    'decision_type': 'segment_definition',\n"
@@ -73,8 +74,11 @@ _REVIEW_CODE = GeneratedAnalysisCode(
         "    'proposal': 'Use the top revenue category as the segment for follow-up analysis.',\n"
         "    'rationale': ['The selected category has the highest observed revenue.'],\n"
         "    'evidence': {'top_category': top},\n"
-        "    'options': ['Use top revenue category', 'Compare all categories'],\n"
-        "    'recommended_option': 'Use top revenue category',\n"
+        "    'options': [\n"
+        "      {'id': 'top_only', 'label': 'Use top revenue category', 'method': 'top-category focus', 'assumptions': ['The largest category is the operational focus.'], 'advantages': ['Creates a focused follow-up.'], 'limitations': ['Excludes other categories.'], 'impact': 'Follow-up focuses on one category.', 'recommended': True},\n"
+        "      {'id': 'all_categories', 'label': 'Compare all categories', 'method': 'full comparison', 'assumptions': ['All categories remain relevant.'], 'advantages': ['Retains context.'], 'limitations': ['Less focused follow-up.'], 'impact': 'Follow-up compares every category.', 'recommended': False}\n"
+        "    ],\n"
+        "    'recommended_option_id': 'top_only',\n"
         "    'impact_if_approved': 'Follow-up analysis will focus on the selected segment.',\n"
         "    'requires_followup_analysis': True\n"
         "  },\n"
@@ -357,7 +361,7 @@ def test_agent_review_required_registers_public_and_debug_artifacts(adapter: Bac
     assert debug_payload["generated_code"]
     assert debug_payload["code_critique"]["verdict"] == "review_required"
     artifact = adapter.get_artifact(public_id)
-    assert artifact.preview["review_request"]["recommended_option"] == "Use top revenue category"
+    assert artifact.preview["review_request"]["recommended_option_id"] == "top_only"
     assert not parsed.key_findings[0].startswith("SQL result contains")
 
 
