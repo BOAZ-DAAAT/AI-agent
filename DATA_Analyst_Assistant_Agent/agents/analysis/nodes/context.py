@@ -34,12 +34,16 @@ def build_analysis_context(
 
     quality_statuses: list[str] = []
     issues: list[str] = []
+    candidate_insights: list[str] = []
+    candidate_hypotheses: list[str] = []
     for profile in eda_profiles:
         profile_block = profile.get("profile", profile)
         status = profile_block.get("quality_status")
         if status:
             quality_statuses.append(str(status))
         issues.extend(str(item) for item in profile_block.get("key_issues", []) or [])
+        candidate_insights.extend(_candidate_texts(profile.get("insight_result")))
+        candidate_hypotheses.extend(_candidate_texts(profile.get("hypotheses")))
         for caution in profile.get("cautions", []) or []:
             if isinstance(caution, dict) and caution.get("message_ko"):
                 issues.append(str(caution["message_ko"]))
@@ -81,6 +85,8 @@ def build_analysis_context(
         sample_rows=samples,
         eda_quality_statuses=quality_statuses,
         eda_key_issues=list(dict.fromkeys(issues)),
+        eda_candidate_insights=list(dict.fromkeys(candidate_insights)),
+        eda_candidate_hypotheses=list(dict.fromkeys(candidate_hypotheses)),
         known_data_quality_issues=known_data_quality_issues,
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
         last_failure=last_failure,
@@ -103,6 +109,62 @@ def _question_type_from_state(state: OrchestrationState) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _candidate_texts(value: Any, *, max_items: int = 12, max_chars: int = 500) -> list[str]:
+    """Normalize exploratory EDA text into bounded candidate hints."""
+
+    items: list[str] = []
+    _collect_candidate_texts(value, items)
+    normalized: list[str] = []
+    for item in items:
+        text = _clean_candidate_text(item, max_chars=max_chars)
+        if text:
+            normalized.append(text)
+        if len(normalized) >= max_items:
+            break
+    return normalized
+
+
+def _collect_candidate_texts(value: Any, items: list[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        for line in value.splitlines():
+            line = line.strip()
+            if line:
+                items.append(line)
+        return
+    if isinstance(value, dict):
+        preferred_keys = (
+            "hypothesis",
+            "insight",
+            "summary",
+            "finding",
+            "rationale",
+            "description",
+            "text",
+        )
+        found = False
+        for key in preferred_keys:
+            if key in value:
+                _collect_candidate_texts(value[key], items)
+                found = True
+        if not found:
+            for nested in value.values():
+                _collect_candidate_texts(nested, items)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            _collect_candidate_texts(nested, items)
+
+
+def _clean_candidate_text(text: str, *, max_chars: int) -> str:
+    cleaned = " ".join(str(text).split())
+    cleaned = cleaned.lstrip("-*0123456789. )\t")
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[: max_chars - 3].rstrip() + "..."
+    return cleaned
 
 
 def _column_profiles(dataframe: pd.DataFrame, numeric_columns: list[str]) -> dict[str, dict[str, Any]]:

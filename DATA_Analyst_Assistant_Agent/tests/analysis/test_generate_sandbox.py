@@ -152,6 +152,28 @@ def test_generate_prompt_includes_free_text_selection_as_a_binding_constraint() 
     assert "Compare medians, not totals." in model.messages[1].content
 
 
+def test_generate_prompt_exposes_eda_candidates_without_requiring_all_of_them() -> None:
+    context = AnalysisContext(
+        user_question="compare category revenue",
+        goal="compare category revenue",
+        route_kind="comprehensive",
+        columns=["category", "revenue"],
+        eda_candidate_insights=["Category B has higher observed revenue."],
+        eda_candidate_hypotheses=["Category B revenue is higher than category A."],
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="compare category revenue"), context, model=model)
+
+    system_prompt = model.messages[0].content
+    human_prompt = model.messages[1].content
+    assert "exploratory candidate hints" in system_prompt
+    assert "You may add new analysis hypotheses" in system_prompt
+    assert "EDA exploratory candidates" in human_prompt
+    assert "Category B revenue is higher than category A." in human_prompt
+    assert "Do not test or report every EDA candidate by default" in human_prompt
+
+
 def test_selection_response_requires_one_choice_or_free_text() -> None:
     with pytest.raises(ValueError):
         AnalysisSelectionResponse()

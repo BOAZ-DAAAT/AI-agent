@@ -74,6 +74,12 @@ Rules:
 - For heavy specialized methods, call the provided primitives instead of
   reimplementing them: {primitives}. Each takes keyword column arguments.
 - Choose the statistically valid method for the stated objective and domain.
+- Treat EDA insights and hypotheses as exploratory candidate hints, not as a
+  checklist. Select only candidates that directly support the analysis plan and
+  user question; ignore unrelated candidates without mentioning every omission.
+- You may add new analysis hypotheses when they are needed to answer the plan
+  and are supported by the available columns/data. Include them in
+  `hypothesis_tests` when tested.
 - When defining or evaluating a heuristic metric, proxy label, operational
   threshold, or segment (for example churn-risk groups), treat it as a
   hypothesis-driven analysis:
@@ -175,6 +181,14 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         f"Temporal: {context.temporal_columns}\n"
         f"Sample rows: {context.sample_rows}\n"
     )
+    if context.eda_candidate_insights or context.eda_candidate_hypotheses:
+        prompt += (
+            "\nEDA exploratory candidates (optional context; use only if relevant to the plan):\n"
+            f"Candidate insights: {context.eda_candidate_insights}\n"
+            f"Candidate hypotheses: {context.eda_candidate_hypotheses}\n"
+            "Do not test or report every EDA candidate by default. You may create additional "
+            "hypotheses if the analysis plan requires them.\n"
+        )
     if context.known_data_quality_issues:
         # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.
         joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)
