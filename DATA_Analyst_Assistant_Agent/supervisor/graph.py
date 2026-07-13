@@ -897,11 +897,18 @@ def _route_after_clarify(state: SupervisorState) -> str:
 def _route_after_decide(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") == "call_report_agent":
+
+    next_action = state.get("next_action")
+    if next_action == "call_report_agent":
         return "generate_report"
-    if state.get("next_action") in SUBAGENT_ACTION_TO_AGENT:
+    if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
-    return "completion_guard"
+    if next_action in {"finalize", "fail"}:
+        return "completion_guard"
+
+    raise ValueError(
+        f"decide_next_action 이후 지원하지 않는 next_action입니다: {next_action!r}"
+    )
 
 
 def _route_after_execute(state: SupervisorState) -> str:

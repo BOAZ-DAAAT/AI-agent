@@ -30,6 +30,23 @@ NextAction = Literal[
     "finalize",
     "fail",
 ]
+ExecutionNextAction = Literal[
+    "call_sql_agent",
+    "call_eda_agent",
+    "call_analysis_agent",
+    "call_report_agent",
+    "finalize",
+    "fail",
+]
+PostExecutionNextAction = Literal[
+    "decide_next_action",
+    "call_sql_agent",
+    "call_eda_agent",
+    "call_analysis_agent",
+    "call_report_agent",
+    "finalize",
+    "fail",
+]
 
 
 class ArtifactSummary(BaseModel):

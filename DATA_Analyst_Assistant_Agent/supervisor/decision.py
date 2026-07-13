@@ -10,7 +10,8 @@ from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilit
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentName,
-    NextAction,
+    ExecutionNextAction,
+    PostExecutionNextAction,
     SupervisorState,
     artifact_ids_by_agent,
     normalize_supervisor_state,
@@ -30,18 +31,8 @@ TerminalStateValue = Literal[
     "failed_with_recoverable_context",
     "failed_terminal",
 ]
-LLMSelectableNextAction = Literal[
-    "clarify",
-    "create_plan",
-    "call_sql_agent",
-    "call_eda_agent",
-    "call_analysis_agent",
-    "call_report_agent",
-    "finalize",
-    "fail",
-]
+LLMSelectableNextAction = ExecutionNextAction
 SemanticRecoveryRecommendation = Literal[
-    "clarify",
     "call_sql_agent",
     "call_eda_agent",
     "call_analysis_agent",
@@ -97,7 +88,7 @@ class StepSummaryDecision(BaseModel):
     action: str
     summary: str
     artifact_ids: list[str] = Field(default_factory=list)
-    next_action: NextAction | Literal[""] = ""
+    next_action: PostExecutionNextAction | Literal[""] = ""
     reason: str = ""
 
 
@@ -183,8 +174,6 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
             "available_next_actions": [
-                "clarify",
-                "create_plan",
                 "call_sql_agent",
                 "call_eda_agent",
                 "call_analysis_agent",

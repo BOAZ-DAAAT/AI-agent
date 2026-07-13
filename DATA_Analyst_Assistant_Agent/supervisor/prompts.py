@@ -69,8 +69,6 @@ agent_capabilities는 선택을 강제하지 않는 참고 정보입니다.
 선행 artifact가 없거나 avoid_when에 해당하면 다른 action을 고려하세요.
 
 허용되는 next_action:
-- clarify
-- create_plan
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -92,8 +90,6 @@ allowed=false인 경우 next_action은 필요한 대체 action, finalize, fail �
 하위 에이전트 실제 호출은 코드가 수행합니다.
 
 허용 next_action:
-- clarify
-- create_plan
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -120,8 +116,6 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 사용자 승인이 필요하면 terminal_state="needs_user_approval"과 next_action="finalize"를 사용하세요.
 
 허용 next_action:
-- clarify
-- create_plan
 - decide_next_action
 - call_sql_agent
 - call_eda_agent
@@ -167,7 +161,6 @@ recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확�
 - error
 
 허용 recommended_next_action:
-- clarify
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
@@ -195,8 +188,6 @@ STEP_SUMMARY_DECISION_PROMPT = """
 입력 JSON의 실행 결과와 검증 결과를 근거로 다음 노드가 사용할 간결한 단계 요약을 작성하세요.
 
 허용 next_action:
-- clarify
-- create_plan
 - decide_next_action
 - call_sql_agent
 - call_eda_agent

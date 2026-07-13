@@ -9,6 +9,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     AgentName,
     NextAction,
+    PostExecutionNextAction,
     SupervisorState,
     artifact_ids_by_agent,
 )
@@ -60,7 +61,7 @@ class GuardDecision(BaseModel):
 
 class ResultValidationDecision(BaseModel):
     valid: bool
-    next_action: NextAction
+    next_action: PostExecutionNextAction
     reason: str = ""
     decision: Literal["accept", "accept_with_limitations", "retry", "await_approval", "reject"] = "accept"
     terminal_state: str = "running"

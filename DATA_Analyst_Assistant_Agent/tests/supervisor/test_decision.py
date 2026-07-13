@@ -30,6 +30,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     DECIDE_NEXT_ACTION_PROMPT,
+    EXECUTION_GUARD_DECISION_PROMPT,
     RESULT_VALIDATION_DECISION_PROMPT,
     SEMANTIC_VALIDATION_ADVISORY_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
@@ -296,14 +297,26 @@ def test_llm_selectable_decisions_reject_internal_redecision_action(schema, payl
         schema.model_validate(payload)
 
 
-def test_semantic_validation_rejects_create_plan_recommendation() -> None:
+@pytest.mark.parametrize("next_action", ["clarify", "create_plan"])
+@pytest.mark.parametrize("schema", [SupervisorDecision, ExecutionGuardDecision])
+def test_execution_decisions_reject_initial_only_actions(schema, next_action: str) -> None:
+    payload = {"next_action": next_action}
+    if schema is ExecutionGuardDecision:
+        payload["allowed"] = False
+
+    with pytest.raises(ValidationError):
+        schema.model_validate(payload)
+
+
+@pytest.mark.parametrize("next_action", ["clarify", "create_plan"])
+def test_semantic_validation_rejects_initial_only_recommendation(next_action: str) -> None:
     with pytest.raises(ValidationError):
         SemanticValidationAdvisoryDecision.model_validate(
             {
                 "semantic_valid": False,
                 "severity": "error",
-                "recommended_next_action": "create_plan",
-                "reason": "계획을 다시 만드세요.",
+                "recommended_next_action": next_action,
+                "reason": "초기 전용 action은 권고할 수 없습니다.",
             }
         )
 
@@ -336,6 +349,24 @@ def test_internal_transition_decisions_allow_redecision_action(schema) -> None:
     decision = schema.model_validate(payload)
 
     assert decision.next_action == "decide_next_action"
+
+
+@pytest.mark.parametrize("next_action", ["clarify", "create_plan"])
+@pytest.mark.parametrize("schema", [ResultValidationDecision, StepSummaryDecision])
+def test_post_execution_decisions_reject_initial_only_actions(schema, next_action: str) -> None:
+    payload = (
+        {"valid": False, "next_action": next_action}
+        if schema is ResultValidationDecision
+        else {
+            "step": "validate_subagent_result",
+            "action": "call_sql_agent",
+            "summary": "SQL 완료",
+            "next_action": next_action,
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        schema.model_validate(payload)
 
 
 def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
@@ -381,8 +412,6 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     snapshot = json.loads(model.messages[1]["content"])
     assert snapshot["query"] == "월별 매출 추이를 분석해줘"
     assert snapshot["available_next_actions"] == [
-        "clarify",
-        "create_plan",
         "call_sql_agent",
         "call_eda_agent",
         "call_analysis_agent",
@@ -403,6 +432,21 @@ def test_prompts_expose_redecision_action_only_to_internal_transition_models() -
     assert "decide_next_action" not in DECIDE_NEXT_ACTION_PROMPT
     assert '"next_action":"decide_next_action"' in RESULT_VALIDATION_DECISION_PROMPT
     assert '"next_action":"decide_next_action"' in STEP_SUMMARY_DECISION_PROMPT
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        DECIDE_NEXT_ACTION_PROMPT,
+        EXECUTION_GUARD_DECISION_PROMPT,
+        RESULT_VALIDATION_DECISION_PROMPT,
+        SEMANTIC_VALIDATION_ADVISORY_PROMPT,
+        STEP_SUMMARY_DECISION_PROMPT,
+    ],
+)
+def test_post_initial_prompts_do_not_expose_initial_only_actions(prompt: str) -> None:
+    assert "- clarify" not in prompt
+    assert "- create_plan" not in prompt
 
 
 def test_invoke_supervisor_decision_requires_model() -> None:

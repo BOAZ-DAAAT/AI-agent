@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
+    _route_after_decide,
     _route_after_summarize,
     build_graph,
     make_create_analysis_plan_node,
@@ -259,6 +260,55 @@ def _agent_flow_decisions(
 @pytest.mark.parametrize(
     ("next_action", "expected_node"),
     [
+        ("call_sql_agent", "execute_subagent"),
+        ("call_eda_agent", "execute_subagent"),
+        ("call_analysis_agent", "execute_subagent"),
+        ("call_report_agent", "generate_report"),
+        ("finalize", "completion_guard"),
+        ("fail", "completion_guard"),
+    ],
+)
+def test_route_after_decide_maps_supported_action_explicitly(
+    next_action: str,
+    expected_node: str,
+) -> None:
+    state = _state()
+    state["next_action"] = next_action
+
+    assert _route_after_decide(state) == expected_node
+
+
+@pytest.mark.parametrize(
+    "next_action",
+    ["clarify", "create_plan", "decide_next_action", "unknown_action", None],
+)
+def test_route_after_decide_rejects_unsupported_action(next_action: str | None) -> None:
+    state = _state()
+    state["next_action"] = next_action
+
+    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
+        _route_after_decide(state)
+
+
+def test_route_after_decide_rejects_missing_action() -> None:
+    state = _state()
+    state.pop("next_action")
+
+    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
+        _route_after_decide(state)
+
+
+def test_route_after_decide_prioritizes_terminal_state() -> None:
+    state = _state()
+    state["terminal_state"] = "failed_terminal"
+    state["next_action"] = "unknown_action"
+
+    assert _route_after_decide(state) == "finalize"
+
+
+@pytest.mark.parametrize(
+    ("next_action", "expected_node"),
+    [
         ("decide_next_action", "decide_next_action"),
         ("call_sql_agent", "execute_subagent"),
         ("call_eda_agent", "execute_subagent"),
@@ -278,7 +328,7 @@ def test_route_after_summarize_maps_supported_action_explicitly(
     assert _route_after_summarize(state) == expected_node
 
 
-@pytest.mark.parametrize("next_action", ["create_plan", "unknown_action", None])
+@pytest.mark.parametrize("next_action", ["clarify", "create_plan", "unknown_action", None])
 def test_route_after_summarize_rejects_unsupported_action(next_action: str | None) -> None:
     state = _state()
     state["next_action"] = next_action
@@ -598,6 +648,22 @@ def test_decide_next_action_fail_sets_terminal_failure_immediately() -> None:
     assert result["terminal_state"] == "failed_terminal"
     assert result["next_action"] == "finalize"
     assert "fail" in result["final_answer"]
+
+
+@pytest.mark.parametrize("next_action", ["clarify", "create_plan"])
+def test_decide_next_action_rejects_initial_only_llm_response_as_decision_error(
+    next_action: str,
+) -> None:
+    node = make_decide_next_action_node(
+        SequencedDecisionModel([_next_action_decision(next_action)])
+    )
+
+    result = node(_state())
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["next_action"] == "finalize"
+    assert result["decision_errors"][0]["node"] == "decide_next_action"
+    assert "Supervisor LLM decision에 실패했습니다" in result["final_answer"]
 
 
 def test_build_graph_accepts_positional_subagent_adapter() -> None:
