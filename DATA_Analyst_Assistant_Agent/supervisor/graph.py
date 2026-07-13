@@ -656,7 +656,13 @@ def make_semantic_validate_subagent_result_node(model: Any | None, backend_adapt
         invalid = (
             not decision.semantic_valid
             or decision.severity == "error"
-            or bool(decision.missing_evidence)
+            # missing_evidence는 '실패 사유'가 아니라 'EDA/분석이 다음 단계에서 채워야 할
+            # 체크리스트'다. 이걸 hard-fail 조건에 넣으면 semantic_valid=true·severity=warning·
+            # recommended_next_action=call_eda_agent 인 정상 중간상태(SQL이 마트를 만들었지만
+            # 아직 세그먼트 해석 전)까지 reject되어, RFM 같은 comprehensive 질문이 EDA/분석에
+            # 도달하지 못하고 failed_terminal로 종료된다. 진짜 실패는 위의 semantic_valid=false
+            # 또는 severity=error가 잡으므로 missing_evidence만으로는 실패로 보지 않는다.
+            # or bool(decision.missing_evidence)
             or not _semantic_action_allowed(agent, decision.recommended_next_action)
         )
         if invalid:
