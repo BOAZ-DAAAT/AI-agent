@@ -51,6 +51,9 @@ Return the AnalysisIntent schema. Rules:
 - Do NOT set time_grain or time_span_days; those are computed deterministically.
 - requires_human_review + review_reason: set when the request implies causal
   interpretation, weak identification, or a materially ambiguous target.
+- EDA candidate insights/hypotheses are exploratory hints only. Use them to
+  clarify relevant focus when they match the user request; do not turn every
+  candidate into required analysis work.
 """
 
 

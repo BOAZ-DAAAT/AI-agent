@@ -83,3 +83,31 @@ def test_context_builder_copies_last_failure_and_classifier_serializes_it() -> N
     assert '"last_failure"' in human_message
     assert "method_review_failed" in human_message
     assert "wrong method" in human_message
+
+
+def test_context_builder_exposes_eda_candidates_as_optional_hints() -> None:
+    state = OrchestrationState(
+        run_id="run_eda_candidates",
+        user_query="category revenue analysis",
+    )
+    dataframe = pd.DataFrame({"category": ["A", "B"], "revenue": [10, 20]})
+    context = build_analysis_context(
+        state,
+        dataframe,
+        [{
+            "insight_result": "1. Category B has higher observed revenue.\n- Ignore unrelated seasonality.",
+            "hypotheses": [
+                {"hypothesis": "Category B revenue is higher than category A."},
+                "Weekend orders may differ from weekdays.",
+            ],
+        }],
+    )
+
+    assert context.eda_candidate_insights == [
+        "Category B has higher observed revenue.",
+        "Ignore unrelated seasonality.",
+    ]
+    assert context.eda_candidate_hypotheses == [
+        "Category B revenue is higher than category A.",
+        "Weekend orders may differ from weekdays.",
+    ]
