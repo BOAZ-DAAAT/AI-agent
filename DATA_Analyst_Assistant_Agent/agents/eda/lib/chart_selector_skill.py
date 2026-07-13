@@ -3,6 +3,7 @@ import json
 
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_guards import drop_degenerate_charts
 
 TOTAL_MAX = 8
 WEAK_CORR_THRESHOLD = 0.2  # |r| 이 이 값 미만인 변수쌍의 scatter 는 정보가 없어 제거
@@ -201,8 +202,13 @@ def run_chart_selector_skill(
     if not valid_paths:
         return [], {}
 
-    # ── 1.5단계: 약한 상관 scatter 결정론 제거 ──
+    # ── 1.5단계: 결정론 가드레일 (약한 상관 scatter + 퇴화 차트 제거) ──
+    # _drop_weak_scatters 는 scatter_* 만, drop_degenerate_charts 는 그 외(catdist/dist/bar/heatmap)만
+    # 건드려 대상이 겹치지 않는다. 순차 적용이라 이미 빠진 차트는 다음 가드가 보지 않음(중복 드롭 없음).
     valid_paths = _drop_weak_scatters(valid_paths, correlation_pairs)
+    valid_paths, _ = drop_degenerate_charts(valid_paths, stat)  # 명백 퇴화(상수·단일범주·평탄) 제거
+    if not valid_paths:
+        return [], {}   # 결정론 가드로 전부 걸러졌으면 LLM 호출 없이 종료
 
     name_to_path = {os.path.basename(p): p for p in valid_paths}
     filenames = list(name_to_path.keys())
