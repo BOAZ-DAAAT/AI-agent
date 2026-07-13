@@ -12,7 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_LLM_MODEL = "~openai/gpt-latest"
+DEFAULT_LLM_MODEL = "~openai/gpt-5"
 
 
 def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_LLM_MODEL) -> str:
