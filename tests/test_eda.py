@@ -272,17 +272,17 @@ def _ok_state(**over):
 
 
 def test_deterministic_fail_empty_insight_targets_insight():
-    target, _ = _deterministic_fail(_ok_state(insight_result="인사이트 생성 실패"))
+    target, _, _ = _deterministic_fail(_ok_state(insight_result="인사이트 생성 실패"))
     assert target == "insight"
 
 
 def test_deterministic_fail_no_analysis_targets_planner():
-    target, _ = _deterministic_fail(_ok_state(controller_log=[]))
+    target, _, _ = _deterministic_fail(_ok_state(controller_log=[]))
     assert target == "planner"
 
 
 def test_deterministic_fail_empty_metadata_targets_planner():
-    target, _ = _deterministic_fail(_ok_state(statistical_metadata={}))
+    target, _, _ = _deterministic_fail(_ok_state(statistical_metadata={}))
     assert target == "planner"
 
 

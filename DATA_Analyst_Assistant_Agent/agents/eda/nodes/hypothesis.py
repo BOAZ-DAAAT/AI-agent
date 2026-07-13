@@ -50,12 +50,18 @@ def hypothesis_node(state: EDAState) -> dict:
     from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import correct_hypothesis_feasibility
     hypotheses, _feas_fixes = correct_hypothesis_feasibility(get_context().df, hypotheses, data_level=data_level)
 
+    # 사후 재검증(LLM 아님): 이미 계산된 통계 숫자(correlation_pairs·clustering)로 가설 강도를
+    # 태그하고, 강한 순 재정렬 + 명백 무상관만 드롭(최소 1개 보존). 요약 전에 실행해 일관되게.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.hypothesis_screening import screen_hypotheses
+    hypotheses, hypothesis_signals = screen_hypotheses(hypotheses, state.get("statistical_metadata", {}) or {})
+
     summary_prompt = handoff_summary_prompt(state.get("insight_result", ""), hypotheses)
     final_summary, err2 = run_node_with_retry(
         lambda: llm.invoke(summary_prompt).content.strip(), "final_summary", fallback="요약 생성 실패"
     )
     return {
         "hypotheses": hypotheses,
+        "hypothesis_signals": hypothesis_signals,
         "final_summary": final_summary,
         "analysis_target": target,
         "error_log": append_errors(state, err1, err2),
