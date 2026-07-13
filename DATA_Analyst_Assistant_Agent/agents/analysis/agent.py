@@ -7,6 +7,7 @@ from data_agent_backend.models.artifacts import ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import first_dataframe, load_analysis_inputs, read_json_artifact
 from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisSelectionResponse
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
@@ -32,8 +33,10 @@ class AnalysisAgent:
         critic_model: Any | None = None,
         chart_artifact_loader: Any | None = None,
         chart_reader: Any | None = None,
+        selection_response: AnalysisSelectionResponse | None = None,
     ) -> AgentEnvelope:
         context = runtime.context(state, node_name=self.name, tool_name="analysis_agent.result")
+        _emit_progress(runtime, state, "workflow", "started", 0)
         parent_ids = state.artifact_ids.get("eda_agent", []) + state.artifact_ids.get("sql_agent", [])
         eda_profiles = []
         for artifact_id in state.artifact_ids.get("eda_agent", []):
@@ -45,17 +48,23 @@ class AnalysisAgent:
                 continue
             eda_profiles.append(payload)
         csvs = load_analysis_inputs(state, runtime)
+        _emit_progress(runtime, state, "inputs", "loaded", 0)
         result, local_checks, terminal_reason = run_analysis_workflow(
             state,
             first_dataframe(csvs),
             eda_profiles,
             question_type=question_type,
+            selection_response=selection_response,
             planner_model=planner_model,
             code_generator_model=code_generator_model,
             critic_model=critic_model,
             chart_artifact_loader=chart_artifact_loader,
             chart_reader=chart_reader,
+            progress_callback=lambda stage, status, attempt: _emit_progress(
+                runtime, state, stage, status, attempt
+            ),
         )
+        _emit_progress(runtime, state, "workflow", "completed", int(result.get("codegen_attempts") or 0))
         debug_payload = _debug_payload(result, terminal_reason)
         debug_ref = runtime.adapter.register_artifact(
             state.run_id,
@@ -159,6 +168,38 @@ def _analysis_failure_reason(result: dict[str, Any], terminal_reason: str) -> st
     return terminal_reason
 
 
+def _emit_progress(
+    runtime: AgentRuntime,
+    state: OrchestrationState,
+    stage: str,
+    status: str,
+    attempt: int,
+) -> None:
+    messages = {
+        ("workflow", "started"): "analysis_agent execution started",
+        ("inputs", "loaded"): "analysis input artifacts loaded",
+        ("generate", "started"): "analysis code generation started",
+        ("generate", "completed"): "analysis code generation completed",
+        ("execute", "started"): "generated analysis code execution started",
+        ("execute", "completed"): "generated analysis code execution completed",
+        ("critic", "started"): "analysis method review started",
+        ("critic", "completed"): "analysis method review completed",
+        ("workflow", "completed"): "analysis workflow completed",
+    }
+    message = messages.get((stage, status), f"analysis {stage}: {status}")
+    try:
+        runtime.adapter.append_run_event(
+            state.run_id,
+            "analysis.progress",
+            message,
+            node_name="analysis_agent",
+            metadata={"stage": stage, "status": status, "attempt": attempt},
+        )
+    except Exception:
+        # Telemetry is auxiliary. Do not fail a completed analysis when event storage is unavailable.
+        pass
+
+
 def _is_json_profile_artifact(runtime: AgentRuntime, artifact_id: str) -> bool:
     try:
         artifact = runtime.adapter.get_artifact(artifact_id)
@@ -192,6 +233,7 @@ def _debug_payload(result: dict[str, Any], terminal_reason: str) -> dict[str, An
         "hypothesis_tests": result.get("hypothesis_tests", []),
         "review_request": result.get("review_request"),
         "method_notes": result.get("method_notes", []),
+        "method_decision": result.get("method_decision"),
     }
 
 
@@ -220,6 +262,8 @@ def _review_request_preview(value: object) -> dict[str, Any] | None:
         "decision_type": value.get("decision_type", ""),
         "question": value.get("question", ""),
         "proposal": value.get("proposal", ""),
-        "recommended_option": value.get("recommended_option", ""),
+        "recommended_option_id": value.get("recommended_option_id", ""),
+        "options": value.get("options", []),
+        "allow_free_text": value.get("allow_free_text", False),
         "requires_followup_analysis": value.get("requires_followup_analysis", False),
     }

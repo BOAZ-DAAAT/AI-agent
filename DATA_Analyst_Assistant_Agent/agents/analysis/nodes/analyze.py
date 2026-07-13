@@ -15,7 +15,7 @@ silently shipping an unreviewed result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -57,6 +57,7 @@ def run_analysis(
     code_generator_model: Any | None = None,
     critic_model: Any | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    progress_callback: Callable[[str, str, int], None] | None = None,
 ) -> AnalysisOutcome:
     """Generate/execute/critique in a bounded reflect loop."""
 
@@ -68,14 +69,25 @@ def run_analysis(
     previous_failure_signature: tuple[str, str] | None = None
 
     for attempt in range(1, max_attempts + 1):
-        code = generate_analysis_code(
-            intent, context, model=code_generator_model, feedback=feedback
-        )
+        _notify_progress(progress_callback, "generate", "started", attempt)
+        try:
+            code = generate_analysis_code(
+                intent,
+                context,
+                model=code_generator_model,
+                feedback=feedback,
+            )
+        except Exception:
+            _notify_progress(progress_callback, "generate", "failed", attempt)
+            raise
+        _notify_progress(progress_callback, "generate", "completed", attempt)
         last_code = code
 
+        _notify_progress(progress_callback, "execute", "started", attempt)
         try:
             result = execute_generated_code(code, dataframe)
         except AnalysisCodeError as exc:
+            _notify_progress(progress_callback, "execute", "failed", attempt)
             feedback = f"The previous code failed to run: {exc}. Fix it and regenerate."
             error = str(exc)
             history.append({"stage": "execute", "code": code.code, "error": error})
@@ -92,12 +104,25 @@ def run_analysis(
                 )
             previous_failure_signature = signature
             continue
+        _notify_progress(progress_callback, "execute", "completed", attempt)
 
         critique = deterministic_precheck(intent, context, code, result)
         if critique is None:
-            critique = critique_analysis_code(
-                intent, code, result, context=context, model=critic_model
-            )
+            _notify_progress(progress_callback, "critic", "started", attempt)
+            try:
+                critique = critique_analysis_code(
+                    intent,
+                    code,
+                    result,
+                    context=context,
+                    model=critic_model,
+                )
+            except Exception:
+                _notify_progress(progress_callback, "critic", "failed", attempt)
+                raise
+            _notify_progress(progress_callback, "critic", "completed", attempt)
+        else:
+            _notify_progress(progress_callback, "critic", "skipped_precheck", attempt)
         last_result = result
         last_critique = critique
 
@@ -177,6 +202,21 @@ def run_analysis(
     )
 
 
+def _notify_progress(
+    callback: Callable[[str, str, int], None] | None,
+    stage: str,
+    status: str,
+    attempt: int,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(stage, status, attempt)
+    except Exception:
+        # Progress telemetry must never interfere with analysis execution.
+        return
+
+
 def _failure_signature(stage: str, error: str) -> tuple[str, str]:
     """Compact a failure so repeated unresolved problems can stop early."""
 
@@ -190,12 +230,15 @@ def _has_actionable_review_request(result: dict[str, Any]) -> bool:
     required_text = (
         request.get("question"),
         request.get("proposal"),
-        request.get("recommended_option"),
+        request.get("recommended_option_id"),
     )
     if not all(str(value or "").strip() for value in required_text):
         return False
     options = request.get("options")
-    return isinstance(options, list) and any(str(option or "").strip() for option in options)
+    return isinstance(options, list) and any(
+        isinstance(option, dict) and str(option.get("id") or "").strip()
+        for option in options
+    )
 
 
 def _append_method_note(result: dict[str, Any], note: str) -> None:

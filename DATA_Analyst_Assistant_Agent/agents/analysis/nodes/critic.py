@@ -20,6 +20,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisIntent,
     CodeCritique,
     GeneratedAnalysisCode,
+    ReviewRequest,
 )
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.coverage import build_answer_coverage
@@ -33,10 +34,8 @@ Return the CodeCritique schema.
 
 Return verdict="review_required" only when the computation is valid and useful
 AND the result includes a concrete review_request for a human analysis decision
-whose answer can change the next analysis path or definition. Examples: selecting
-a segment/group threshold, approving a proxy label, choosing an operational
-metric definition, selecting a cohort observation window, or choosing an
-exploratory substitute when prediction/causal analysis is not supported.
+with two or more valid, mutually exclusive paths whose assumptions or
+interpretation materially change the next analysis.
 
 Heuristic definitions, proxy labels, operational metrics, and rule-based
 segments are not failures by themselves. For those cases, expect hypothesis
@@ -62,6 +61,10 @@ Fail (verdict="fail") if any of these hold:
   without guarding.
 - A heuristic/proxy segmentation is evaluated only with descriptive shares while
   strong conclusions are stated, with no hypothesis tests or effect sizes.
+- A review_request is used for an automatic implementation choice, a list of
+  arbitrary numeric thresholds, or paths that do not meaningfully differ.
+- A review_request does not have at least two fully described options, exactly
+  one recommended option, evidence, and an explicit impact on follow-up work.
 
 Otherwise verdict="pass". Be strict but concrete: list each problem in
 method_issues, and put actionable fix instructions in feedback (used to
@@ -132,6 +135,16 @@ def deterministic_precheck(
     if not isinstance(statistics, dict) or not statistics:
         issues.append("result.statistics must contain computed values")
 
+    method_decision = result.get("method_decision")
+    if not isinstance(method_decision, dict):
+        issues.append("result.method_decision must explain the selected method")
+    else:
+        for key in ("selected_method", "rationale"):
+            if not str(method_decision.get(key) or "").strip():
+                issues.append(f"result.method_decision.{key} is empty")
+
+    issues.extend(_review_request_issues(result.get("review_request")))
+
     coverage = build_answer_coverage(intent, context, code, result)
     if coverage.coverage_status == "missing":
         issues.append(
@@ -151,3 +164,38 @@ def deterministic_precheck(
         + "; ".join(issues)
     )
     return CodeCritique(verdict="fail", method_issues=issues, feedback=feedback)
+
+
+def _review_request_issues(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        return ["review_request must be an object"]
+    try:
+        request = ReviewRequest.model_validate(value)
+    except Exception as exc:  # noqa: BLE001 - report a regenerable contract error
+        return [f"review_request does not match the structured decision contract: {exc}"]
+
+    issues: list[str] = []
+    if not request.question.strip() or not request.proposal.strip():
+        issues.append("review_request must include a question and proposal")
+    if len(request.options) < 2:
+        issues.append("review_request must provide at least two options")
+    option_ids = [option.id.strip() for option in request.options]
+    if not all(option_ids) or len(option_ids) != len(set(option_ids)):
+        issues.append("review_request option ids must be non-empty and unique")
+    if request.recommended_option_id not in option_ids:
+        issues.append("review_request recommended_option_id must reference an option")
+    recommended = [option for option in request.options if option.recommended]
+    if len(recommended) != 1 or (
+        recommended and recommended[0].id != request.recommended_option_id
+    ):
+        issues.append("review_request must have exactly one recommendation matching recommended_option_id")
+    if not request.evidence or not request.impact_if_approved.strip():
+        issues.append("review_request must include data evidence and follow-up impact")
+    signatures = {(option.method.strip(), option.impact.strip()) for option in request.options}
+    if len(signatures) < 2:
+        issues.append("review_request options must represent materially different analysis paths")
+    if all(option.label.strip().replace(".", "").isdigit() for option in request.options):
+        issues.append("review_request cannot be an arbitrary list of numeric thresholds")
+    return issues

@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AnalysisKind(str, Enum):
@@ -110,6 +110,7 @@ class AnalysisContext(BaseModel):
     known_data_quality_issues: list[str] = Field(default_factory=list)
     source_artifact_ids: list[str] = Field(default_factory=list)
     last_failure: dict[str, str] | None = None
+    selection_response: "AnalysisSelectionResponse | None" = None
 
 
 class AnalysisExecutionPlan(BaseModel):
@@ -160,16 +161,62 @@ class EvidenceTable(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class MethodDecision(BaseModel):
+    """Why the analysis selected one method rather than an alternative."""
+
+    selected_method: str
+    rationale: str
+    assumptions_checked: list[str] = Field(default_factory=list)
+    fallbacks_considered: list[str] = Field(default_factory=list)
+
+
+class ReviewOption(BaseModel):
+    """One actionable, mutually exclusive analysis path for human selection."""
+
+    id: str
+    label: str
+    method: str
+    assumptions: list[str] = Field(default_factory=list)
+    advantages: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    impact: str
+    recommended: bool = False
+
+
 class ReviewRequest(BaseModel):
     decision_type: str = ""
     question: str = ""
     proposal: str = ""
     rationale: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
-    options: list[str] = Field(default_factory=list)
-    recommended_option: str = ""
+    options: list[ReviewOption] = Field(default_factory=list)
+    recommended_option_id: str = ""
+    allow_free_text: bool = True
+    free_text_prompt: str = "Provide a different analysis constraint or preference."
     impact_if_approved: str = ""
     requires_followup_analysis: bool = False
+
+
+class AnalysisSelectionResponse(BaseModel):
+    """Future resume payload accepted by Analysis when a review request is answered."""
+
+    selected_option_id: str | None = None
+    free_text: str | None = None
+
+    @model_validator(mode="after")
+    def require_exactly_one_response(self) -> "AnalysisSelectionResponse":
+        has_option = bool((self.selected_option_id or "").strip())
+        has_free_text = bool((self.free_text or "").strip())
+        if has_option == has_free_text:
+            raise ValueError("provide exactly one of selected_option_id or free_text")
+        return self
+
+    def constraint_text(self) -> str:
+        if self.free_text and self.free_text.strip():
+            return self.free_text.strip()
+        if self.selected_option_id and self.selected_option_id.strip():
+            return f"Selected analysis option: {self.selected_option_id.strip()}"
+        return ""
 
 
 class VisualEvidence(BaseModel):
@@ -240,6 +287,7 @@ class AnalysisResult(BaseModel):
     evidence_tables: list[EvidenceTable] = Field(default_factory=list)
     interpretation: list[str] = Field(default_factory=list)
     review_request: ReviewRequest | None = None
+    method_decision: MethodDecision | None = None
     method_notes: list[str] = Field(default_factory=list)
     debug_artifact_id: str | None = None
 

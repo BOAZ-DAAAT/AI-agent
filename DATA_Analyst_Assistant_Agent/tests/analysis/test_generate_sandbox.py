@@ -8,9 +8,11 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     execute_generated_code,
     generate_analysis_code,
 )
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes import generate as generate_module
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisIntent,
+    AnalysisSelectionResponse,
     GeneratedAnalysisCode,
 )
 
@@ -65,6 +67,24 @@ def test_primitives_namespace_is_available() -> None:
     assert out["statistics"]["n"] >= 1
 
 
+def test_records_are_materialized_only_when_a_primitive_is_called(monkeypatch) -> None:
+    calls = 0
+
+    def fake_records(dataframe: pd.DataFrame):
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(generate_module, "_records_from_dataframe", fake_records)
+    code = _code(
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}"
+    )
+
+    execute_generated_code(code, _frame())
+
+    assert calls == 0
+
+
 def test_file_and_builtins_escape_are_blocked() -> None:
     with pytest.raises(AnalysisCodeError):
         execute_generated_code(_code("data = open('x.txt')\nresult = {}"), _frame())
@@ -114,3 +134,27 @@ def test_generate_prompt_keeps_supervisor_failure_separate_from_critic_feedback(
     assert "wrong method" in prompt
     assert "A previous attempt was rejected" in prompt
     assert "critic says aggregate first" in prompt
+
+
+def test_generate_prompt_includes_free_text_selection_as_a_binding_constraint() -> None:
+    context = AnalysisContext(
+        user_question="analyze revenue",
+        goal="analyze revenue",
+        route_kind="simple",
+        columns=["amount"],
+        selection_response=AnalysisSelectionResponse(free_text="Compare medians, not totals."),
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="analyze revenue"), context, model=model)
+
+    assert "binding constraint" in model.messages[1].content
+    assert "Compare medians, not totals." in model.messages[1].content
+
+
+def test_selection_response_requires_one_choice_or_free_text() -> None:
+    with pytest.raises(ValueError):
+        AnalysisSelectionResponse()
+    with pytest.raises(ValueError):
+        AnalysisSelectionResponse(selected_option_id="total", free_text="Use totals")
+    assert AnalysisSelectionResponse(selected_option_id="total").constraint_text().endswith("total")

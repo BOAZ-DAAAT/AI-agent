@@ -88,10 +88,19 @@ Rules:
     p-values alone.
   - if a threshold is central to the analysis, add sensitivity checks where
     feasible and store them in statistics.
-- Only create `review_request` when a human answer can change the next analysis
-  path or definition. Examples: choosing a segment threshold, approving a proxy
-  label, selecting a cohort observation window, or choosing an exploratory
-  substitute when prediction/causal analysis is not supported by the data.
+- Always include `method_decision` in result with selected_method, rationale,
+  assumptions_checked, and fallbacks_considered. Choose a method automatically
+  whenever the observed data and objective establish a defensible preference.
+- Create `review_request` only when at least two mutually exclusive analysis
+  paths are each valid for this data and their different assumptions or
+  interpretations would materially change the next analysis. Do not ask merely
+  because a parameter has multiple possible values.
+- A `review_request` contains decision_type, question, proposal, rationale
+  (list of strings), evidence, options, recommended_option_id, allow_free_text,
+  free_text_prompt, impact_if_approved, and requires_followup_analysis. Each
+  option contains a stable id, label, method, assumptions, advantages,
+  limitations, impact, and recommended. Provide at least two options and
+  exactly one recommended option.
 - Do NOT create `review_request` for facts the user cannot fix by choosing an
   option, such as small sample size, group imbalance, missing values, skewed
   distributions, lack of validation set, lack of true label, short observation
@@ -104,9 +113,9 @@ Rules:
   str), statistics (dict of computed numbers), limitations (list of str).
   Optional but preferred keys: hypothesis_tests, evidence_tables, interpretation,
   method_notes, review_request.
-- If included, `review_request` must be a dict with:
-  decision_type, question, proposal, rationale, evidence, options,
-  recommended_option, impact_if_approved, requires_followup_analysis.
+- When a previous selection response is supplied, treat it as a binding
+  constraint for this analysis. A free-text response is a new analysis
+  constraint, not a note to append to the report.
 - Phrase unsupported or weak tests as inconclusive. Never claim prediction,
   causality, or true churn labels unless those were directly measured and tested.
 - Do not read/write files, print, or mutate global state.
@@ -126,13 +135,22 @@ def _safe_builtins() -> dict[str, Any]:
     return allowed
 
 
-def _primitives(records: list[dict[str, Any]]) -> dict[str, Callable[..., Any]]:
+def _records_from_dataframe(dataframe: pd.DataFrame) -> list[dict[str, Any]]:
+    return dataframe.where(pd.notna(dataframe), None).to_dict(orient="records")
+
+
+def _primitives(dataframe: pd.DataFrame) -> dict[str, Callable[..., Any]]:
     """Expose vetted tools as df-free callables bound to this run's records."""
+
+    records: list[dict[str, Any]] | None = None
 
     def _bind(tool_name: str) -> Callable[..., Any]:
         tool = ANALYSIS_TOOLS[tool_name]
 
         def _call(**kwargs: Any) -> Any:
+            nonlocal records
+            if records is None:
+                records = _records_from_dataframe(dataframe)
             return tool.invoke({"records": records, **kwargs})
 
         _call.__name__ = tool_name
@@ -170,6 +188,13 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
             "\nPrevious Supervisor failure:\n"
             f"{json.dumps(context.last_failure, ensure_ascii=False, sort_keys=True)}\n"
         )
+    if context.selection_response is not None:
+        constraint = context.selection_response.constraint_text()
+        if constraint:
+            prompt += (
+                "\nUser response to an earlier analysis decision (binding constraint):\n"
+                f"{constraint}\n"
+            )
     return prompt
 
 
@@ -206,13 +231,12 @@ def execute_generated_code(
     import math
     import numpy as np
 
-    records = dataframe.where(pd.notna(dataframe), None).to_dict(orient="records")
     globals_dict: dict[str, Any] = {
         "__builtins__": _safe_builtins(),
         "pd": pd,
         "np": np,
         "math": math,
-        "primitives": _primitives(records),
+        "primitives": _primitives(dataframe),
         "df": dataframe.copy(),
         "result": None,
     }
