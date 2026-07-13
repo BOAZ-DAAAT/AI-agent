@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.agent_runs.routes import router as agent_runs_router
 from backend.auth.deps import get_current_user
 from backend.auth.routes import router as auth_router
 from backend.mysql.routes import router as mysql_router
 from backend.storage.routes import router as storage_router
 from backend.session.routes import router as session_router
 from data_agent_backend.api.routes_integrity import router as integrity_router
+from data_agent_backend.services.factory import BackendServices
 from data_agent_backend.services.factory import create_backend_services
 
 
@@ -39,9 +41,9 @@ async def _lifespan(app: FastAPI):
                 pass
 
 
-def create_app() -> FastAPI:
+def create_app(services: BackendServices | None = None) -> FastAPI:
     app = FastAPI(title="DAAAT Backend API", lifespan=_lifespan)
-    app.state.services = create_backend_services()
+    app.state.services = services or create_backend_services()
     app.state.integrity_worker_task = None
 
     origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
@@ -62,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(mysql_router, dependencies=[Depends(get_current_user)])
     app.include_router(storage_router, dependencies=[Depends(get_current_user)])
     app.include_router(session_router)
+    app.include_router(agent_runs_router)
     app.include_router(integrity_router)
 
     return app
