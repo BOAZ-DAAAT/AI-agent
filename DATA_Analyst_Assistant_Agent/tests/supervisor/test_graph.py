@@ -16,9 +16,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     make_execute_subagent_node,
     make_finalize_node,
     make_resolve_candidate_node,
-    make_semantic_validate_subagent_result_node,
-    make_summarize_step_node,
-    make_validate_subagent_result_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -151,6 +148,11 @@ class RecordingBackendAdapter:
         )
 
 
+class ForbiddenArtifactBackend(RecordingBackendAdapter):
+    def get_artifact(self, _artifact_id: str) -> dict[str, Any]:
+        raise AssertionError("후보 검증에서 backend 아티팩트를 조회하면 안 됩니다.")
+
+
 def _clarify_decision(
     *,
     needs_clarification: bool = False,
@@ -240,7 +242,6 @@ def _agent_flow_decisions(
         summary_next_actions,
         strict=True,
     ):
-        agent = action.replace("call_", "")
         if action == "call_report_agent":
             decisions.append(_next_action_decision(action))
             decisions.append(_semantic_decision())
@@ -248,9 +249,7 @@ def _agent_flow_decisions(
         decisions.extend(
             [
                 _next_action_decision(action),
-                _guard_decision(action),
                 _semantic_decision(),
-                _summary_decision(agent, next_action=summary_next_action),
             ]
         )
     decisions.append(_final_decision(final_terminal_state, final_answer))
@@ -329,22 +328,124 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
         "clarify_query",
         "create_analysis_plan",
         "decide_next_action",
-        "execute_subagent",
-        "semantic_validate_subagent_result",
-        "summarize_step",
+        "validate_candidate",
         "decide_next_action",
-        "execute_subagent",
-        "semantic_validate_subagent_result",
-        "summarize_step",
+        "validate_candidate",
         "decide_next_action",
-        "execute_subagent",
-        "semantic_validate_subagent_result",
-            "summarize_step",
-            "decide_next_action",
-            "semantic_validate_subagent_result",
-            "finalize",
+        "validate_candidate",
+        "decide_next_action",
+        "validate_candidate",
+        "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
+
+
+def test_semantic_recovery_routes_analysis_candidate_to_sql_then_report() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(
+                semantic_valid=False,
+                severity="error",
+                recommended_next_action="call_sql_agent",
+            ),
+            _semantic_decision(recommended_next_action="call_report_agent"),
+            _semantic_decision(),
+            _final_decision("completed", "복구된 근거로 리포트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        report_generator=adapter,
+        model=model,
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_semantic_recovery"}})
+
+    assert adapter.calls == ["analysis_agent", "sql_agent"]
+    assert adapter.report_calls == 1
+    assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
+    assert result["completed_agents"] == ["sql_agent", "report_agent"]
+    assert result["failed_agents"] == []
+    assert result["accepted_evidence"].keys() == {"sql_agent", "report_agent"}
+    assert len(result["rejected_results"]) == 1
+    assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["terminal_state"] == "completed"
+
+
+def test_semantic_recovery_without_recommendation_generates_limited_report_from_accepted_evidence() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_sql_agent"),
+            _semantic_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(semantic_valid=False, severity="error"),
+            _semantic_decision(),
+            _final_decision("completed", "제한적 리포트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        report_generator=adapter,
+        model=model,
+    )
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_limited_report"}})
+
+    assert adapter.calls == ["sql_agent", "analysis_agent"]
+    assert adapter.report_calls == 1
+    assert result["semantic_recovery_attempts"] == {"report_agent": 1}
+    assert result["completed_agents"] == ["sql_agent", "report_agent"]
+    assert "analysis_agent" not in result["accepted_evidence"]
+    assert any("제한적 Report" in item for item in result["limitations"])
+    assert any(
+        event["type"] == "semantic_recovery.limited_report"
+        for event in result["run_events"]
+    )
+    assert result["terminal_state"] == "completed"
+
+
+def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation() -> None:
+    backend = ForbiddenArtifactBackend()
+    adapter = FakeSubAgentAdapter()
+    adapter.backend_adapter = backend
+    model = SequencedDecisionModel(
+        _agent_flow_decisions(
+            ["call_analysis_agent", "call_report_agent"],
+            summary_next_actions=["decide_next_action", "finalize"],
+        )
+    )
+    graph = build_graph(subagent_adapter=adapter, model=model)
+
+    result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_no_artifact_read"}})
+
+    assert result["terminal_state"] == "completed"
+    assert result["completed_agents"] == ["analysis_agent", "report_agent"]
+    assert any(event["event_type"] == "evidence.promoted" for event in backend.events)
+
+
+def test_supervisor_graph_has_exactly_ten_nodes() -> None:
+    graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel([]))
+
+    assert set(graph.nodes) == {
+        "__start__",
+        "clarify_query",
+        "collect_clarification",
+        "create_analysis_plan",
+        "decide_next_action",
+        "execute_subagent",
+        "generate_report",
+        "validate_candidate",
+        "commit_candidate",
+        "completion_guard",
+        "finalize",
+    }
 
 
 def test_finalize_request_after_sql_forces_report_generation_before_completion() -> None:
@@ -354,9 +455,7 @@ def test_finalize_request_after_sql_forces_report_generation_before_completion()
             _clarify_decision(),
             _plan_decision(),
             _next_action_decision("call_sql_agent"),
-            _guard_decision("call_sql_agent"),
             _semantic_decision(),
-            _summary_decision("sql_agent", next_action="decide_next_action"),
             _next_action_decision("finalize"),
             _semantic_decision(),
             _final_decision("completed", "최종 리포트가 완료되었습니다."),
@@ -596,9 +695,7 @@ def test_finalize_llm_can_fail_without_report_evidence() -> None:
                 _clarify_decision(),
                 _plan_decision(),
                 _next_action_decision("call_sql_agent"),
-                _guard_decision("call_sql_agent"),
                 _semantic_decision(),
-                _summary_decision("sql_agent", next_action="decide_next_action"),
                 _next_action_decision("finalize"),
                 _semantic_decision(),
                 _final_decision("failed_terminal", "리포트 근거가 부족합니다."),
@@ -622,20 +719,13 @@ def test_plan_node_records_llm_planner_mode() -> None:
     assert result["llm_decisions"][0]["node"] == "create_analysis_plan"
 
 
-def test_execute_guard_blocks_eda_and_redirects_to_sql() -> None:
+def test_execute_subagent_runs_only_the_registered_action() -> None:
     adapter = FakeSubAgentAdapter()
     decisions = [
         _clarify_decision(),
         _plan_decision(),
         _next_action_decision("call_eda_agent"),
-        _guard_decision("call_sql_agent", allowed=False),
-        _guard_decision("call_sql_agent"),
         _semantic_decision(),
-        _summary_decision("sql_agent", next_action="decide_next_action"),
-        _next_action_decision("call_eda_agent"),
-        _guard_decision("call_eda_agent"),
-        _semantic_decision(),
-        _summary_decision("eda_agent", next_action="decide_next_action"),
         _next_action_decision("finalize"),
         _semantic_decision(),
         _final_decision(),
@@ -644,24 +734,24 @@ def test_execute_guard_blocks_eda_and_redirects_to_sql() -> None:
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
-    assert adapter.calls == ["sql_agent", "eda_agent"]
-    assert result["completed_agents"] == ["sql_agent", "eda_agent", "report_agent"]
+    assert adapter.calls == ["eda_agent"]
+    assert result["completed_agents"] == ["eda_agent", "report_agent"]
     assert result["terminal_state"] == "completed"
 
 
-def test_execute_guard_unsupported_redirect_fails_terminally() -> None:
+def test_execute_subagent_unsupported_action_fails_terminally() -> None:
     state = _state()
-    state["next_action"] = "call_eda_agent"
+    state["next_action"] = "create_plan"
     node = make_execute_subagent_node(
         FakeSubAgentAdapter(),
-        SequencedDecisionModel([_guard_decision("create_plan", allowed=False)]),
+        None,
     )
 
     result = node(state)
 
     assert result["terminal_state"] == "failed_terminal"
     assert result["next_action"] == "finalize"
-    assert "지원하지 않는 대체 action" in result["final_answer"]
+    assert "지원하지 않는 subagent action" in result["final_answer"]
 
 
 def test_execute_subagent_contract_mismatch_becomes_non_retryable_terminal_failure() -> None:
@@ -687,17 +777,16 @@ def test_execute_subagent_contract_mismatch_becomes_non_retryable_terminal_failu
 
     result = node(state)
 
-    assert adapter.calls == ["sql_agent"]
+    assert adapter.calls == []
     assert result["terminal_state"] == "failed_terminal"
     assert result["next_action"] == "finalize"
     assert result["current_step"] == "execute_subagent"
-    assert result["pending_result"] is None
-    assert result["last_agent_result"] == {}
-    assert result["failed_agents"] == ["eda_agent", "sql_agent"]
-    assert result["completed_agents"] == ["analysis_agent"]
-    assert result["accepted_evidence"] == accepted_evidence
-    assert result["error_state"]["reason_code"] == "agent_contract_mismatch"
-    assert result["error_state"]["retryable"] is False
+    assert "pending_result" not in result
+    assert "last_agent_result" not in result
+    assert "failed_agents" not in result
+    assert "completed_agents" not in result
+    assert "accepted_evidence" not in result
+    assert "pending_result" in result["error_state"]["message"]
 
 
 def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> None:
@@ -735,13 +824,9 @@ def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> 
                 _clarify_decision(),
                 _plan_decision(),
                 _next_action_decision("call_sql_agent"),
-                _guard_decision("call_sql_agent"),
                 _semantic_decision(),
-                _summary_decision("sql_agent", next_action="decide_next_action"),
                 _next_action_decision("call_eda_agent"),
-                _guard_decision("call_eda_agent"),
                 _semantic_decision(),
-                _summary_decision("eda_agent", next_action="decide_next_action"),
                 _next_action_decision("finalize"),
                 _semantic_decision(),
                 _final_decision(),
@@ -902,11 +987,7 @@ def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_
         _clarify_decision(),
         _plan_decision(),
         _next_action_decision("call_sql_agent"),
-        _guard_decision("call_sql_agent"),
-        _summary_decision("sql_agent", next_action="call_sql_agent"),
-        _guard_decision("call_sql_agent"),
         _semantic_decision(),
-        _summary_decision("sql_agent", next_action="decide_next_action"),
         _next_action_decision("finalize"),
         _semantic_decision(),
         _final_decision(),
@@ -975,113 +1056,6 @@ def test_repeated_analysis_failure_stops_after_second_call_with_recoverable_cont
         "analysis_agent 실패 [method_review_failed]: wrong method (repeated_failure=true)"
     )
     assert "analysis_agent" not in result["completed_agents"]
-
-
-def test_validate_node_records_failure_streak_and_shared_rejection_metadata() -> None:
-    backend = RecordingBackendAdapter()
-    result = AgentCompactResult(
-        agent="analysis_agent",
-        status="failed",
-        summary="분석 실패",
-        retry_hint=RetryHint(
-            retryable=True,
-            reason_code="method_review_failed",
-            details={"failure_reason": "wrong method"},
-        ),
-    )
-    state = stage_candidate_result(_state(), result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None, backend)(state)
-
-    expected_metadata = {
-        "agent": "analysis_agent",
-        "reason_code": "method_review_failed",
-        "failure_reason": "wrong method",
-        "repeated_failure": False,
-    }
-    assert updates["failure_streaks"]["analysis_agent"]["consecutive_count"] == 1
-    assert updates["validation_results"][-1] | expected_metadata == updates["validation_results"][-1]
-    internal_event = updates["run_events"][-1]
-    assert internal_event["type"] == "validation.rejected"
-    assert internal_event | expected_metadata == internal_event
-    assert backend.events[-1]["event_type"] == "validation.rejected"
-    assert backend.events[-1]["metadata"] | expected_metadata == backend.events[-1]["metadata"]
-
-
-@pytest.mark.parametrize(
-    ("agent", "has_sql_context", "expected_terminal"),
-    [
-        ("analysis_agent", True, "failed_with_recoverable_context"),
-        ("analysis_agent", False, "failed_terminal"),
-        ("sql_agent", True, "failed_terminal"),
-        ("eda_agent", True, "failed_terminal"),
-        ("report_agent", True, "failed_terminal"),
-    ],
-)
-def test_validate_node_honors_repeated_failure_terminal_policy(
-    agent: str,
-    has_sql_context: bool,
-    expected_terminal: str,
-) -> None:
-    state = _state()
-    if has_sql_context:
-        state = merge_agent_result(
-            state,
-            AgentCompactResult(
-                agent="sql_agent",
-                status="success",
-                summary="SQL 완료",
-                artifact_ids=["artifact_sql"],
-            ),
-        )
-    state["failure_streaks"] = {
-        agent: {
-            "reason_code": "method_review_failed",
-            "failure_reason": "wrong method",
-            "signature": '["method_review_failed", "wrong method"]',
-            "consecutive_count": 1,
-        }
-    }
-    result = AgentCompactResult(
-        agent=agent,
-        status="failed",
-        summary="실패",
-        retry_hint=RetryHint(
-            retryable=True,
-            reason_code="method_review_failed",
-            details={"failure_reason": "wrong method"},
-        ),
-    )
-    state = stage_candidate_result(state, result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None)(state)
-
-    assert updates["terminal_state"] == expected_terminal
-    assert updates["next_action"] == "finalize"
-    assert updates["validation_results"][-1]["repeated_failure"] is True
-    assert updates["final_answer"] == (
-        f"{agent} 실패 [method_review_failed]: wrong method (repeated_failure=true)"
-    )
-
-
-def test_failed_result_with_required_approval_is_rejected_not_awaited() -> None:
-    result = AgentCompactResult(
-        agent="analysis_agent",
-        status="failed",
-        summary="분석 실패",
-        retryable=False,
-        approval=ApprovalRequirement(required=True, reason="승인 필요"),
-    )
-    state = stage_candidate_result(_state(), result)
-    state["last_agent_result"] = result.model_dump(mode="json")
-
-    updates = make_validate_subagent_result_node(None)(state)
-
-    assert updates["validation_results"][-1]["decision"] == "reject"
-    assert updates["terminal_state"] == "failed_terminal"
-    assert updates.get("pending_approval") is None
 
 
 def test_resolve_candidate_uses_only_approval_required_flag() -> None:
@@ -1165,17 +1139,6 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
     assert result["pending_result"]["state_updates"]["analysis_plan"]["route_kind"] == "updated"
 
 
-def test_validate_subagent_result_node_handles_corrupt_last_agent_result_as_terminal_failure() -> None:
-    state = _state()
-    state["last_agent_result"] = {"agent": "sql_agent"}
-
-    result = make_validate_subagent_result_node(SequencedDecisionModel([]))(state)
-
-    assert result["terminal_state"] == "failed_terminal"
-    assert result["next_action"] == "finalize"
-    assert result["final_answer"] == "에이전트 실행 결과 형식이 올바르지 않습니다."
-
-
 def test_report_success_without_artifact_fails_terminally_without_validation_llm() -> None:
     adapter = FakeSubAgentAdapter(
         {
@@ -1221,95 +1184,6 @@ def test_report_success_without_artifact_fails_terminally_without_validation_llm
     assert len(model.messages) == len(result["llm_decisions"])
 
 
-def test_semantic_validation_invalid_result_blocks_candidate() -> None:
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql"],
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": True,
-            "next_action": "decide_next_action",
-            "terminal_state": "running",
-            "reason": "hard validation 통과",
-        }
-    ]
-    state["next_action"] = "decide_next_action"
-    model = SequencedDecisionModel(
-        [_semantic_decision(semantic_valid=False, severity="warning", recommended_next_action="call_sql_agent")]
-    )
-    node = make_semantic_validate_subagent_result_node(model)
-
-    result = node(state)
-
-    assert result["next_action"] == "finalize"
-    assert result["terminal_state"] == "failed_terminal"
-    assert result["semantic_validation_results"][0]["recommended_next_action"] == "call_sql_agent"
-    assert result["semantic_validation_results"][0]["semantic_valid"] is False
-    assert result["llm_decisions"][0]["node"] == "semantic_validate_subagent_result"
-
-
-def test_semantic_validation_skips_when_hard_validation_failed() -> None:
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="failed",
-        summary="SQL 실패",
-        retryable=True,
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": False,
-            "next_action": "call_sql_agent",
-            "terminal_state": "running",
-            "reason": "hard validation 실패",
-        }
-    ]
-    state["next_action"] = "call_sql_agent"
-    model = SequencedDecisionModel([_semantic_decision()])
-    node = make_semantic_validate_subagent_result_node(model)
-
-    result = node(state)
-
-    assert result["semantic_validation_results"] == []
-    assert result["llm_decisions"] == []
-    assert model.messages == []
-
-
-def test_semantic_validation_failure_retries_once() -> None:
-    class FailingModel:
-        def invoke(self, messages):
-            raise RuntimeError("semantic model unavailable")
-
-    state = _state()
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql"],
-    ).model_dump(mode="json")
-    state["validation_results"] = [
-        {
-            "agent": "sql_agent",
-            "valid": True,
-            "next_action": "decide_next_action",
-            "terminal_state": "running",
-            "reason": "hard validation 통과",
-        }
-    ]
-    state.pop("next_action")
-
-    result = make_semantic_validate_subagent_result_node(FailingModel())(state)
-
-    assert result["current_step"] == "semantic_validate_retry"
-    assert list(result["semantic_retry_counts"].values()) == [1]
-
-
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
     state = stage_candidate_result(
         _state(),
@@ -1321,13 +1195,25 @@ def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
         ),
         {},
     )
-    state["semantic_validation_results"] = [
+    state["validation_history"] = [
         {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
             "agent": "sql_agent",
-            "semantic_valid": True,
-            "severity": "info",
-            "recommended_next_action": "call_eda_agent",
-            "missing_evidence": [],
+            "outcome": {"disposition": "accept"},
+            "checks": [
+                {
+                    "name": "semantic",
+                    "passed": True,
+                    "findings": [],
+                    "details": {
+                        "semantic_valid": True,
+                        "severity": "info",
+                        "recommended_next_action": "call_eda_agent",
+                        "missing_evidence": [],
+                    },
+                }
+            ],
         }
     ]
 
@@ -1335,27 +1221,6 @@ def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
 
     assert result["next_action"] == "call_eda_agent"
     assert result["completed_agents"] == ["sql_agent"]
-
-
-def test_step_summary_records_llm_action_without_overwriting_state_action() -> None:
-    state = _state()
-    state["next_action"] = "decide_next_action"
-    state["last_agent_result"] = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql"],
-    ).model_dump(mode="json")
-    node = make_summarize_step_node(
-        SequencedDecisionModel(
-            [_summary_decision("sql_agent", next_action="call_sql_agent")]
-        )
-    )
-
-    result = node(state)
-
-    assert "next_action" not in result
-    assert result["step_summaries"][0]["next_action"] == "call_sql_agent"
 
 
 def test_finalize_preserves_validation_terminal_state_when_llm_returns_completed() -> None:

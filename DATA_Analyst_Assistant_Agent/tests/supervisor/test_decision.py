@@ -31,6 +31,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     DECIDE_NEXT_ACTION_PROMPT,
     RESULT_VALIDATION_DECISION_PROMPT,
+    SEMANTIC_VALIDATION_ADVISORY_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
@@ -295,6 +296,30 @@ def test_llm_selectable_decisions_reject_internal_redecision_action(schema, payl
         schema.model_validate(payload)
 
 
+def test_semantic_validation_rejects_create_plan_recommendation() -> None:
+    with pytest.raises(ValidationError):
+        SemanticValidationAdvisoryDecision.model_validate(
+            {
+                "semantic_valid": False,
+                "severity": "error",
+                "recommended_next_action": "create_plan",
+                "reason": "계획을 다시 만드세요.",
+            }
+        )
+
+
+def test_semantic_validation_prompt_describes_warning_recovery_policy() -> None:
+    recommendation_section = SEMANTIC_VALIDATION_ADVISORY_PROMPT.split(
+        "허용 recommended_next_action:",
+        maxsplit=1,
+    )[1].split("반드시 JSON 객체만 반환하세요.", maxsplit=1)[0]
+
+    assert "warning이고 missing_evidence가 없으면 semantic_valid=false여도" in (
+        SEMANTIC_VALIDATION_ADVISORY_PROMPT
+    )
+    assert "- create_plan" not in recommendation_section
+
+
 @pytest.mark.parametrize("schema", [ResultValidationDecision, StepSummaryDecision])
 def test_internal_transition_decisions_allow_redecision_action(schema) -> None:
     payload = (
@@ -516,3 +541,45 @@ def test_summarize_agent_step_truncates_summary_to_1000_chars() -> None:
     summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
 
     assert len(summary.summary) == 1000
+
+
+def test_context_derives_legacy_payload_keys_from_validation_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    state["validation_history"] = [
+        {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "agent": "analysis_agent",
+            "outcome": {
+                "disposition": "accept",
+                "reason": "검증 통과",
+                "reason_code": "none",
+                "retry_target": None,
+                "terminal_state": "running",
+            },
+            "checks": [
+                {"name": "result", "passed": True, "findings": [], "details": {}},
+                {
+                    "name": "semantic",
+                    "passed": True,
+                    "findings": [],
+                    "details": {
+                        "semantic_valid": True,
+                        "recommended_next_action": "call_report_agent",
+                    },
+                },
+            ],
+        }
+    ]
+
+    context = build_next_action_context(state)
+
+    assert context["validation_results"][0]["agent"] == "analysis_agent"
+    assert context["validation_results"][0]["decision"] == "accept"
+    assert context["semantic_validation_results"][0]["semantic_valid"] is True
+    assert "validation_history" not in context

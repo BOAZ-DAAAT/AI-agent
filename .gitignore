@@ -228,6 +228,9 @@ daaa_outputs/
 gx/uncommitted/
 DATA_Analyst_Assistant_Agent/agents/eda/outputs/
 
+# 패키지 내부 설계·작업 문서는 로컬에서만 관리
+DATA_Analyst_Assistant_Agent/docs/
+
 # GE 정합성 생성 중간 산출물(재생성 가능) — 런타임은 병합본 db_integrity_result.json만 읽음
 DATA_Analyst_Assistant_Agent/agents/sql/data/.ge_runtime/
 DATA_Analyst_Assistant_Agent/agents/sql/data/integrity_runs/

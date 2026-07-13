@@ -12,8 +12,13 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ValidationFinding,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
+    ValidationCheckResult,
+    ValidationOutcome,
+    ValidationRecord,
     _check_completion_readiness,
+    contract_check_from_decision,
     guard_agent_preconditions,
+    outcome_from_contract_decision,
     validate_subagent_result,
 )
 
@@ -25,6 +30,63 @@ def _state():
         user_query="월별 매출 추이를 분석해줘",
         datasource_id=None,
     )
+
+
+def test_validation_record_uses_single_internal_contract() -> None:
+    record = ValidationRecord(
+        candidate_id="candidate_001",
+        validation_id="validation_001",
+        agent="sql_agent",
+        outcome=ValidationOutcome(disposition="accept", reason="검증 통과"),
+        checks=[ValidationCheckResult(name="contract", passed=True)],
+    )
+
+    payload = record.model_dump(mode="json")
+
+    assert payload["outcome"]["disposition"] == "accept"
+    assert payload["checks"] == [
+        {"name": "contract", "passed": True, "findings": [], "details": {}}
+    ]
+    assert "valid" not in payload
+    assert "decision" not in payload
+
+
+def test_validation_outcome_supports_semantic_recovery_action() -> None:
+    outcome = ValidationOutcome(
+        disposition="recover",
+        reason="필수 근거가 누락되었습니다.",
+        recovery_action="call_sql_agent",
+    )
+
+    assert outcome.disposition == "recover"
+    assert outcome.recovery_action == "call_sql_agent"
+
+
+def test_contract_decision_is_converted_without_legacy_routing_fields() -> None:
+    result = AgentCompactResult(
+        agent="eda_agent",
+        status="warning",
+        summary="일부 제한이 있는 EDA",
+        findings=[
+            ValidationFinding(
+                code="small_sample",
+                message="표본이 작습니다.",
+                source="eda_agent",
+                disposition="limitation",
+            )
+        ],
+    )
+    decision = validate_subagent_result(_state(), result)
+
+    check = contract_check_from_decision(result, decision)
+    outcome = outcome_from_contract_decision(result.agent, decision)
+
+    assert check.name == "result"
+    assert check.passed is True
+    assert check.findings[0].code == "small_sample"
+    assert outcome.disposition == "accept_with_limitations"
+    assert outcome.retry_target is None
+    assert outcome.terminal_state == "running"
 
 
 def test_completion_readiness_rejects_state_without_analysis_evidence() -> None:

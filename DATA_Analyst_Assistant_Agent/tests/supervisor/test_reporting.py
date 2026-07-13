@@ -183,6 +183,31 @@ def test_supervisor_report_generator_compacts_report_envelope(adapter: BackendAd
     assert result.artifacts[0].kind == "final_report"
 
 
+def test_limited_report_uses_only_accepted_evidence_and_exposes_limitations(
+    adapter: BackendAdapter,
+) -> None:
+    run = adapter.create_run()
+    sql_id = _register_sql(adapter, run.run_id)
+    quarantined_id = _register_sql(adapter, run.run_id, "value\r\n999\r\n")
+    state = _supervisor_state(run.run_id, sql_id)
+    state["quarantined_artifacts"] = [{"artifact_id": quarantined_id}]
+    state["limitations"] = [
+        "필수 분석 근거가 누락되었습니다.",
+        "필수 분석 근거가 누락되었습니다.",
+        "승인된 기존 근거만 사용해 제한적 Report fallback을 생성합니다.",
+    ]
+
+    result = SupervisorReportGenerator(adapter).generate(state)
+
+    artifact = adapter.get_artifact(result.artifact_ids[0])
+    markdown = adapter.read_artifact_text(result.artifact_ids[0])
+    assert artifact.parent_ids == [sql_id]
+    assert quarantined_id not in artifact.parent_ids
+    assert "## Limitations" in markdown
+    assert markdown.count("필수 분석 근거가 누락되었습니다.") == 1
+    assert "승인된 기존 근거만 사용해 제한적 Report fallback을 생성합니다." in markdown
+
+
 @dataclass
 class StubReportGenerator:
     result: AgentCompactResult | None = None
@@ -364,7 +389,12 @@ def test_call_report_agent_routes_directly_to_generate_report(adapter: BackendAd
     assert subagents.calls == []
     assert report_generator.calls == 1
     assert result["completed_agents"] == ["sql_agent", "report_agent"]
-    assert result["semantic_validation_results"][0]["semantic_valid"] is True
+    semantic_check = next(
+        check
+        for check in result["validation_history"][0]["checks"]
+        if check["name"] == "semantic"
+    )
+    assert semantic_check["passed"] is True
     assert result["step_summaries"][-1]["step"] == "generate_report"
 
 
@@ -398,12 +428,7 @@ def test_execution_guard_redirect_to_report_skips_subagent_call(adapter: Backend
                 "requires_mart_review": False,
                 "reason": "계획 완료",
             },
-            {"next_action": "call_sql_agent", "reason": "SQL 검토"},
-                {
-                    "allowed": False,
-                    "next_action": "call_report_agent",
-                    "reason": "기존 근거로 보고서 생성",
-                },
+                {"next_action": "call_report_agent", "reason": "기존 근거로 보고서 생성"},
                 {
                     "semantic_valid": True,
                     "severity": "info",

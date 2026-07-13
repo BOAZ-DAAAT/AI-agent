@@ -37,9 +37,163 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["agent_results"] == []
     assert state["artifacts"] == {}
     assert state["last_agent_result"] == {}
-    assert state["semantic_validation_results"] == []
+    assert state["validation_history"] == []
+    assert "validation_results" not in state
+    assert "evidence_validation_results" not in state
+    assert "semantic_validation_results" not in state
+    assert state["state_schema_version"] == 4
+    assert state["semantic_recovery_attempts"] == {}
+    assert state["limitations"] == []
     assert state["failure_streaks"] == {}
     assert state["terminal_state"] == "running"
+
+
+def test_normalize_v2_validation_arrays_into_v4_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state.update(
+        {
+            "state_schema_version": 2,
+            "validation_history": [],
+            "validation_results": [
+                {
+                    "agent": "analysis_agent",
+                    "valid": True,
+                    "decision": "accept",
+                    "reason": "결정론 검증 통과",
+                }
+            ],
+            "evidence_validation_results": [
+                {"valid": True, "decision": "accept", "content_hashes": {"a1": "hash"}}
+            ],
+            "semantic_validation_results": [
+                {
+                    "semantic_valid": True,
+                    "severity": "info",
+                    "reason": "의미 검증 통과",
+                    "recommended_next_action": "call_report_agent",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["state_schema_version"] == 4
+    assert normalized["semantic_recovery_attempts"] == {}
+    assert normalized["limitations"] == []
+    assert "validation_results" not in normalized
+    assert "evidence_validation_results" not in normalized
+    assert "semantic_validation_results" not in normalized
+    record = normalized["validation_history"][0]
+    assert record["candidate_id"] == "legacy_validation_0"
+    assert record["validation_id"] == "legacy_validation_0"
+    assert record["agent"] == "analysis_agent"
+    assert [check["name"] for check in record["checks"]] == ["result", "evidence", "semantic"]
+    assert record["outcome"]["disposition"] == "accept"
+
+
+def test_normalize_v2_pending_approval_preserves_candidate_hashes() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state.update(
+        {
+            "state_schema_version": 2,
+            "pending_approval": {
+                "approval_id": "approval_001",
+                "agent": "analysis_agent",
+                "reason": "승인 필요",
+                "approval_type": "human_review",
+                "candidate_id": "candidate_001",
+                "validation_id": "validation_001",
+                "content_hashes": {"artifact_001": "hash_001"},
+            },
+            "pending_result": {
+                "candidate_id": "candidate_001",
+                "validation_id": "validation_001",
+                "result": {
+                    "agent": "analysis_agent",
+                    "status": "approval_required",
+                    "summary": "승인 필요",
+                    "approval": {"required": True},
+                },
+                "state_updates": {},
+                "content_hashes": {"artifact_001": "hash_001"},
+            },
+        }
+    )
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["pending_approval"] == state["pending_approval"]
+    assert normalized["pending_result"] == state["pending_result"]
+    assert normalized["state_schema_version"] == 4
+
+
+def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["state_schema_version"] = 3
+    state["semantic_retry_counts"] = {"candidate_001": 1}
+    state["validation_history"] = [
+        {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "agent": "analysis_agent",
+            "outcome": {"disposition": "accept", "reason": "기존 검증"},
+            "checks": [],
+        }
+    ]
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["state_schema_version"] == 4
+    assert normalized["semantic_retry_counts"] == {"candidate_001": 1}
+    assert normalized["semantic_recovery_attempts"] == {}
+    assert normalized["limitations"] == []
+    assert normalized["validation_history"] == state["validation_history"]
+
+
+def test_to_orchestration_state_merges_state_and_result_limitations_without_duplicates() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["limitations"] = ["표본이 작습니다.", "후보를 격리했습니다."]
+    state["agent_results"] = [
+        {
+            "agent": "analysis_agent",
+            "status": "warning",
+            "summary": "제한적 분석",
+            "findings": [
+                {
+                    "code": "small_sample",
+                    "source": "analysis_agent",
+                    "severity": "warning",
+                    "disposition": "limitation",
+                    "message": "표본이 작습니다.",
+                }
+            ],
+        }
+    ]
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.limitations == ["표본이 작습니다.", "후보를 격리했습니다."]
 
 
 def test_merge_agent_result_adds_artifacts_and_completion() -> None:
@@ -354,7 +508,7 @@ def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_
     normalized = normalize_supervisor_state(legacy)
     normalized_twice = normalize_supervisor_state(normalized)
 
-    assert normalized["state_schema_version"] == 2
+    assert normalized["state_schema_version"] == 4
     assert normalized["accepted_evidence"] == {}
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []
