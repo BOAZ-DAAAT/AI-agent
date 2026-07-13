@@ -187,7 +187,86 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
     assert state.run_id == "run_001"
     assert state.thread_id == "thread_sales_001"
     assert state.terminal_state.value == "completed"
+    assert state.final_answer == "최종 리포트 생성이 완료되었습니다."
     assert adapter.status_updates[-1][0] == "run_001"
+
+
+def test_supervisor_agent_run_preserves_plan_failure_state(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+
+    def plan_failure(initial_state, thread_id):
+        return {
+            **initial_state,
+            "terminal_state": "failed_terminal",
+            "final_answer": "계획 생성에 실패했습니다.",
+            "error_state": {"message": "계획 생성 실패", "retryable": False},
+        }
+
+    monkeypatch.setattr(agent, "_invoke_graph", plan_failure)
+
+    result = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.final_answer == "계획 생성에 실패했습니다."
+    assert result.state.plan is None
+    assert result.state.generated_sql == ""
+
+
+def test_supervisor_agent_run_preserves_approval_final_answer(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+
+    def approval_waiting(initial_state, thread_id):
+        return {
+            **initial_state,
+            "terminal_state": "needs_user_approval",
+            "final_answer": "SQL 실행 승인이 필요합니다.",
+            "pending_approval": {
+                "approval_id": "run_001:sql_agent:approval",
+                "agent": "sql_agent",
+            },
+        }
+
+    monkeypatch.setattr(agent, "_invoke_graph", approval_waiting)
+
+    result = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.final_answer == "SQL 실행 승인이 필요합니다."
+    assert result.state.approval_ids == ["run_001:sql_agent:approval"]
+
+
+def test_supervisor_agent_run_keeps_generated_and_source_sql_consistent(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    generated_sql = "SELECT month, SUM(amount) FROM sales GROUP BY month"
+
+    def completed_with_sql(initial_state, thread_id):
+        return {
+            **initial_state,
+            "analysis_plan": {
+                "goal": "월별 매출 추이 분석",
+                "source_sql": "SELECT month, amount FROM sales",
+            },
+            "generated_sql": generated_sql,
+            "terminal_state": "completed",
+            "final_answer": "월별 매출 분석이 완료되었습니다.",
+        }
+
+    monkeypatch.setattr(agent, "_invoke_graph", completed_with_sql)
+
+    result = agent.run("월별 매출 추이를 분석해줘", thread_id="thread_sales_001")
+
+    assert result.kind == "state"
+    assert result.state is not None
+    assert result.state.plan is not None
+    assert result.state.final_answer == "월별 매출 분석이 완료되었습니다."
+    assert result.state.generated_sql == generated_sql
+    assert result.state.plan.generated_sql == generated_sql
+    assert result.state.plan.source_sql == "SELECT month, amount FROM sales"
 
 
 def test_supervisor_agent_run_returns_interrupt_result_and_waiting_input_status(monkeypatch) -> None:

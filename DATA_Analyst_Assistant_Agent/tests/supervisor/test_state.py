@@ -5,6 +5,7 @@ import json
 import pytest
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisPlan,
     ApprovalRequirement,
     SupervisorTerminalState,
 )
@@ -326,21 +327,107 @@ def test_to_orchestration_state_rejects_invalid_terminal_state() -> None:
         to_orchestration_state(state)
 
 
-def test_to_orchestration_state_uses_same_generated_sql_fallback_in_plan_and_state() -> None:
+def test_analysis_plan_sql_defaults_are_empty() -> None:
+    plan = AnalysisPlan(goal="월별 매출 추이 분석")
+
+    assert plan.generated_sql == ""
+    assert plan.source_sql == ""
+
+
+def test_to_orchestration_state_without_plan_preserves_failure_context() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
         run_id="run_001",
         user_query="월별 매출 추이를 분석해줘",
         datasource_id="ds_001",
     )
+    state.update(
+        {
+            "terminal_state": SupervisorTerminalState.failed_terminal.value,
+            "final_answer": "계획 생성에 실패했습니다.",
+            "error_state": {
+                "message": "플래너 응답을 해석할 수 없습니다.",
+                "retryable": False,
+            },
+            "retry_counts": {"planner": 1},
+        }
+    )
 
     orchestration = to_orchestration_state(state)
 
-    assert orchestration.generated_sql == "SELECT 1 AS sample_value"
-    assert orchestration.plan is not None
-    assert orchestration.plan.generated_sql == orchestration.generated_sql
+    assert orchestration.final_answer == "계획 생성에 실패했습니다."
+    assert orchestration.generated_sql == ""
+    assert orchestration.plan is None
+    assert orchestration.goal == "월별 매출 추이를 분석해줘"
     assert orchestration.route_kind == "simple"
-    assert orchestration.plan.route_kind == "simple"
+    assert orchestration.planner_mode == "deterministic"
+    assert orchestration.error_state == {
+        "message": "플래너 응답을 해석할 수 없습니다.",
+        "retryable": False,
+    }
+    assert orchestration.retry_context == {
+        "planner": 1,
+        "last_error": "플래너 응답을 해석할 수 없습니다.",
+        "retryable": False,
+    }
+
+
+def test_to_orchestration_state_clears_plan_sql_when_sql_was_not_generated() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {
+        "goal": "월별 매출 추이 분석",
+        "route_kind": "trend",
+        "planner_mode": "llm",
+        "generated_sql": "SELECT sample FROM placeholder",
+        "source_sql": "SELECT raw FROM sales",
+    }
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.plan is not None
+    assert orchestration.generated_sql == ""
+    assert orchestration.plan.generated_sql == ""
+    assert orchestration.plan.source_sql == ""
+    assert orchestration.goal == "월별 매출 추이 분석"
+    assert orchestration.route_kind == "trend"
+    assert orchestration.planner_mode == "llm"
+
+
+@pytest.mark.parametrize(
+    ("source_sql", "expected_source_sql"),
+    [
+        ("SELECT raw_amount FROM sales", "SELECT raw_amount FROM sales"),
+        ("", "SELECT month, SUM(amount) FROM sales GROUP BY month"),
+    ],
+)
+def test_to_orchestration_state_uses_generated_sql_and_preserves_source_sql(
+    source_sql: str,
+    expected_source_sql: str,
+) -> None:
+    generated_sql = "SELECT month, SUM(amount) FROM sales GROUP BY month"
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {
+        "goal": "월별 매출 추이 분석",
+        "source_sql": source_sql,
+    }
+    state["generated_sql"] = generated_sql
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.plan is not None
+    assert orchestration.generated_sql == generated_sql
+    assert orchestration.plan.generated_sql == generated_sql
+    assert orchestration.plan.source_sql == expected_source_sql
 
 
 def test_to_orchestration_state_exposes_pending_approval_id() -> None:
@@ -549,6 +636,7 @@ def test_to_orchestration_state_exposes_analysis_last_failure_in_plan_and_state(
             "consecutive_count": 1,
         }
     }
+    state["analysis_plan"] = {"goal": "월별 매출 추이 분석"}
 
     orchestration = to_orchestration_state(state)
 
