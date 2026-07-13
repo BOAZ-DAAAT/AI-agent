@@ -71,7 +71,7 @@ class SQLAgent:
                 "feedback": "",
                 "error": "",
                 "generation_source": "llm",
-                "fallback_reason": "",
+                "generation_failure_reason": "",
                 "failed_statement_index": None,
                 "failed_statement_sql": "",
                 "final_answer": "",
@@ -110,7 +110,7 @@ class SQLAgent:
             "statement_results": result.get("statement_results") or [],
             "validation": result.get("validation") or {},
             "generation_source": result.get("generation_source") or "llm",
-            "fallback_reason": result.get("fallback_reason") or "",
+            "generation_failure_reason": result.get("generation_failure_reason") or "",
             "failed_statement_index": result.get("failed_statement_index"),
             "failed_statement_sql": result.get("failed_statement_sql") or "",
             "final_answer": result.get("final_answer") or "",
@@ -230,14 +230,23 @@ class SQLAgent:
                 detail=f"row_count={result_row_count}.",
             ),
         ]
-        fallback_used = bool(result.get("generation_source") in {"fallback", "hard_fallback"} and result.get("retry_count", 0) > 0)
-        if result.get("generation_source") in {"fallback", "hard_fallback"}:
+        fallback_used = False
+        if result.get("generation_source") == "failed":
             checks.append(
                 LocalCheck(
                     name="main_sql_agent_generation_source",
-                    passed=not fallback_used,
-                    severity="warning" if fallback_used else "info",
-                    detail=f"generation_source={result.get('generation_source')} reason={result.get('fallback_reason') or 'none'}",
+                    passed=False,
+                    severity="error",
+                    detail=f"generation_source=failed reason={result.get('generation_failure_reason') or 'none'}",
+                )
+            )
+        elif result.get("generation_source") == "repair":
+            checks.append(
+                LocalCheck(
+                    name="main_sql_agent_generation_source",
+                    passed=True,
+                    severity="info",
+                    detail="generation_source=repair",
                 )
             )
         if validation.get("result") == "invalid":
