@@ -318,8 +318,10 @@ class PlanMutationAgent:
 
 def test_subagent_adapter_returns_plan_metadata_state_updates() -> None:
     adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"sql_agent": PlanMutationAgent()})
+    state = _state()
+    state["analysis_plan"] = {"goal": "월별 매출 추이 분석"}
 
-    result = adapter.call("sql_agent", _state())
+    result = adapter.call("sql_agent", state)
 
     assert result.state_updates["planner_mode"] == "llm"
     assert result.state_updates["generated_sql"] == "SELECT revenue FROM sales"

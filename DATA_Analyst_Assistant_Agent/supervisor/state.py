@@ -554,8 +554,10 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             ) from exc
 
     plan_payload = state.get("analysis_plan") or {}
+    goal = str(plan_payload.get("goal") or state.get("latest_user_query") or "")
+    route_kind = str(plan_payload.get("route_kind") or "simple")
     planner_mode = "llm" if plan_payload.get("planner_mode") == "llm" else "deterministic"
-    generated_sql = state.get("generated_sql") or "SELECT 1 AS sample_value"
+    generated_sql = str(state.get("generated_sql") or "")
     pending_approval = state.get("pending_approval")
     approval_ids: list[str] = []
     if isinstance(pending_approval, dict):
@@ -577,19 +579,22 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             "reason_code": str(analysis_failure.get("reason_code") or "none"),
             "failure_reason": str(analysis_failure.get("failure_reason") or ""),
         }
-    plan = AnalysisPlan(
-        goal=str(plan_payload.get("goal") or state.get("latest_user_query") or ""),
-        datasource_id=state.get("datasource_id"),
-        catalog_summary=state.get("catalog_summary"),
-        retry_context=_retry_context,
-        planner_mode=planner_mode,
-        route_kind=str(plan_payload.get("route_kind") or "simple"),
-        generated_sql=generated_sql,
-        source_sql=generated_sql,
-        target_table=plan_payload.get("target_table") or None,
-        source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
-        business_grain=plan_payload.get("business_grain") or None,
-    )
+    plan: AnalysisPlan | None = None
+    if plan_payload:
+        source_sql = str(plan_payload.get("source_sql") or generated_sql) if generated_sql else ""
+        plan = AnalysisPlan(
+            goal=goal,
+            datasource_id=state.get("datasource_id"),
+            catalog_summary=state.get("catalog_summary"),
+            retry_context=_retry_context,
+            planner_mode=planner_mode,
+            route_kind=route_kind,
+            generated_sql=generated_sql,
+            source_sql=source_sql,
+            target_table=plan_payload.get("target_table") or None,
+            source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
+            business_grain=plan_payload.get("business_grain") or None,
+        )
     limitations = [str(item) for item in state.get("limitations", []) if item]
     limitations.extend(
         str(finding.get("message") or "")
@@ -604,7 +609,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         datasource_id=state.get("datasource_id"),
         catalog_summary=state.get("catalog_summary"),
         user_query=state.get("clarified_query") or state.get("latest_user_query", ""),
-        goal=plan.goal,
+        final_answer=str(state.get("final_answer") or ""),
+        goal=goal,
         plan=plan,
         retry_context=_retry_context,
         current_step=state.get("current_step", "created"),
@@ -615,8 +621,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         remaining_agents=[],
         completed_agents=list(state.get("completed_agents", [])),
         last_agent=(state.get("completed_agents") or [None])[-1],
-        route_kind=plan.route_kind,
-        planner_mode=plan.planner_mode,
+        route_kind=route_kind,
+        planner_mode=planner_mode,
         generated_sql=generated_sql,
         retry_counts=dict(state.get("retry_counts", {})),
         max_retry_per_agent=int(state.get("max_retry_per_agent", 1)),

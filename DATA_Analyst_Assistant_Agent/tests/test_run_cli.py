@@ -50,7 +50,12 @@ class SequencedFakeSupervisor(FakeSupervisor):
         return self.resume_results.pop(0)
 
 
-def _state_result(user_query: str = "최근 6개월 월별 매출") -> SupervisorRunResult:
+def _state_result(
+    user_query: str = "최근 6개월 월별 매출",
+    *,
+    final_answer: str = "",
+    generated_sql: str = "",
+) -> SupervisorRunResult:
     return SupervisorRunResult(
         kind="state",
         state=OrchestrationState(
@@ -58,6 +63,8 @@ def _state_result(user_query: str = "최근 6개월 월별 매출") -> Superviso
             thread_id="thread_1",
             user_query=user_query,
             terminal_state=SupervisorTerminalState.completed,
+            final_answer=final_answer,
+            generated_sql=generated_sql,
         ),
     )
 
@@ -434,3 +441,86 @@ def test_resume_non_result_raises_cli_compatible_error(monkeypatch: pytest.Monke
 
     with pytest.raises(RuntimeError, match="CLI-compatible"):
         cli.main()
+
+
+def test_state_summary_always_includes_final_answer() -> None:
+    state = _state_result(final_answer="분석이 완료되었습니다.").state
+    assert state is not None
+
+    summary = cli._state_summary(state)
+
+    assert summary["final_answer"] == "분석이 완료되었습니다."
+
+
+def test_json_output_includes_final_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_cli_runtime(monkeypatch, _state_result(final_answer="분석이 완료되었습니다."))
+    monkeypatch.setattr(cli.sys, "argv", ["run.py", "매출", "--json", "--no-output"])
+
+    cli.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["final_answer"] == "분석이 완료되었습니다."
+
+
+@pytest.mark.parametrize(
+    ("final_answer", "shows_section"),
+    [("분석이 완료되었습니다.", True), ("", False)],
+)
+def test_text_output_shows_final_answer_section_only_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    final_answer: str,
+    shows_section: bool,
+) -> None:
+    _patch_cli_runtime(monkeypatch, _state_result(final_answer=final_answer))
+    monkeypatch.setattr(cli.sys, "argv", ["run.py", "매출", "--no-output"])
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert ("=== Final Answer ===" in output) is shows_section
+    if final_answer:
+        assert final_answer in output
+
+
+def test_write_outputs_includes_final_answer_and_clears_stale_sql(tmp_path: Path) -> None:
+    state = _state_result(final_answer="계획 생성에 실패했습니다.").state
+    assert state is not None
+    sql_path = tmp_path / "generated_sql.sql"
+    sql_path.write_text("SELECT stale_data", encoding="utf-8")
+
+    outputs = cli._write_outputs(FakeBackendAdapter(), state, state.user_query, tmp_path)
+
+    summary = json.loads(outputs["summary"].read_text(encoding="utf-8"))
+    assert summary["final_answer"] == "계획 생성에 실패했습니다."
+    assert outputs["generated_sql"].read_bytes() == b""
+
+
+def test_write_outputs_writes_generated_sql_without_modification(tmp_path: Path) -> None:
+    generated_sql = "SELECT month, SUM(amount)\nFROM sales\nGROUP BY month;\n"
+    state = _state_result(generated_sql=generated_sql).state
+    assert state is not None
+
+    outputs = cli._write_outputs(FakeBackendAdapter(), state, state.user_query, tmp_path)
+
+    assert outputs["generated_sql"].read_text(encoding="utf-8") == generated_sql
+
+
+def test_no_output_does_not_create_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_cli_runtime(monkeypatch, _state_result())
+    output_dir = tmp_path / "disabled"
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        ["run.py", "매출", "--no-output", "--output-dir", str(output_dir)],
+    )
+
+    cli.main()
+
+    assert not output_dir.exists()

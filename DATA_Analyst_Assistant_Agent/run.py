@@ -100,6 +100,7 @@ def _state_summary(state: OrchestrationState) -> dict[str, Any]:
         "current_step": state.current_step,
         "completed_agents": state.completed_agents,
         "remaining_agents": state.remaining_agents,
+        "final_answer": state.final_answer,
         "generated_sql": state.generated_sql,
         "artifact_ids": state.artifact_ids,
         "approval_ids": state.approval_ids,
@@ -673,6 +674,10 @@ def _print_text_summary(
         print("\n=== Artifacts ===")
         for agent_name, artifact_ids in state.artifact_ids.items():
             print(f"{agent_name}: {artifact_ids}")
+
+    if state.final_answer:
+        print("\n=== Final Answer ===")
+        print(state.final_answer)
 
     if show_sql:
         print("\n=== Generated SQL ===")
