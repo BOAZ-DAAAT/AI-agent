@@ -3,9 +3,9 @@
 검증 대상(사용자 지정 5 + 엣지):
   1) 관계/회귀에서 pearson·spearman 둘 다 |r|<0.05면 드롭
   2) 전부 드롭 후보면 최소 1개 보존(드롭 취소)
-  3) 검증불가(군집 skip·분류 등)는 드롭되지 않음
+  3) 미측정(군집 skip·분류 등)는 드롭되지 않음
   4) 재실행 시 '사전신호:' 태그가 중복되지 않음
-  5) 재정렬 순서: 강함 > 중간 > 검증불가 > 약함
+  5) 재정렬 순서: 강함 > 중간 > 미측정 > 약함
   + 트레일링([다음 분석 방향]) 보존 / silhouette 음수 처리 / 블록 없음 폴백 /
     컬럼 퍼지매칭 / 설명가능성 메타(matched_signal·score_value·drop_reason)
 """
@@ -69,7 +69,7 @@ def test_keep_at_least_one_when_all_would_drop():
     assert "OBS_A" in new_text and "OBS_B" in new_text
 
 
-# ── 3) 검증불가는 드롭 안 함 ──────────────────────────────────────────────────
+# ── 3) 미측정는 드롭 안 함 ──────────────────────────────────────────────────
 def test_unverifiable_not_dropped():
     text = "\n\n".join([
         _block(1, "OBS_CLUSTER", "군집", "segment", "monetary, frequency", "K-means silhouette"),
@@ -77,7 +77,7 @@ def test_unverifiable_not_dropped():
     ])
     stat = {"correlation_pairs": {}, "clustering": {"skip": True}}
     new_text, meta = screen_hypotheses(text, stat)
-    assert all(m["strength"] == "검증불가" for m in meta)
+    assert all(m["strength"] == "미측정" for m in meta)
     assert all(m["dropped"] is False for m in meta)
     assert "OBS_CLUSTER" in new_text and "OBS_CLASS" in new_text
 
@@ -98,7 +98,7 @@ def test_rerun_no_duplicate_tag():
     assert _count_tags(twice) == 2            # 재실행해도 블록당 태그 1개
 
 
-# ── 5) 재정렬 순서: 강함 > 중간 > 검증불가 > 약함 ────────────────────────────
+# ── 5) 재정렬 순서: 강함 > 중간 > 미측정 > 약함 ────────────────────────────
 def test_reorder_strong_medium_unverifiable_weak():
     text = "\n\n".join([
         _block(1, "OBS_WEAK", "관계추론", "freight", "review_score", "스피어만 상관검정"),
@@ -112,11 +112,11 @@ def test_reorder_strong_medium_unverifiable_weak():
             "corr_price_vs_review_score": _corr(0.30, 0.28),            # 중간
             "corr_review_score_vs_delivery_days": _corr(-0.50, -0.48),  # 강함
         },
-        "clustering": {"skip": True},                                   # 검증불가
+        "clustering": {"skip": True},                                   # 미측정
     }
     new_text, _ = screen_hypotheses(text, stat)
     order = [new_text.index(tok) for tok in ("OBS_STRONG", "OBS_MED", "OBS_UNVER", "OBS_WEAK")]
-    assert order == sorted(order)   # 강함 < 중간 < 검증불가 < 약함 (텍스트 등장 순서)
+    assert order == sorted(order)   # 강함 < 중간 < 미측정 < 약함 (텍스트 등장 순서)
 
 
 # ── 엣지: 트레일링 보존 ───────────────────────────────────────────────────────
