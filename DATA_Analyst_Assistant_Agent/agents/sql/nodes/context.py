@@ -91,5 +91,5 @@ def refresh_integrity_context(state: AgentState):
         # db_integrity_result.json 을 planned tables 로 스코핑해 읽는다.
         # 실패 검사만(fail_only) + 캡 없음(max_lines=None) → 관련 테이블의 문제만 최소로.
         update["integrity_text"] = load_scoped_integrity_text(tables)
-        update["integrity_refresh"] = {**refresh_meta, "local_fallback": True, "scoped_tables": tables}
+        update["integrity_refresh"] = {**refresh_meta, "local_snapshot_used": True, "scoped_tables": tables}
     return update

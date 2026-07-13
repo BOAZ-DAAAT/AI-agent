@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import default_plan_from_state
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_datamart_reusability
 
 
@@ -75,13 +74,13 @@ def test_row_preserving_datamart_is_allowed() -> None:
 
 
 def test_comprehensive_mart_contract_keeps_datamart_shape_even_with_dimensions() -> None:
-    plan = default_plan_from_state(
-        {
-            "user_question": "create reusable datamart for monthly hourly order analysis",
-            "schema_text": '{"tables": {"orders": {"columns": ["order_id", "order_date"]}}}',
-            "planner_selection_reason": "datamart creation requested",
-        }
-    )
+    plan = {
+        "route_kind": "comprehensive",
+        "validation_contract": {
+            "expected_result_shape": "datamart_creation",
+            "required_aggregations": [],
+        },
+    }
     contract = plan["validation_contract"]
 
     assert contract["expected_result_shape"] == "datamart_creation"

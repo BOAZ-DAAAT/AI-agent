@@ -11,6 +11,16 @@ from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
 
 
 def prevalidate_sql(state: AgentState):
+    existing_findings = list(state.get("validation_findings") or [])
+    existing_validation = state.get("validation") or {}
+    if existing_validation.get("result") == "invalid" and existing_findings:
+        return {
+            "validation": existing_validation,
+            "validation_findings": existing_findings,
+            "retry_hint": (state.get("retry_hint") or existing_validation.get("retry_hint", {})),
+            "feedback": existing_validation.get("feedback", "") or state.get("feedback", ""),
+            "error": existing_validation.get("reason", "") or state.get("error", ""),
+        }
     plan = state.get("plan", {})
     sql_draft = state.get("sql_draft", {})
     findings = []

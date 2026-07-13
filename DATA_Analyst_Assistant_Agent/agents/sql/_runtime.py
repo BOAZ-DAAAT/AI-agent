@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any, Optional
@@ -55,15 +54,6 @@ def get_llm():
 # -----------------------------
 # Utils
 # -----------------------------
-def safe_json_parse(text_value: str, fallback: dict) -> dict:
-    cleaned = text_value.strip()
-    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return fallback
-
-
 def clean_sql(sql: str) -> str:
     sql = sql.replace("```sql", "").replace("```", "").strip()
     if not sql.endswith(";"):

@@ -1,8 +1,4 @@
-"""SQL 에이전트 LangGraph 배선.
-
-기존 `sql_agent/sql_agent.py` 의 build_app()/route_after_validation 을 분리한 것.
-노드 이름과 엣지 구성은 원본과 동일하게 유지한다(컴파일된 그래프 위상 동일).
-"""
+"""SQL 에이전트 LangGraph 배선."""
 
 from __future__ import annotations
 
@@ -12,20 +8,44 @@ from DATA_Analyst_Assistant_Agent.agents.sql import nodes
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 
 
-def route_after_validation(state: AgentState):
-    if state["validation"].get("result") == "valid":
+def route_after_plan(state: AgentState):
+    validation = state.get("validation") or {}
+    if validation.get("result") != "invalid":
+        return "refresh"
+    if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
     if state["retry_count"] >= state["max_retries"]:
         return "finalize"
     return "retry"
 
 
-# reason_code가 이 집합에 해당하면 plan 재계획이 필요
-_REPLAN_CODES = {"invalid_join_plan", "result_shape_mismatch", "intent_mismatch"}
+def route_after_mart_design(state: AgentState):
+    validation = state.get("validation") or {}
+    if validation.get("result") != "invalid":
+        return "generate"
+    if not (state.get("retry_hint") or {}).get("retryable", True):
+        return "finalize"
+    if state["retry_count"] >= state["max_retries"]:
+        return "finalize"
+    return "retry"
+
+
+def route_after_validation(state: AgentState):
+    if state["validation"].get("result") == "valid":
+        return "finalize"
+    if not (state.get("retry_hint") or {}).get("retryable", True):
+        return "finalize"
+    if state["retry_count"] >= state["max_retries"]:
+        return "finalize"
+    return "retry"
+
+
+# reason_code가 이 집합에 해당하면 plan 단계 재수립이 필요
+_REPLAN_CODES = {"sql_plan_failed", "sql_mart_design_failed", "invalid_join_plan", "result_shape_mismatch", "intent_mismatch"}
 
 
 def route_after_retry(state: AgentState):
-    """retry 후 plan 재계획이 필요한지, SQL만 재생성할지 판단."""
+    """retry 후 plan 단계 재수립이 필요한지, SQL만 재생성할지 판단."""
     reason_code = (state.get("retry_hint") or {}).get("reason_code", "")
     return "replan" if reason_code in _REPLAN_CODES else "regenerate"
 
@@ -48,9 +68,17 @@ def build_app():
     graph.add_edge(START, "load_context")
     graph.add_edge("load_context", "preplan_integrity_gate")
     graph.add_edge("preplan_integrity_gate", "plan_question")
-    graph.add_edge("plan_question", "refresh_integrity_context")
+    graph.add_conditional_edges(
+        "plan_question",
+        route_after_plan,
+        {"refresh": "refresh_integrity_context", "retry": "increase_retry", "finalize": "finalize_answer"},
+    )
     graph.add_edge("refresh_integrity_context", "design_mart")
-    graph.add_edge("design_mart", "generate_sql")
+    graph.add_conditional_edges(
+        "design_mart",
+        route_after_mart_design,
+        {"generate": "generate_sql", "retry": "increase_retry", "finalize": "finalize_answer"},
+    )
     graph.add_edge("generate_sql", "prevalidate_sql")
     graph.add_conditional_edges(
         "prevalidate_sql",
@@ -62,10 +90,7 @@ def build_app():
     graph.add_conditional_edges(
         "validate_sql_and_result",
         route_after_validation,
-        {
-            "retry": "increase_retry",
-            "finalize": "finalize_answer"
-        }
+        {"retry": "increase_retry", "finalize": "finalize_answer"},
     )
 
     graph.add_conditional_edges(
