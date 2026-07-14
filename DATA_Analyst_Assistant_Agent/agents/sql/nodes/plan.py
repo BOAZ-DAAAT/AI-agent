@@ -58,27 +58,25 @@ def _plan_failure(*, reason_code: str, detail: str, retryable: bool) -> dict[str
 
 def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[str, Any]:
     route_kind_raw = str(parsed.get("route_kind") or "").strip().lower()
-    if route_kind_raw == "mart":
-        route_kind_raw = "comprehensive"
-    route_kind = route_kind_raw or ("comprehensive" if parsed.get("task_type") == "data_mart_build" else "simple")
+    route_kind = route_kind_raw
     if route_kind not in {"simple", "comprehensive"}:
         raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
 
-    task_type = str(parsed.get("task_type") or ("data_mart_build" if route_kind == "comprehensive" else "query_answer"))
+    task_type = "data_mart_build" if route_kind == "comprehensive" else "query_answer"
     question_type = str(parsed.get("question_type") or ("mart_build" if route_kind == "comprehensive" else "detail"))
-    requested_output = str(parsed.get("requested_output") or ("create_table" if route_kind == "comprehensive" else "execute_and_answer"))
+    requested_output = "create_table" if route_kind == "comprehensive" else "execute_and_answer"
     selected_tables = _list_of_str(parsed.get("selected_join_tables"))
     relevant_tables = _list_of_str(parsed.get("relevant_tables")) or list(selected_tables)
     candidate_tables = _list_of_str(parsed.get("candidate_tables")) or list(dict.fromkeys(selected_tables + relevant_tables))
     validation_contract = dict(parsed.get("validation_contract") or {})
-    expected_result_shape = str(parsed.get("expected_result_shape") or validation_contract.get("expected_result_shape") or ("datamart_creation" if route_kind == "comprehensive" else "table_preview"))
+    expected_result_shape = "datamart_creation" if route_kind == "comprehensive" else "table_preview"
     required_columns = _list_of_str(parsed.get("required_columns"))
     required_aggregations = _list_of_str(parsed.get("required_aggregations"))
     dimensions = _list_of_str(parsed.get("dimensions"))
     filters = _list_of_str(parsed.get("filters"))
     target_metric = str(parsed.get("target_metric") or "")
 
-    validation_contract.setdefault("expected_result_shape", expected_result_shape)
+    validation_contract["expected_result_shape"] = expected_result_shape
     validation_contract.setdefault("required_columns", list(required_columns))
     validation_contract.setdefault("required_aggregations", list(required_aggregations))
     validation_contract.setdefault("required_tables", list(selected_tables or relevant_tables))
@@ -90,7 +88,6 @@ def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[
 
     has_core_signal = bool(
         parsed.get("route_kind")
-        or parsed.get("task_type")
         or selected_tables
         or relevant_tables
         or candidate_tables

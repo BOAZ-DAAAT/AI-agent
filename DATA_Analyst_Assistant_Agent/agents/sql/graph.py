@@ -30,6 +30,15 @@ def route_after_mart_design(state: AgentState):
     return "retry"
 
 
+def route_after_refresh_integrity_context(state: AgentState):
+    route_kind = str((state.get("plan") or {}).get("route_kind") or "").strip().lower()
+    if route_kind == "simple":
+        return "generate"
+    if route_kind == "comprehensive":
+        return "design"
+    raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
+
+
 def route_after_validation(state: AgentState):
     if state["validation"].get("result") == "valid":
         return "finalize"
@@ -73,7 +82,11 @@ def build_app():
         route_after_plan,
         {"refresh": "refresh_integrity_context", "retry": "increase_retry", "finalize": "finalize_answer"},
     )
-    graph.add_edge("refresh_integrity_context", "design_mart")
+    graph.add_conditional_edges(
+        "refresh_integrity_context",
+        route_after_refresh_integrity_context,
+        {"generate": "generate_sql", "design": "design_mart"},
+    )
     graph.add_conditional_edges(
         "design_mart",
         route_after_mart_design,

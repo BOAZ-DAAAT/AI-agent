@@ -30,7 +30,7 @@ def generate_mart_prompt(state, feedback: str) -> str:
 {feedback if feedback else "없음"}
 
 규칙:
-- CREATE TABLE ... AS SELECT 또는 INSERT INTO ... SELECT 형태만 허용
+- CREATE TABLE ... AS SELECT 형태만 허용
 - 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
 - source는 실제 존재 테이블만 사용
 - 데이터마트는 최종 리포트용 요약 결과보다 재사용 가능한 기반 테이블이어야 함
@@ -49,7 +49,7 @@ def generate_mart_prompt(state, feedback: str) -> str:
 출력 형식:
 {{
   "sql": "...",
-  "sql_type": "create_table_as 또는 insert_select",
+  "sql_type": "create_table_as",
   "target_table": "{ALLOWED_MART_SCHEMA}.xxx",
   "source_tables": ["..."],
   "source_column_refs": ["table.column"],

@@ -16,6 +16,7 @@ from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactType
 from data_agent_backend.models.common import BackendError
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, run_sql_self_check
+from DATA_Analyst_Assistant_Agent.agents.sql._runtime import is_safe_mart_sql
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import extract_sql_aliases, split_sql_statements
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SQLAgentSupervisor, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
@@ -25,7 +26,10 @@ except ModuleNotFoundError:
     CentralValidationAgent = None
 from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import normalize_generated_sql
-from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate_sql_identifiers
+from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
+    validate_sql_dialect_and_route,
+    validate_sql_identifiers,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     AgentStatus,
@@ -108,6 +112,36 @@ class TestSQLSelfCheck:
         checks = run_sql_self_check("SELECT 1", columns=[])
         col_check = next(c for c in checks if c.name == "preview_has_columns")
         assert not col_check.passed
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "INSERT INTO analytics.orders_mart SELECT * FROM orders",
+            "CREATE OR REPLACE TABLE analytics.orders_mart AS SELECT * FROM orders",
+            "CREATE TABLE analytics.orders_mart (order_id INT)",
+        ],
+    )
+    def test_mart_runtime_allows_only_create_table_as_select(self, monkeypatch, sql):
+        from DATA_Analyst_Assistant_Agent.agents.sql import _runtime
+
+        monkeypatch.setattr(_runtime, "ALLOW_MART_WRITE", True)
+
+        allowed, _ = is_safe_mart_sql(sql, "analytics.orders_mart")
+
+        assert not allowed
+
+    def test_mart_runtime_accepts_create_table_as_select(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql import _runtime
+
+        monkeypatch.setattr(_runtime, "ALLOW_MART_WRITE", True)
+
+        allowed, reason = is_safe_mart_sql(
+            "CREATE TABLE analytics.orders_mart AS SELECT * FROM orders",
+            "analytics.orders_mart",
+        )
+
+        assert allowed
+        assert reason == ""
 
 
 class TestSQLStatementSplit:
@@ -208,7 +242,7 @@ class TestSQLDraftColumnContract:
             "columns_used": ["status", "delivery_delay_flag", "customer_alias", "repurchase_customer_flag"],
         }
 
-        findings = validate_sql_identifiers({}, sql_draft, schema_text)
+        findings = validate_sql_identifiers({"route_kind": "simple"}, sql_draft, schema_text)
 
         assert not any(item["category"] == "missing_column" for item in findings)
 
@@ -216,7 +250,7 @@ class TestSQLDraftColumnContract:
     def test_validate_sql_identifiers_blocks_unknown_source_column_refs(self, source_column_ref):
         schema_text = '{"orders": {"columns": [{"name": "order_id"}]}}'
         findings = validate_sql_identifiers(
-            {},
+            {"route_kind": "simple"},
             {
                 "sql": "SELECT order_id AS delivery_delay_flag FROM orders;",
                 "source_tables": ["orders"],
@@ -232,7 +266,7 @@ class TestSQLDraftColumnContract:
     def test_validate_sql_identifiers_ignores_derived_and_output_columns(self):
         schema_text = '{"orders": {"columns": [{"name": "order_id"}]}}'
         findings = validate_sql_identifiers(
-            {},
+            {"route_kind": "simple"},
             {
                 "sql": "SELECT order_id AS computed_total FROM orders;",
                 "source_tables": ["orders"],
@@ -247,6 +281,137 @@ class TestSQLDraftColumnContract:
 
 
 # ── planner tests ──
+
+class TestSQLRouteKindContract:
+    @pytest.mark.parametrize(
+        ("route_kind", "legacy_fields", "expected"),
+        [
+            (
+                "comprehensive",
+                {
+                    "task_type": "query_answer",
+                    "requested_output": "execute_and_answer",
+                    "expected_result_shape": "table_preview",
+                },
+                ("data_mart_build", "create_table", "datamart_creation"),
+            ),
+            (
+                "simple",
+                {
+                    "task_type": "data_mart_build",
+                    "requested_output": "create_table",
+                    "expected_result_shape": "datamart_creation",
+                },
+                ("query_answer", "execute_and_answer", "table_preview"),
+            ),
+        ],
+    )
+    def test_question_plan_derives_legacy_fields_from_route_kind(
+        self,
+        route_kind,
+        legacy_fields,
+        expected,
+    ):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes.plan import _normalize_question_plan
+
+        parsed = {
+            "route_kind": route_kind,
+            "selected_join_tables": ["orders"],
+            "validation_contract": {"expected_result_shape": "contradictory_shape"},
+            **legacy_fields,
+        }
+
+        normalized = _normalize_question_plan({"user_question": "질문"}, parsed)
+
+        assert (
+            normalized["task_type"],
+            normalized["requested_output"],
+            normalized["expected_result_shape"],
+        ) == expected
+        assert normalized["validation_contract"]["expected_result_shape"] == expected[2]
+
+    @pytest.mark.parametrize("route_kind", [None, "", "mart", "eda", "trend"])
+    def test_question_plan_rejects_missing_or_unsupported_route_kind(self, monkeypatch, route_kind):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import plan as plan_module
+
+        payload = {"selected_join_tables": ["orders"]}
+        if route_kind is not None:
+            payload["route_kind"] = route_kind
+        monkeypatch.setattr(plan_module, "try_llm_json", lambda prompt: json.dumps(payload))
+
+        result = plan_module.plan_question(
+            {"user_question": "질문", "schema_text": "{}", "integrity_text": "{}"}
+        )
+
+        assert result["validation"]["result"] == "invalid"
+        assert result["validation"]["findings"][0]["code"] == "invalid_question_plan"
+        assert result["retry_hint"]["suggested_action"] == "replan_question"
+
+    def test_plan_prompt_does_not_request_derived_legacy_fields(self):
+        from DATA_Analyst_Assistant_Agent.agents.sql.prompts.plan import plan_prompt
+
+        prompt = plan_prompt({"user_question": "질문", "schema_text": "{}", "integrity_text": "{}"})
+
+        assert '"task_type"' not in prompt
+        assert '"requested_output"' not in prompt
+        assert '"expected_result_shape"' not in prompt
+
+    @pytest.mark.parametrize(
+        ("route_kind", "expected_node"),
+        [("simple", "generate"), ("comprehensive", "design")],
+    )
+    def test_route_after_refresh_integrity_context_uses_route_kind(self, route_kind, expected_node):
+        from DATA_Analyst_Assistant_Agent.agents.sql.graph import route_after_refresh_integrity_context
+
+        assert route_after_refresh_integrity_context({"plan": {"route_kind": route_kind}}) == expected_node
+
+    @pytest.mark.parametrize("route_kind", [None, "", "mart", "eda"])
+    def test_route_after_refresh_integrity_context_rejects_invalid_route(self, route_kind):
+        from DATA_Analyst_Assistant_Agent.agents.sql.graph import route_after_refresh_integrity_context
+
+        with pytest.raises(ValueError, match="route_kind"):
+            route_after_refresh_integrity_context({"plan": {"route_kind": route_kind}})
+
+    @pytest.mark.parametrize(
+        "sql_draft",
+        [
+            {
+                "sql": "INSERT INTO analytics.orders_mart SELECT * FROM orders;",
+                "sql_type": "insert_select",
+            },
+            {
+                "sql": "INSERT INTO analytics.orders_mart SELECT * FROM orders;",
+                "sql_type": "create_table_as",
+            },
+            {
+                "sql": "CREATE TABLE analytics.orders_mart AS SELECT * FROM orders; SELECT 1;",
+                "sql_type": "create_table_as",
+            },
+        ],
+    )
+    def test_comprehensive_route_requires_single_ctas_statement(self, sql_draft):
+        findings = validate_sql_dialect_and_route(
+            {"route_kind": "comprehensive"},
+            sql_draft,
+        )
+
+        assert any(item["category"] == "route_kind_mismatch" for item in findings)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; UPDATE orders SET amount = 0;",
+            "DELETE FROM orders;",
+        ],
+    )
+    def test_simple_route_requires_every_statement_to_be_select_or_with(self, sql):
+        findings = validate_sql_dialect_and_route(
+            {"route_kind": "simple"},
+            {"sql": sql, "sql_type": "select"},
+        )
+
+        assert any(item["category"] == "route_kind_mismatch" for item in findings)
+
 
 class TestSQLLangGraphSmoke:
     def test_integrity_summary_compacts_legacy_and_ge_payloads(self, monkeypatch, tmp_path):
@@ -415,7 +580,7 @@ class TestSQLLangGraphSmoke:
         assert "AVG(DATEDIFF(order_delivered_customer_date, order_approved_at))" in result["sql_draft"]["sql"]
         assert "WHERE order_approved_at IS NOT NULL" in result["sql_draft"]["sql"]
         assert result["validation"]["result"] == "valid"
-        assert result["plan"]["expected_result_shape"] == "single_scalar"
+        assert result["plan"]["expected_result_shape"] == "table_preview"
 
     def test_build_app_rejects_non_aggregate_sql_for_average_question(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -507,7 +672,7 @@ class TestSQLLangGraphSmoke:
             "columns_used": ["orders.order_id"],
         }
 
-        findings = validate_sql_identifiers({}, sql_draft, schema_text)
+        findings = validate_sql_identifiers({"route_kind": "simple"}, sql_draft, schema_text)
 
         assert not any(item["category"] == "missing_table" for item in findings)
 
@@ -525,7 +690,7 @@ class TestSQLLangGraphSmoke:
             "columns_used": ["orders.order_id"],
         }
 
-        findings = validate_sql_identifiers({}, sql_draft, schema_text)
+        findings = validate_sql_identifiers({"route_kind": "simple"}, sql_draft, schema_text)
 
         assert any(
             item["category"] == "missing_table" and "not_existing_table" in item["detail"]
@@ -685,6 +850,137 @@ class TestSQLLangGraphSmoke:
         assert result["mart_design"]["mart_name"] == "category_performance_analysis"
         assert committed and committed[0].lower().startswith("create table analytics.")
 
+    def test_replan_uses_new_route_while_sql_regeneration_keeps_current_route(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
+
+        monkeypatch.setattr(
+            context_module,
+            "load_all_metadata",
+            lambda: {
+                "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+                "integrity_text": "{}",
+            },
+        )
+        monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
+        monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
+        committed: list[str] = []
+        monkeypatch.setattr(sql_steps_module, "run_sql_commit", committed.append)
+
+        responses = iter(
+            [
+                json.dumps(
+                    {
+                        "route_kind": "simple",
+                        "selected_join_tables": ["orders"],
+                        "required_aggregations": ["AVG"],
+                        "target_metric": "평균 주문 금액",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "sql": "SELECT amount FROM orders;",
+                        "sql_type": "select",
+                        "source_tables": ["orders"],
+                        "source_column_refs": ["orders.amount"],
+                        "reasoning": "집계가 빠진 첫 SQL",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "route_kind": "comprehensive",
+                        "task_type": "query_answer",
+                        "requested_output": "execute_and_answer",
+                        "expected_result_shape": "table_preview",
+                        "selected_join_tables": ["orders"],
+                        "mart_name": "orders_analysis_mart",
+                        "grain": "order_id",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "mart_name": "orders_analysis_mart",
+                        "target_schema": "analytics",
+                        "grain": "order_id",
+                        "base_grain": "order_id",
+                        "source_tables": ["orders"],
+                        "key_columns": ["order_id"],
+                        "measure_columns": ["amount"],
+                        "dimension_columns": [],
+                        "load_strategy": "full_refresh",
+                        "row_preserving_strategy": "원본 주문 행 수준 유지",
+                        "aggregation_policy": "prefer_row_preserving",
+                        "design_reasoning": "원본 주문 행 수준 유지",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "sql": "CREATE TABLE analytics.orders_analysis_mart AS SELECT * FROM orders;",
+                        "sql_type": "create_table_as",
+                        "target_table": "analytics.orders_analysis_mart",
+                        "source_tables": ["orders"],
+                        "source_column_refs": ["orders.order_id", "orders.amount"],
+                        "postcheck_sql": "SELECT COUNT(*) FROM analytics.orders_analysis_mart;",
+                        "reasoning": "재사용 가능한 주문 마트",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        prompts_seen: list[str] = []
+
+        class DummyResponse:
+            def __init__(self, content: str):
+                self.content = content
+
+        class DummyLLM:
+            def invoke(self, prompt: str):
+                prompts_seen.append(prompt)
+                return DummyResponse(next(responses))
+
+        monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
+
+        result = build_app().invoke(
+            {
+                "user_question": "주문 금액을 분석해줘",
+                "required_db_schema": "",
+                "clarification_request": "",
+                "planner_selection_reason": "SQL 분석",
+                "schema_text": "",
+                "integrity_text": "",
+                "plan": {},
+                "mart_design": {},
+                "sql_draft": {},
+                "sql_result": None,
+                "row_count": 0,
+                "precheck_result": None,
+                "postcheck_result": None,
+                "mart_quality_result": {},
+                "validation": {},
+                "validation_findings": [],
+                "retry_hint": {},
+                "retry_count": 0,
+                "max_retries": 1,
+                "feedback": "",
+                "error": "",
+                "final_answer": "",
+            }
+        )
+
+        assert result["retry_count"] == 1
+        assert result["plan"]["route_kind"] == "comprehensive"
+        assert result["plan"]["task_type"] == "data_mart_build"
+        assert result["plan"]["expected_result_shape"] == "datamart_creation"
+        assert result["validation"]["result"] == "valid"
+        assert committed == ["CREATE TABLE analytics.orders_analysis_mart AS SELECT * FROM orders;"]
+        assert sum("MySQL 기반 SQL/데이터마트 planner" in prompt for prompt in prompts_seen) == 2
+        assert any("분석용 데이터마트 설계자" in prompt for prompt in prompts_seen)
+
     def test_build_app_normalizes_object_based_mart_design_columns(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
@@ -778,6 +1074,7 @@ class TestSQLLangGraphSmoke:
         monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         responses = iter(['{"sql": "SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "source_column_refs": ["orders.order_delivered_customer_date", "orders.order_approved_at"], "derived_columns": ["delivery_days"], "output_columns": ["delivery_days"], "reasoning": "1? ??"}', '{"sql": "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "source_column_refs": ["orders.order_delivered_customer_date", "orders.order_approved_at"], "derived_columns": ["avg_delivery_days"], "output_columns": ["avg_delivery_days"], "reasoning": "2? ??"}'])
+        prompts_seen: list[str] = []
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -785,6 +1082,7 @@ class TestSQLLangGraphSmoke:
 
         class DummyLLM:
             def invoke(self, prompt: str):
+                prompts_seen.append(prompt)
                 if "planner" in prompt:
                     return DummyResponse('{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}')
                 return DummyResponse(next(responses))
@@ -796,6 +1094,8 @@ class TestSQLLangGraphSmoke:
         assert result["validation"]["result"] == "valid"
         assert "AVG(DATEDIFF" in result["sql_draft"]["sql"]
         assert result["retry_count"] == 1
+        assert sum("MySQL 기반 SQL/데이터마트 planner" in prompt for prompt in prompts_seen) == 1
+        assert not any("분석용 데이터마트 설계자" in prompt for prompt in prompts_seen)
 
     def test_build_app_executes_multi_statement_selects_sequentially(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -1419,4 +1719,3 @@ class TestSQLAgentIntegration:
         assert result["integrity_refresh"]["ready"] is True
         assert "amount has 2 nulls" in result["integrity_text"]
         assert "legacy pass dump" not in result["integrity_text"]
-

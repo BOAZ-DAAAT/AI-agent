@@ -6,6 +6,7 @@ from typing import Any
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     extract_schema_json,
     normalize_sql_draft_columns,
+    require_route_kind,
     schema_tables,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
@@ -21,8 +22,11 @@ def _normalized_upper_sql(sql: str) -> str:
 
 
 def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    route_kind = require_route_kind(plan)
     contract = dict(plan.get("validation_contract") or {})
-    contract.setdefault("expected_result_shape", plan.get("expected_result_shape") or "table_preview")
+    contract["expected_result_shape"] = (
+        "datamart_creation" if route_kind == "comprehensive" else "table_preview"
+    )
     contract.setdefault("required_columns", list(plan.get("required_columns") or []))
     contract.setdefault("required_aggregations", list(plan.get("required_aggregations") or []))
     contract.setdefault("required_tables", list(plan.get("selected_join_tables") or plan.get("relevant_tables") or []))
@@ -37,7 +41,7 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
     findings: list[dict[str, Any]] = []
     sql = sql_draft.get("sql") or ""
     statements = split_sql_statements(sql)
-    route_kind = plan.get("route_kind") or ("comprehensive" if plan.get("task_type") == "data_mart_build" else "simple")
+    route_kind = require_route_kind(plan)
     sql_type = sql_draft.get("sql_type", "select")
     for index, statement in enumerate(statements):
         dialect_issue = mysql_dialect_error(statement)
@@ -60,15 +64,24 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
                     "retryable": True,
                     "detail": f"simple 경로의 {index + 1}번 statement는 SELECT/WITH로 시작해야 합니다.",
                 })
-    if route_kind == "comprehensive" and sql_type == "select":
-        findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "comprehensive 경로에서는 datamart 생성 SQL이 필요합니다."})
-    if route_kind == "comprehensive" and len(statements) > 1:
-        findings.append({
-            "category": "route_kind_mismatch",
-            "severity": "error",
-            "retryable": True,
-            "detail": "comprehensive 경로에서는 단일 datamart 생성 statement만 허용됩니다.",
-        })
+    if route_kind == "comprehensive":
+        if sql_type != "create_table_as":
+            findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "comprehensive 경로에서는 create_table_as SQL만 허용됩니다."})
+        if len(statements) != 1:
+            findings.append({
+                "category": "route_kind_mismatch",
+                "severity": "error",
+                "retryable": True,
+                "detail": "comprehensive 경로에서는 단일 datamart 생성 statement만 허용됩니다.",
+            })
+        first_statement = _normalized_upper_sql(statements[0]) if statements else ""
+        if not re.match(r"^CREATE\s+TABLE\s+.+?\s+AS\s+(?:WITH\b|SELECT\b)", first_statement, re.DOTALL):
+            findings.append({
+                "category": "route_kind_mismatch",
+                "severity": "error",
+                "retryable": True,
+                "detail": "comprehensive 경로의 SQL은 CREATE TABLE ... AS SELECT 형식이어야 합니다.",
+            })
     return findings
 
 
