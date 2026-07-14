@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import extract_schema_json, schema_tables
+from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
+    extract_schema_json,
+    normalize_sql_draft_columns,
+    schema_tables,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 
@@ -110,6 +114,7 @@ def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, A
 
 
 def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], schema_text: str) -> list[dict[str, Any]]:
+    sql_draft = normalize_sql_draft_columns(sql_draft)
     schema_json = extract_schema_json(schema_text)
     tables = schema_tables(schema_json) if schema_json else {}
     findings: list[dict[str, Any]] = []
@@ -126,7 +131,7 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
         bare_name = table_name.split(".")[-1]
         if bare_name not in available_tables and table_name not in available_tables:
             findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
-    for column_name in [str(c) for c in sql_draft.get("columns_used", []) if c]:
+    for column_name in [str(c) for c in sql_draft.get("source_column_refs", []) if c]:
         bare_column_name = column_name.split(".")[-1]
         if not any(bare_column_name in cols for cols in available_columns.values()):
             findings.append({"category": "missing_column", "severity": "error", "retryable": False, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})

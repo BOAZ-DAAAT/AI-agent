@@ -59,7 +59,9 @@ class SQLDraft(BaseModel):
     sql_type: str = Field(description="select / create_table_as / insert_select")
     target_table: Optional[str] = None
     source_tables: List[str] = Field(default_factory=list)
-    columns_used: List[str] = Field(default_factory=list)
+    source_column_refs: List[str] = Field(default_factory=list)
+    derived_columns: List[str] = Field(default_factory=list)
+    output_columns: List[str] = Field(default_factory=list)
     business_grain: Optional[str] = None
     precheck_sql: Optional[str] = None
     postcheck_sql: Optional[str] = None

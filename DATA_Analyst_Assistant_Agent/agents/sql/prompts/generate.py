@@ -42,6 +42,8 @@ def generate_mart_prompt(state, feedback: str) -> str:
 - precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
 - postcheck_sql에는 생성 후 row_count / 중복 / null 점검용 SELECT
 - DROP, ALTER, TRUNCATE 금지
+- source_column_refs에는 실제 원천 table.column만 작성하고, 계산 alias나 최종 출력 alias는 넣지 말 것
+- derived_columns에는 계산식으로 만든 alias만, output_columns에는 최종 SELECT에 노출되는 컬럼만 작성
 - 반드시 JSON만 출력
 
 출력 형식:
@@ -50,7 +52,9 @@ def generate_mart_prompt(state, feedback: str) -> str:
   "sql_type": "create_table_as 또는 insert_select",
   "target_table": "{ALLOWED_MART_SCHEMA}.xxx",
   "source_tables": ["..."],
-  "columns_used": ["..."],
+  "source_column_refs": ["table.column"],
+  "derived_columns": ["계산식 alias"],
+  "output_columns": ["최종 노출 컬럼"],
   "business_grain": "...",
   "precheck_sql": "SELECT ...",
   "postcheck_sql": "SELECT ...",
@@ -87,6 +91,8 @@ def generate_query_prompt(state, feedback: str) -> str:
  - 이전에 특정 statement가 실패했다면 전체를 무작정 다시 쓰지 말고 실패 statement를 우선 수정하라
  - 질문에 없는 조건 임의 추가 금지
  - 정합성 문제가 있는 컬럼/테이블 주의
+ - source_column_refs에는 실제 원천 table.column만 작성하고, 계산 alias나 최종 출력 alias는 넣지 말 것
+ - derived_columns에는 계산식으로 만든 alias만, output_columns에는 최종 SELECT에 노출되는 컬럼만 작성
  - 반드시 JSON만 출력
 
 출력 형식:
@@ -95,7 +101,9 @@ def generate_query_prompt(state, feedback: str) -> str:
   "sql_type": "select",
   "target_table": null,
   "source_tables": ["..."],
-  "columns_used": ["..."],
+  "source_column_refs": ["table.column"],
+  "derived_columns": ["계산식 alias"],
+  "output_columns": ["최종 노출 컬럼"],
   "business_grain": null,
   "precheck_sql": null,
   "postcheck_sql": null,
