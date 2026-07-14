@@ -9,6 +9,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql import prompts
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     empty_sql_draft,
     normalize_generated_sql,
+    require_route_kind,
     retry_feedback_text,
     try_llm_json,
 )
@@ -62,8 +63,7 @@ def _generation_failure(
 
 
 def generate_sql(state: AgentState):
-    task_type = state["plan"].get("task_type", "query_answer")
-    route_kind = state["plan"].get("route_kind") or ("comprehensive" if task_type == "data_mart_build" else "simple")
+    route_kind = require_route_kind(state["plan"])
     retry_hint = state.get("retry_hint") or {}
     if state.get("retry_count", 0) > 0 and retry_hint.get("reason_code") in {"missing_table", "missing_column"}:
         return _generation_failure(
@@ -74,7 +74,11 @@ def generate_sql(state: AgentState):
         )
 
     feedback = retry_feedback_text(state)
-    prompt = prompts.generate_mart_prompt(state, feedback) if task_type == "data_mart_build" else prompts.generate_query_prompt(state, feedback)
+    prompt = (
+        prompts.generate_mart_prompt(state, feedback)
+        if route_kind == "comprehensive"
+        else prompts.generate_query_prompt(state, feedback)
+    )
     response = try_llm_json(prompt)
     if not response:
         return _generation_failure(

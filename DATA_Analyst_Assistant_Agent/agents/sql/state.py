@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 # -----------------------------
 class QuestionPlan(BaseModel):
     original_question: str = Field(description="사용자 원문 질문")
-    route_kind: str = Field(default="simple", description="simple / comprehensive / mart")
+    route_kind: str = Field(description="simple / comprehensive")
     question_type: str = Field(description="aggregation/comparison/ranking/filter/detail/trend/identification/mart_build")
     task_type: str = Field(description="query_answer 또는 data_mart_build")
     requested_output: str = Field(description="sql_only / execute_and_answer / create_table")
@@ -30,7 +30,7 @@ class QuestionPlan(BaseModel):
     grain: Optional[str] = Field(default=None, description="마트 grain")
     load_strategy: Optional[str] = Field(default=None, description="full_refresh / incremental")
     ambiguity_note: Optional[str] = Field(default=None, description="애매한 표현")
-    expected_result_shape: str = Field(default="table_preview", description="single_scalar / grouped_aggregate / table_preview / datamart_creation")
+    expected_result_shape: str = Field(description="table_preview / datamart_creation")
     required_columns: List[str] = Field(default_factory=list, description="반드시 필요하다고 판단한 컬럼")
     required_aggregations: List[str] = Field(default_factory=list, description="필수 집계 함수")
     validation_contract: Dict[str, Any] = Field(default_factory=dict, description="validation용 구조화 계약")
@@ -56,10 +56,12 @@ class MartDesign(BaseModel):
 
 class SQLDraft(BaseModel):
     sql: str
-    sql_type: str = Field(description="select / create_table_as / insert_select")
+    sql_type: str = Field(description="select / create_table_as")
     target_table: Optional[str] = None
     source_tables: List[str] = Field(default_factory=list)
-    columns_used: List[str] = Field(default_factory=list)
+    source_column_refs: List[str] = Field(default_factory=list)
+    derived_columns: List[str] = Field(default_factory=list)
+    output_columns: List[str] = Field(default_factory=list)
     business_grain: Optional[str] = None
     precheck_sql: Optional[str] = None
     postcheck_sql: Optional[str] = None

@@ -45,8 +45,8 @@ SQL 설명:
 {state['row_count']}
 
 검증 규칙:
-1. task_type=query_answer 이면 질문 조건 충족 여부 검증
-2. task_type=data_mart_build 이면 grain 적합성, 타겟 테이블 적절성, 재사용성, row-preserving 성격을 우선 검증
+1. route_kind=simple 이면 질문 조건 충족 여부 검증
+2. route_kind=comprehensive 이면 grain 적합성, 타겟 테이블 적절성, 재사용성, row-preserving 성격을 우선 검증
 3. 데이터마트가 특정 질문에 대한 최종 요약 결과 테이블처럼 과하게 집계되면 invalid 또는 강한 수정 피드백
 4. 집계를 사용했다면 row-level mart가 왜 부적절한지 정당화가 있는지 확인
 5. 위 사전 신호는 참고용이며, 특정 키워드가 없다고 자동 invalid로 보지 말고 SQL의 실제 재사용성과 grain을 기준으로 판단

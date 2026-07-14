@@ -120,7 +120,7 @@ def execute_sql(state: AgentState):
                 run_sql_commit(sql)
             except Exception as e:
                 error_text = str(e)
-                if sql_type in {"create_table_as", "insert_select"} and target_table and "already exists" in error_text.lower():
+                if sql_type == "create_table_as" and target_table and "already exists" in error_text.lower():
                     drop_table_if_exists(target_table)
                     run_sql_commit(sql)
                 else:

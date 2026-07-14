@@ -5,7 +5,19 @@ import re
 from typing import Any, Optional
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, clean_sql, get_llm
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import extract_sql_aliases
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
+
+
+SUPPORTED_ROUTE_KINDS = {"simple", "comprehensive"}
+
+
+def require_route_kind(plan: dict[str, Any]) -> str:
+    """SQL Agent 실행 계약에 맞는 route_kind를 반환한다."""
+    route_kind = str(plan.get("route_kind") or "").strip().lower()
+    if route_kind not in SUPPORTED_ROUTE_KINDS:
+        raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
+    return route_kind
 
 
 def extract_schema_json(schema_text: str) -> dict[str, Any]:
@@ -68,9 +80,7 @@ def try_llm_json(prompt: str) -> Optional[str]:
 
 def empty_sql_draft(state: AgentState, *, reasoning: str) -> dict[str, Any]:
     plan = state.get("plan") or {}
-    route_kind = plan.get("route_kind") or (
-        "comprehensive" if plan.get("task_type") == "data_mart_build" else "simple"
-    )
+    route_kind = require_route_kind(plan)
     target_table = None
     if route_kind == "comprehensive":
         mart_name = (state.get("mart_design") or {}).get("mart_name") or plan.get("mart_name")
@@ -81,7 +91,9 @@ def empty_sql_draft(state: AgentState, *, reasoning: str) -> dict[str, Any]:
         sql_type="create_table_as" if route_kind == "comprehensive" else "select",
         target_table=target_table,
         source_tables=[],
-        columns_used=[],
+        source_column_refs=[],
+        derived_columns=[],
+        output_columns=[],
         business_grain=(state.get("mart_design") or {}).get("grain") or plan.get("grain"),
         precheck_sql=None,
         postcheck_sql=None,
@@ -139,20 +151,60 @@ def normalize_generated_sql(
     *,
     default_business_grain: str | None = None,
 ) -> dict[str, Any]:
-    parsed["sql"] = clean_sql(parsed.get("sql", ""))
-    parsed["target_table"] = qualify_target_table(parsed.get("target_table"))
-    if parsed.get("precheck_sql"):
-        parsed["precheck_sql"] = clean_sql(parsed["precheck_sql"])
-    postcheck_sql = parsed.get("postcheck_sql")
+    if route_kind not in SUPPORTED_ROUTE_KINDS:
+        raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
+    normalized = normalize_sql_draft_columns(parsed)
+    normalized["sql"] = clean_sql(normalized.get("sql", ""))
+    normalized["target_table"] = qualify_target_table(normalized.get("target_table"))
+    if normalized.get("precheck_sql"):
+        normalized["precheck_sql"] = clean_sql(normalized["precheck_sql"])
+    postcheck_sql = normalized.get("postcheck_sql")
     if postcheck_sql:
-        parsed["postcheck_sql"] = normalize_postcheck_sql(postcheck_sql, parsed.get("target_table"))
-    parsed.setdefault("sql_type", "create_table_as" if route_kind == "comprehensive" else "select")
-    parsed.setdefault("source_tables", [])
-    parsed.setdefault("columns_used", [])
-    parsed.setdefault("business_grain", default_business_grain)
-    parsed.setdefault("reasoning", "")
-    if route_kind == "comprehensive" and parsed["sql_type"] == "select":
-        raise ValueError("comprehensive route requires datamart SQL")
-    if route_kind == "simple" and parsed["sql_type"] != "select":
+        normalized["postcheck_sql"] = normalize_postcheck_sql(postcheck_sql, normalized.get("target_table"))
+    normalized.setdefault("sql_type", "create_table_as" if route_kind == "comprehensive" else "select")
+    normalized.setdefault("source_tables", [])
+    normalized.setdefault("source_column_refs", [])
+    normalized.setdefault("derived_columns", [])
+    normalized.setdefault("output_columns", [])
+    normalized.setdefault("business_grain", default_business_grain)
+    normalized.setdefault("reasoning", "")
+    if route_kind == "comprehensive" and normalized["sql_type"] != "create_table_as":
+        raise ValueError("comprehensive route requires create_table_as SQL")
+    if route_kind == "simple" and normalized["sql_type"] != "select":
         raise ValueError("simple route requires select SQL")
-    return parsed
+    return normalized
+
+
+def normalize_sql_draft_columns(parsed: dict[str, Any]) -> dict[str, Any]:
+    """신·구 SQLDraft 컬럼 계약을 입력을 변경하지 않고 정규화한다."""
+    normalized = dict(parsed)
+    legacy_columns_used = "source_column_refs" not in normalized and "columns_used" in normalized
+    if legacy_columns_used:
+        aliases = extract_sql_aliases(str(normalized.get("sql") or ""))
+        normalized["source_column_refs"] = _normalize_legacy_source_column_refs(
+            normalized.get("columns_used"),
+            aliases,
+        )
+        normalized["derived_columns"] = []
+        normalized["output_columns"] = []
+    normalized.pop("columns_used", None)
+    return normalized
+
+
+def _normalize_legacy_source_column_refs(value: Any, aliases: set[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for entry in value:
+        reference = str(entry or "").strip().replace("`", "")
+        if not reference:
+            continue
+        is_bare_identifier = "." not in reference and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", reference)
+        if is_bare_identifier and reference.casefold() in aliases:
+            continue
+        key = reference.casefold()
+        if key not in seen:
+            seen.add(key)
+            refs.append(reference)
+    return refs
