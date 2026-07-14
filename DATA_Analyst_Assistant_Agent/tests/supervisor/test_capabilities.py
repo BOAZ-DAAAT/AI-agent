@@ -70,3 +70,37 @@ def test_default_capabilities_declare_required_output_evidence_contracts() -> No
     ]
     assert capabilities["analysis_agent"].input_evidence_mode == "any"
     assert capabilities["report_agent"].input_evidence_mode == "any"
+
+
+def test_default_capabilities_describe_sql_as_data_preparation_only() -> None:
+    capabilities = {item.agent: item for item in DEFAULT_AGENT_CAPABILITIES}
+    sql = capabilities["sql_agent"]
+
+    assert "분석용 SQL 결과" in sql.description
+    assert "데이터셋" in sql.when_to_use
+    avoid_text = " ".join(sql.avoid_when)
+    for keyword in ["분포", "결측", "이상치", "품질", "가설 후보", "분석 방향"]:
+        assert keyword in avoid_text
+
+
+def test_default_capabilities_describe_eda_as_exploratory_discovery() -> None:
+    capabilities = {item.agent: item for item in DEFAULT_AGENT_CAPABILITIES}
+    eda = capabilities["eda_agent"]
+
+    eda_text = " ".join([eda.description, eda.when_to_use])
+    for keyword in ["탐색", "발견", "가설 후보", "분석 방향"]:
+        assert keyword in eda_text
+    assert eda.produces_artifacts == ["data_profile", "quality_summary", "eda_summary"]
+    assert [(item.type, item.kind) for item in eda.output_evidence] == [
+        ("data_profile", "eda_summary")
+    ]
+
+
+def test_default_capabilities_describe_analysis_as_analysis_executor() -> None:
+    capabilities = {item.agent: item for item in DEFAULT_AGENT_CAPABILITIES}
+    analysis = capabilities["analysis_agent"]
+
+    analysis_text = " ".join([analysis.description, analysis.when_to_use])
+    for keyword in ["분석을 설계", "수행", "통계 검정", "모델링", "비즈니스 인사이트"]:
+        assert keyword in analysis_text
+    assert "EDA 결과가 없을 때" in " ".join(analysis.avoid_when)

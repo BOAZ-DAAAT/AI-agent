@@ -408,7 +408,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     assert len(model.messages) == 2
     assert model.messages[0]["role"] == "system"
     assert model.messages[1]["role"] == "user"
-    assert len(model.messages[1]["content"]) <= 12000
+    assert len(model.messages[1]["content"]) <= 12500
     snapshot = json.loads(model.messages[1]["content"])
     assert snapshot["query"] == "월별 매출 추이를 분석해줘"
     assert snapshot["available_next_actions"] == [
@@ -527,7 +527,24 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "eda_agent",
         "analysis_agent",
     ]
-    assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
+    assert all(len(json.dumps(context, ensure_ascii=False)) <= 12500 for context in contexts)
+
+
+def test_next_action_context_preserves_capability_role_boundary_text() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+
+    context = build_next_action_context(state)
+    capabilities = {item["agent"]: item for item in context["agent_capabilities"]}
+
+    assert "가설 후보" in capabilities["eda_agent"]["description"]
+    assert "분석 방향" in capabilities["eda_agent"]["when_to_use"]
+    assert "비즈니스 인사이트" in " ".join(capabilities["sql_agent"]["avoid_when"])
+    assert "통계 검정" in capabilities["analysis_agent"]["description"]
 
 
 def test_finalization_context_includes_latest_validation_agent_failure_streak() -> None:
