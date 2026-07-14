@@ -170,7 +170,7 @@ def build_plan_context(state: SupervisorState) -> dict[str, Any]:
 
 def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
     validation_results, _, semantic_results = _validation_context_views(state)
-    return _bounded_context(
+    context = _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
             "available_next_actions": [
@@ -188,7 +188,7 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
             "validation_results": validation_results[-3:],
             "semantic_validation_results": semantic_results[-3:],
             "step_summaries": list(state.get("step_summaries", []))[-5:],
-            "agent_capabilities": agent_capabilities_context(),
+            "agent_capabilities": [],
             "pending_approval": state.get("pending_approval"),
             "terminal_state": state.get("terminal_state", ""),
         },
@@ -196,6 +196,13 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
         max_items=8,
         depth=3,
     )
+    context["agent_capabilities"] = _bounded_value(
+        agent_capabilities_context(),
+        max_text=250,
+        max_items=8,
+        depth=3,
+    )
+    return context
 
 
 def build_execution_guard_context(state: SupervisorState) -> dict[str, Any]:
