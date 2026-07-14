@@ -50,6 +50,46 @@ def _drop_weak_scatters(paths: list, correlation_pairs: dict) -> list:
     return kept
 
 
+_PREFERRED_PREFIXES = ("segment_profile_", "interval_", "ecdf_")
+_LIGHTWEIGHT_PREFIXES = ("dist_", "box_", "violin_")
+
+
+def _selection_priority(path: str) -> tuple[int, str]:
+    name = os.path.basename(path)
+    if name.startswith("segment_profile_"):
+        return (0, name)
+    if name.startswith("interval_"):
+        return (1, name)
+    if name.startswith("ecdf_"):
+        return (2, name)
+    return (3, name)
+
+
+def _promote_preferred_new_families(paths: list[str]) -> list[str]:
+    return sorted(paths, key=_selection_priority)
+
+
+def _ensure_preferred_survives(paths: list[str]) -> list[str]:
+    if len(paths) <= TOTAL_MAX:
+        return paths
+
+    selected = list(paths[:TOTAL_MAX])
+    selected_names = {os.path.basename(p) for p in selected}
+    preferred = [p for p in paths if os.path.basename(p).startswith(_PREFERRED_PREFIXES)]
+    if not preferred:
+        return selected
+    if any(os.path.basename(p) in selected_names for p in preferred):
+        return selected
+
+    candidate = preferred[0]
+    for idx in range(len(selected) - 1, -1, -1):
+        if os.path.basename(selected[idx]).startswith(_LIGHTWEIGHT_PREFIXES):
+            selected[idx] = candidate
+            return selected
+    selected[-1] = candidate
+    return selected
+
+
 def _call_llm_remove(
     filenames: list,
     user_question: str,
@@ -210,6 +250,7 @@ def run_chart_selector_skill(
     if not valid_paths:
         return [], {}   # 결정론 가드로 전부 걸러졌으면 LLM 호출 없이 종료
 
+    valid_paths = _promote_preferred_new_families(valid_paths)
     name_to_path = {os.path.basename(p): p for p in valid_paths}
     filenames = list(name_to_path.keys())
 
@@ -251,6 +292,6 @@ def run_chart_selector_skill(
         captions.update({k: str(v) for k, v in (result2.get("keep_captions") or {}).items()})
         filtered = [p for p in filtered if os.path.basename(p) not in to_remove2]
 
-    final = filtered[:TOTAL_MAX]
+    final = _ensure_preferred_survives(filtered)
     final_names = {os.path.basename(p) for p in final}
     return final, {k: v for k, v in captions.items() if k in final_names}

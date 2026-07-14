@@ -2,6 +2,7 @@ import pandas as pd
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_distribution_skill
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
     plot_distributions,
+    plot_ecdfs,
     plot_boxplots,
     plot_violins,
     plot_category_distribution,
@@ -44,6 +45,7 @@ def run_distribution_skill(
 
     else:  # distribution 또는 기본값
         result["distributions"]         = plot_distributions(df, measure_cols=measure_cols)
+        result["ecdfs"]                 = plot_ecdfs(df, measure_cols=measure_cols)
         result["boxplots"]              = plot_boxplots(df, measure_cols=measure_cols)
         result["violins"]               = plot_violins(df, measure_cols=measure_cols)
         result["category_distribution"] = plot_category_distribution(df)

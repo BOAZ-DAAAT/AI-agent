@@ -2,6 +2,8 @@ import pandas as pd
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_requests import from_comparison_skill
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
     plot_top_n_barplot,
+    plot_mean_ci_comparison,
+    plot_segment_flag_profiles,
     plot_heatmap_matrix,
     plot_bubble,
     plot_radar,
@@ -39,6 +41,8 @@ def run_comparison_skill(
 
     else:  # comparison 또는 기본값
         result["top_n_barplot"]  = plot_top_n_barplot(df, key_col=key_col, measure_cols=measure_cols)
+        result["mean_ci"]        = plot_mean_ci_comparison(df, key_col=key_col, measure_cols=measure_cols)
+        result["segment_profile"] = plot_segment_flag_profiles(df, measure_cols=measure_cols)
         result["heatmap_matrix"] = plot_heatmap_matrix(df, key_col=key_col, measure_cols=measure_cols)
         result["bubble"]         = plot_bubble(df, key_col=key_col, measure_cols=measure_cols)
         result["radar"]          = plot_radar(df, key_col=key_col, measure_cols=measure_cols)

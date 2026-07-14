@@ -1091,6 +1091,25 @@ def test_distribution_charts_skip_flags_and_use_log(tmp_path):
     assert out["stats"]["value"]["skewness"] > 2         # 왜도 큰 컬럼은 log축으로 그려짐(스모크)
 
 
+def test_ecdf_charts_generate_for_numeric_columns(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    out = V.plot_ecdfs(df)
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "ecdf_value.png" in names
+    assert "ecdf_is_flag.png" not in names
+    assert out["stats"]["value"]["p99"] >= out["stats"]["value"]["p90"] >= out["stats"]["value"]["p50"]
+
+
+def test_distribution_skill_emits_ecdf_family():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.distribution_skill import run_distribution_skill
+    df = _guard_df()
+    out = run_distribution_skill(df, question_type="distribution")
+    assert "ecdfs" in out
+    assert out["ecdfs"]["chart_paths"]
+
+
 def test_key_charts_reject_high_cardinality_key(tmp_path):
     from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
     V.set_output_dirs(str(tmp_path))
@@ -1143,6 +1162,27 @@ def test_plot_top_n_barplot_top_only_skips_bottom(tmp_path):
     out = visualize.plot_top_n_barplot(d, measure_cols=["value"], top_only=True)
     names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
     assert names and all("bar_bottom" not in n for n in names)
+
+
+def test_segment_profile_chart_generates_for_flag_columns(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    df["is_high_value_low_satisfaction"] = ((df["value"] > df["value"].median()) & (df["score"] < df["score"].median())).astype(int)
+    out = V.plot_segment_flag_profiles(df, measure_cols=["value", "score"])
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "segment_profile_is_high_value_low_satisfaction.png" in names
+    assert out["stats"]["is_high_value_low_satisfaction"]["segment_rate"] > 0
+
+
+def test_comparison_skill_emits_interval_and_segment_charts():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.comparison_skill import run_comparison_skill
+    df = _guard_df()
+    df["state"] = np.where(df.index % 3 == 0, "AA", np.where(df.index % 3 == 1, "BB", "CC"))
+    df["is_high_value_low_satisfaction"] = ((df["value"] > df["value"].median()) & (df["score"] < df["score"].median())).astype(int)
+    out = run_comparison_skill(df, key_col="state", measure_cols=["value", "score"], question_type="comparison")
+    assert out["mean_ci"]["chart_paths"]
+    assert out["segment_profile"]["chart_paths"]
 
 
 def test_validate_request_rejects_bad_shape():
