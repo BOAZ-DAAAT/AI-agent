@@ -30,6 +30,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ApprovalRequirement,
     RetryHint,
 )
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import ReviewRequest
 
 
 class FakeMessage:
@@ -480,13 +481,15 @@ def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation()
     assert any(event["event_type"] == "evidence.promoted" for event in backend.events)
 
 
-def test_supervisor_graph_has_exactly_ten_nodes() -> None:
+def test_supervisor_graph_has_expected_nodes() -> None:
     graph = build_graph(FakeSubAgentAdapter(), model=SequencedDecisionModel([]))
 
     assert set(graph.nodes) == {
         "__start__",
         "clarify_query",
         "collect_clarification",
+        "collect_analysis_review",
+        "resolve_analysis_review",
         "create_analysis_plan",
         "decide_next_action",
         "execute_subagent",
@@ -944,6 +947,77 @@ def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
     assert result["completed_agents"] == []
     assert result["final_answer"] == "SQL 실행 승인 필요"
     assert "summarize_step" not in [entry["node"] for entry in result["llm_decisions"]]
+
+
+def test_structured_analysis_review_returns_native_interrupt_with_full_request() -> None:
+    review_request = {
+        "question": "대표값은?",
+        "proposal": "대표값 선택",
+        "options": [
+            {"id": "mean", "label": "평균", "method": "산술 평균", "impact": "평균", "recommended": False},
+            {"id": "median", "label": "중앙값", "method": "50% 분위수", "impact": "중앙값", "recommended": True},
+        ],
+        "recommended_option_id": "median",
+        "requires_followup_analysis": True,
+    }
+    adapter = FakeSubAgentAdapter(
+        {
+            "analysis_agent": AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent="analysis_agent",
+                    status="approval_required",
+                    summary="분석 선택 필요",
+                    artifact_ids=["analysis_001"],
+                    artifacts=[
+                        ArtifactSummary(
+                            artifact_id="analysis_001",
+                            kind="analysis_result",
+                            metadata={"kind": "analysis_result"},
+                            preview={"review_request": review_request},
+                            content_hash="hash_001",
+                        )
+                    ],
+                    approval=ApprovalRequirement(
+                        required=True,
+                        reason="대표값을 선택해 주세요.",
+                        approval_type="analysis.review",
+                    ),
+                )
+            )
+        }
+    )
+    graph = build_graph(
+        subagent_adapter=adapter,
+        model=SequencedDecisionModel(
+            [
+                _clarify_decision(),
+                _plan_decision(),
+                _next_action_decision("call_analysis_agent"),
+                _semantic_decision(),
+            ]
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="sql_agent",
+            status="success",
+            summary="SQL 완료",
+            artifact_ids=["sql_001"],
+            artifacts=[ArtifactSummary(artifact_id="sql_001", content_hash="sql_hash")],
+        ),
+    )
+
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_analysis_review"}})
+
+    payload = result["__interrupt__"][0].value
+    assert payload["type"] == "analysis_review"
+    assert payload["approval_id"].startswith("run_001:analysis_agent:candidate_")
+    assert payload["approval_id"].endswith(":approval")
+    assert payload["review_request"] == ReviewRequest.model_validate(review_request).model_dump(mode="json")
+    assert result["pending_result"] is not None
+    assert result["terminal_state"] == "running"
 
 
 def test_approval_required_result_preserves_terminal_state_when_finalize_llm_fails() -> None:

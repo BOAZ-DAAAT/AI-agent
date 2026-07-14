@@ -437,6 +437,51 @@ def test_subagent_adapter_preserves_approval_details_in_compact_result() -> None
     assert result.agent_result.approval_type == "analysis.review"
 
 
+class SelectionCapturingAnalysisAgent:
+    name = "analysis_agent"
+
+    def __init__(self) -> None:
+        self.selection_response = None
+        self.review_request = None
+
+    def run(
+        self,
+        state: OrchestrationState,
+        runtime,
+        *,
+        selection_response=None,
+        review_request=None,
+    ) -> AgentEnvelope:
+        self.selection_response = selection_response
+        self.review_request = review_request
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name="analysis_agent",
+            summary="선택 반영",
+        )
+
+
+def test_subagent_adapter_passes_active_analysis_review_binding_from_raw_state() -> None:
+    agent = SelectionCapturingAnalysisAgent()
+    adapter = SubAgentAdapter(backend_adapter=FakeAdapter(), agents={"analysis_agent": agent})
+    state = _state()
+    state["analysis_selection_response"] = {"selected_option_id": "median", "free_text": None}
+    state["analysis_selection_review_request"] = {
+        "question": "대표값은?",
+        "proposal": "대표값 선택",
+        "options": [
+            {"id": "mean", "label": "평균", "method": "평균", "impact": "평균", "recommended": False},
+            {"id": "median", "label": "중앙값", "method": "중앙값", "impact": "중앙값", "recommended": True},
+        ],
+        "recommended_option_id": "median",
+    }
+
+    adapter.call("analysis_agent", state)
+
+    assert agent.selection_response.selected_option_id == "median"
+    assert agent.review_request.options[1].label == "중앙값"
+
+
 class IntegrityRefAgent:
     name = "sql_agent"
 

@@ -31,6 +31,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisIntent,
     AnalysisSelectionResponse,
+    ReviewRequest,
 )
 from DATA_Analyst_Assistant_Agent.shared.contracts import LocalCheck, OrchestrationState
 
@@ -41,6 +42,7 @@ class AnalysisWorkflowState(TypedDict, total=False):
     eda_profiles: list[dict[str, Any]]
     question_type: str | None
     selection_response: AnalysisSelectionResponse | None
+    review_request: ReviewRequest | None
     classify_model: Any | None
     code_generator_model: Any | None
     critic_model: Any | None
@@ -70,6 +72,7 @@ def classify_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             state.get("eda_profiles", []),
             question_type=state.get("question_type"),
             selection_response=state.get("selection_response"),
+            review_request=state.get("review_request"),
         )
         intent = classify_intent(context, state["dataframe"], model=state.get("classify_model"))
         return {"analysis_context": context, "intent": intent, "error": "", "terminal_reason": ""}
@@ -200,6 +203,7 @@ def run_analysis_workflow(
     *,
     question_type: str | None = None,
     selection_response: AnalysisSelectionResponse | None = None,
+    review_request: ReviewRequest | None = None,
     planner_model: Any | None = None,
     chart_artifact_loader: Any | None = None,
     chart_reader: Any | None = None,
@@ -215,6 +219,7 @@ def run_analysis_workflow(
         "eda_profiles": eda_profiles,
         "question_type": question_type,
         "selection_response": selection_response,
+        "review_request": review_request,
         "classify_model": planner_model,
         "code_generator_model": code_generator_model,
         "critic_model": critic_model,

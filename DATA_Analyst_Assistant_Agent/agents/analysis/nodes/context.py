@@ -4,7 +4,11 @@ from typing import Any
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext, AnalysisSelectionResponse
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
+    AnalysisSelectionResponse,
+    ReviewRequest,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 
@@ -16,6 +20,7 @@ def build_analysis_context(
     question_type: str | None = None,
     sample_limit: int = 5,
     selection_response: AnalysisSelectionResponse | None = None,
+    review_request: ReviewRequest | None = None,
 ) -> AnalysisContext:
     """Expose only task-relevant data and a small sample to an optional LLM planner."""
 
@@ -90,6 +95,7 @@ def build_analysis_context(
         known_data_quality_issues=known_data_quality_issues,
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
         last_failure=last_failure,
+        review_request=review_request,
         selection_response=selection_response,
     )
 

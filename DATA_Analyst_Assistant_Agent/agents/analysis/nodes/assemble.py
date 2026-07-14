@@ -138,6 +138,7 @@ def build_result_from_outcome(
         evidence_tables=result_payload.get("evidence_tables") or [],
         interpretation=[str(item) for item in (result_payload.get("interpretation") or [])],
         review_request=review_request,
+        selection_response=context.selection_response,
         method_notes=list(dict.fromkeys(method_notes)),
         method_decision=method_decision,
         intent=intent,

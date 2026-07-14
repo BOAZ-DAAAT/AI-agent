@@ -6,6 +6,10 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisSelectionResponse,
+    ReviewRequest,
+)
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
@@ -164,7 +168,7 @@ class SubAgentAdapter:
 
         orchestration_state = to_orchestration_state(state)
         agent = self.agents[agent_name]
-        run_kwargs = self._agent_run_kwargs(agent_name, agent)
+        run_kwargs = self._agent_run_kwargs(agent_name, agent, state)
         try:
             envelope = agent.run(
                 orchestration_state,
@@ -204,7 +208,12 @@ class SubAgentAdapter:
             state_updates=self._state_updates(orchestration_state),
         )
 
-    def _agent_run_kwargs(self, agent_name: AgentName, agent: RunnableAgent) -> dict[str, Any]:
+    def _agent_run_kwargs(
+        self,
+        agent_name: AgentName,
+        agent: RunnableAgent,
+        raw_state: SupervisorState,
+    ) -> dict[str, Any]:
         if agent_name != "analysis_agent":
             return {}
 
@@ -212,6 +221,12 @@ class SubAgentAdapter:
         parameters = signature.parameters
         accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
         kwargs: dict[str, Any] = {}
+        selection_payload = raw_state.get("analysis_selection_response")
+        review_payload = raw_state.get("analysis_selection_review_request")
+        if selection_payload is not None and (accepts_kwargs or "selection_response" in parameters):
+            kwargs["selection_response"] = AnalysisSelectionResponse.model_validate(selection_payload)
+        if review_payload is not None and (accepts_kwargs or "review_request" in parameters):
+            kwargs["review_request"] = ReviewRequest.model_validate(review_payload)
         if accepts_kwargs or "chart_artifact_loader" in parameters:
             kwargs["chart_artifact_loader"] = self._chart_artifact_loader
         if self.chart_reader is not None and (accepts_kwargs or "chart_reader" in parameters):
