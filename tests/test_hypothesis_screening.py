@@ -132,6 +132,24 @@ def test_trailing_section_preserved():
     assert len(meta) == 1                     # 트레일링을 가설로 오파싱하지 않음
 
 
+# ── 엣지: 대괄호 없는 '다음 분석 방향'도 재정렬에 안 딸려가고 맨 끝 보존 ──────
+def test_bracketless_trailing_stays_last_after_reorder():
+    # LLM이 '[다음 분석 방향]'을 대괄호 없이 '다음 분석 방향'으로 쓰는 경우(실측 회귀)
+    text = "\n\n".join([
+        _block(1, "OBS_STRONG", "회귀", "monetary", "review", "단순선형회귀"),
+        _block(2, "OBS_UNVER", "군집", "seg", "monetary, freq", "K-means"),
+    ]) + "\n\n다음 분석 방향\n1. 교란변수 후보: category\n2. 통제 방법: 다중회귀"
+    stat = {
+        "correlation_pairs": {"corr_monetary_vs_review": _corr(0.5, 0.48)},  # 가설1 강함
+        "clustering": {"skip": True},                                        # 가설2 미측정
+    }
+    new_text, meta = screen_hypotheses(text, stat)
+    assert len(meta) == 2                                   # 트레일링을 가설로 오파싱 X
+    assert "다음 분석 방향" in new_text and "다중회귀" in new_text
+    # 재정렬(가설1 강함 → 가설2 미측정) 후에도 트레일링은 마지막 가설 뒤
+    assert new_text.index("다음 분석 방향") > new_text.rindex("[가설")
+
+
 # ── 엣지: silhouette 음수는 약함(abs로 뒤집히면 안 됨) ────────────────────────
 def test_negative_silhouette_is_weak():
     text = _block(1, "OBS_C", "군집", "segment", "monetary, frequency", "K-means silhouette")

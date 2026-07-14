@@ -108,8 +108,9 @@ def _abs(v: Any) -> float:
 def _split_blocks(text: str) -> Tuple[str, List[str], str]:
     """텍스트를 (프리앰블, [가설 블록...], 트레일링)으로 분리한다.
 
-    트레일링은 첫 가설 이후 등장하는 '[가설'이 아닌 대괄호 헤더([다음 분석 방향] 등)부터 끝까지.
-    가설로 오파싱하면 안 되므로 그대로 보존한다.
+    트레일링은 첫 가설 이후 등장하는 '[가설'이 아닌 대괄호 헤더([다음 분석 방향] 등) 또는
+    '다음 분석 방향' 헤더(LLM이 대괄호를 빼먹는 경우)부터 끝까지. 이 섹션은 특정 가설에 속하지
+    않는 전역 내용이므로, 마지막 가설 블록에 흡수돼 재정렬 때 딸려 나가면 안 된다(그대로 보존).
     """
     lines = text.split("\n")
     starts = [i for i, ln in enumerate(lines) if ln.strip().startswith("[가설")]
@@ -119,7 +120,8 @@ def _split_blocks(text: str) -> Tuple[str, List[str], str]:
     trailing_idx: Optional[int] = None
     for i in range(starts[0] + 1, len(lines)):
         s = lines[i].strip()
-        if s.startswith("[") and not s.startswith("[가설"):
+        s_core = s.lstrip("[").strip()  # 대괄호 유무와 무관하게 헤더 텍스트 비교
+        if (s.startswith("[") and not s.startswith("[가설")) or s_core.startswith("다음 분석 방향"):
             trailing_idx = i
             break
 
