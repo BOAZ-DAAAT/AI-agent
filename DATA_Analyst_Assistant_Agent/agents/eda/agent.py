@@ -157,6 +157,8 @@ class EDAAgent:
         plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
         plan_business_grain = (plan.business_grain if plan and plan.business_grain else "") or ""
         try:
+            from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import clear_output_dirs
+            clear_output_dirs()  # 이전 런 누적 PNG 정리(run_eda_only도 이 경로를 타므로 규칙 동일)
             app = build_app()
             result = app.invoke(
                 {

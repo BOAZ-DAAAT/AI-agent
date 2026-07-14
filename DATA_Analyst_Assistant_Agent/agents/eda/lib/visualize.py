@@ -1,4 +1,5 @@
 import os
+import glob
 import json
 import re
 import pandas as pd
@@ -9,7 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns, usable_time_columns
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "all")
 KEY_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "key")
@@ -24,6 +25,17 @@ def set_output_dirs(grain_dir: str):
     KEY_DIR    = os.path.join(grain_dir, "key")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(KEY_DIR,    exist_ok=True)
+
+
+def clear_output_dirs():
+    """이전 런이 outputs/all·key에 남긴 PNG를 지운다 — 런마다 무한 누적되는 것 방지.
+
+    app.invoke() 시작 전, 런당 1회만 호출한다(모듈 import 시나 plot 함수 내부에서 호출하면
+    다른 런/테스트가 같은 프로세스에서 동시에 그린 파일까지 지울 수 있어 위험하다).
+    """
+    for d in (OUTPUT_DIR, KEY_DIR):
+        for f in glob.glob(os.path.join(d, "*.png")):
+            os.remove(f)
 
 # ─────────────────────────────
 # 공통 스타일 설정
@@ -62,6 +74,12 @@ sns.set_theme(
 #   플래그는 '그룹별 비율'(집계 차트의 mean)로만 의미가 있다.
 # ─────────────────────────────
 _ID_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|seq|sequential|idx|index)($|_)", re.IGNORECASE)
+# r_quartile/f_quartile/m_quartile처럼 연속값을 몇 구간으로 나눠 만든 순서형 파생 컬럼 —
+# dtype은 수치형이라 통과되지만 산점도로 그리면 몇 개 수평 줄로 눌려 보여 정보량이 낮고,
+# 대개 원본 컬럼(예: monetary_value)에서 파생돼 사실상 중복 정보다(#166 실측 피드백).
+_ORDINAL_BUCKET_NAME_RE = re.compile(
+    r"(_quartile|_quantile|_decile|_percentile|_tier|_bucket|_bin|_grade|_rank)$", re.IGNORECASE
+)
 _KEY_MAX_CARDINALITY = 50            # 이보다 범주가 많으면 차트 라벨 축으로 부적합(ID급)
 _MAX_PLOT_POINTS = 8000              # raw 포인트 차트(violin·scatter·box) 렌더 샘플 상한 — 96k행 렌더 폭증 방지
 
@@ -93,10 +111,12 @@ def _is_id_like_numeric(col: str, s: pd.Series) -> bool:
 
 
 def _valid_cat_col(df: pd.DataFrame, col, max_card: int = _KEY_MAX_CARDINALITY):
-    """차트 라벨 축으로 쓸 범주 컬럼 검증 — 없거나 고카디널리티(고객ID 96k 등)면 None."""
+    """차트 라벨 축으로 쓸 범주 컬럼 검증 — 없거나 고카디널리티(고객ID 96k 등)거나
+    상수(스냅샷 anchor_date처럼 그룹이 1개뿐)면 None."""
     if not col or col not in df.columns:
         return None
-    if df[col].nunique(dropna=True) > max_card:
+    n = df[col].nunique(dropna=True)
+    if n > max_card or n < 2:
         return None
     return col
 
@@ -109,6 +129,22 @@ def _pick_key_col(df: pd.DataFrame, key_col=None, max_card: int = _KEY_MAX_CARDI
     for c in categorical_object_columns(df):
         if _valid_cat_col(df, c, max_card):
             return c
+    return None
+
+
+# 집계 마트(고객 단위 RFM 등)는 범주형 컬럼이 없어 _pick_key_col이 None을 반환하기 쉽다.
+# 이 경우 0/1 세그먼트 플래그를 그룹 키로 쓴다 — 우선순위: 복합 세그먼트 > 단일 세그먼트 > 기타 flag.
+_FLAG_KEY_PRIORITY = ("is_high_value_low_satisfaction", "is_high_value", "is_low_satisfaction")
+
+
+def _pick_flag_key_col(df: pd.DataFrame):
+    """범주형 그룹 키가 없을 때 쓸 0/1 플래그 컬럼을 우선순위대로 고른다. 없으면 None."""
+    for col in _FLAG_KEY_PRIORITY:
+        if col in df.columns and _is_binary_flag(df[col].dropna()) and df[col].nunique(dropna=True) >= 2:
+            return col
+    for col in df.columns:
+        if str(col).lower().startswith("is_") and _is_binary_flag(df[col].dropna()) and df[col].nunique(dropna=True) >= 2:
+            return col
     return None
 
 
@@ -164,16 +200,40 @@ def _ellipsize(value, max_len: int = 18) -> str:
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 
-def _add_stat_badge(ax, lines: list[str]):
+def _flag_group_label(flag_col: str, value) -> str:
+    """0/1 플래그를 그룹 키로 쓸 때, 값 대신 사람이 읽을 라벨을 만든다.
+
+    is_high_value_low_satisfaction 같은 flag는 그룹핑 후 값이 그냥 0/1로 남아 축 라벨이
+    "0", "1"로만 보인다(#166 실측 피드백 — 어떤 그룹 비교인지 안 읽힘). 컬럼명에서 뜻을
+    뽑아 1=해당 세그먼트, 0=Rest로 표기한다.
+    """
+    name = _pretty_label(re.sub(r"^is_", "", str(flag_col)))
+    try:
+        is_positive = float(value) == 1.0
+    except (TypeError, ValueError):
+        return str(value)
+    return name.capitalize() if is_positive else "Rest"
+
+
+_BADGE_POSITIONS = {
+    "upper right": (0.99, 0.98, "right", "top"),
+    "upper left":  (0.01, 0.98, "left",  "top"),
+    "lower right": (0.99, 0.02, "right", "bottom"),
+    "lower left":  (0.01, 0.02, "left",  "bottom"),
+}
+
+
+def _add_stat_badge(ax, lines: list[str], loc: str = "upper right"):
     if not lines:
         return
+    x, y, ha, va = _BADGE_POSITIONS.get(loc, _BADGE_POSITIONS["upper right"])
     ax.text(
-        0.99,
-        0.98,
+        x,
+        y,
         "\n".join(lines),
         transform=ax.transAxes,
-        ha="right",
-        va="top",
+        ha=ha,
+        va=va,
         fontsize=8,
         color=TEXT_MUTED,
         bbox={
@@ -762,9 +822,13 @@ def plot_mean_ci_comparison(df: pd.DataFrame, key_col: str = None, measure_cols:
                             top_n: int = 8) -> dict:
     """그룹 평균과 95% CI를 함께 보여주는 비교 차트."""
     numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)
-    key_col = _pick_key_col(df, key_col)
+    key_col = _pick_key_col(df, key_col) or _pick_flag_key_col(df)
     if key_col is None or not numeric_cols:
         return {"chart_paths": [], "stats": {}}
+
+    # 0/1 플래그를 그룹 키로 쓴 경우 축 라벨이 "0","1"로만 보여 어떤 비교인지 안 읽힌다
+    # (#166 실측 피드백) — 컬럼명 기반 라벨(예: "High value low satisfaction" / "Rest")로 대체.
+    is_flag_group = str(key_col).lower().startswith("is_") and _is_binary_flag(df[key_col].dropna())
 
     paths = []
     stats = {}
@@ -789,16 +853,24 @@ def plot_mean_ci_comparison(df: pd.DataFrame, key_col: str = None, measure_cols:
             markersize=7,
         )
         ax.set_yticks(ypos)
-        ax.set_yticklabels([_ellipsize(v, 18) for v in grouped[key_col]], fontsize=9)
+        if is_flag_group:
+            tick_labels = [_flag_group_label(key_col, v) for v in grouped[key_col]]
+        else:
+            tick_labels = [_ellipsize(v, 18) for v in grouped[key_col]]
+        ax.set_yticklabels(tick_labels, fontsize=9)
         ax.invert_yaxis()
         _apply_style(
             ax,
-            f"Mean +/- 95% CI: {_pretty_label(metric)}",
+            f"Mean +/- 95% CI: {_pretty_label(metric)} by {_pretty_label(key_col)}",
             xlabel=metric,
             subtitle="Group averages with uncertainty bands",
             grid_axis="x",
         )
-        _add_stat_badge(ax, [f"groups {len(grouped)}", f"top mean {float(grouped['mean'].iloc[0]):.2f}"])
+        # 평균 내림차순 정렬이라 최고 평균 그룹은 항상 (y=0=상단, x=최대값=우측)에 찍힌다 —
+        # 기본 위치(우상단)에 배지를 두면 그 점을 매번 가린다(#166 실측 발견). 안전한
+        # 좌상단(항상 최고 평균보다 왼쪽)으로 옮긴다.
+        _add_stat_badge(ax, [f"groups {len(grouped)}", f"top mean {float(grouped['mean'].iloc[0]):.2f}"],
+                        loc="upper left")
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"interval_{metric}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -938,6 +1010,7 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
     paths = []
     stats = {}
     numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)   # 0/1 플래그 산점도 방지
+    numeric_cols = [c for c in numeric_cols if not _ORDINAL_BUCKET_NAME_RE.search(c)]  # quartile류 제외
     if len(numeric_cols) < 2:
         return {"chart_paths": [], "stats": {}}
 
@@ -992,9 +1065,9 @@ def plot_timeseries(df: pd.DataFrame, measure_cols: list = None, time_cols: list
     """datetime 컬럼 기준 수치형 지표 시계열 추세 + 기간/범위"""
     paths = []
     stats = {}
-    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백
-    if not time_cols:
-        time_cols = [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백 → 둘 다 usable 게이트 통과해야 함
+    candidates = time_cols or [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    time_cols = usable_time_columns(df, candidates)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if not time_cols or len(numeric_cols) == 0:
@@ -1034,9 +1107,9 @@ def plot_seasonality(df: pd.DataFrame, measure_cols: list = None, time_cols: lis
     """월/요일 기준 시즌성 bar chart + 피크 시점"""
     paths = []
     stats = {}
-    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백
-    if not time_cols:
-        time_cols = [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백 → 둘 다 usable 게이트 통과해야 함
+    candidates = time_cols or [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    time_cols = usable_time_columns(df, candidates)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if not time_cols or len(numeric_cols) == 0:
@@ -1280,12 +1353,21 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
                               measure_cols: list = None, top_n: int = 6, min_periods: int = 3) -> dict:
     """카테고리별 시간 추세를 한 그래프에 여러 줄로(상위 N개) — 시간 × 범주 교차."""
     numeric_cols = _get_numeric_cols(df, measure_cols)
-    cat_cols = categorical_object_columns(df)
     if not time_col:
-        time_col = next((c for c in df.columns
-                         if "datetime" in str(df[c].dtype) or "date" in c.lower() or "month" in c.lower()), None)
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+        candidates = [c for c in df.columns
+                     if "datetime" in str(df[c].dtype) or "date" in c.lower() or "month" in c.lower()]
+        usable = usable_time_columns(df, candidates)
+        time_col = usable[0] if usable else None
+    elif time_col not in usable_time_columns(df, [time_col]):
+        time_col = None
+    # 다른 key_col 소비 함수(plot_top_n_barplot·plot_mean_ci_comparison 등)와 달리 이 함수만
+    # cat_cols[0]을 검증 없이 쓰고 있었다 — customer_unique_id 같은 ID급 컬럼(9만+ 유니크)이
+    # ctx.key_col로 이미 들어와 있으면 그대로 통과되어 "고객 1명당 선 1개, 점 1개"짜리 무의미한
+    # 차트가 나왔다(#166 실측). _pick_key_col의 카디널리티/상수 가드를 거치도록 통일한다.
+    key_col = _pick_key_col(df, key_col) or _pick_flag_key_col(df)
+    # key_col 자신이 measure_cols에 섞여 들어오면(플래그를 key로 쓰는 케이스 등)
+    # groupby 결과에 같은 이름 컬럼을 또 넣으려다 충돌한다 — 그룹 키는 지표 후보에서 제외.
+    numeric_cols = [c for c in numeric_cols if c != key_col]
     if not time_col or not key_col or not numeric_cols:
         return {"chart_paths": [], "stats": {}, "skipped": "시간/범주/수치 컬럼 부족"}
 
@@ -1294,6 +1376,10 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
     if period.notna().sum() == 0:
         return {"chart_paths": [], "stats": {}, "skipped": f"{time_col} 시간 파싱 불가"}
     d["_period"] = period
+
+    # 0/1 플래그를 그룹 키로 쓴 경우 범례가 "0","1"로만 보여 어떤 그룹인지 안 읽힌다
+    # (#166 실측 피드백) — 컬럼명 기반 라벨로 대체.
+    is_flag_group = str(key_col).lower().startswith("is_") and _is_binary_flag(df[key_col].dropna())
 
     paths, stats = [], {}
     for metric in numeric_cols:
@@ -1307,12 +1393,13 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
         colors = sns.color_palette("tab10", wide.shape[1])
         fig, ax = plt.subplots(figsize=(max(9, len(wide) * 0.5), 5))
         for (col, series), color in zip(wide.items(), colors):
+            label = _flag_group_label(key_col, col) if is_flag_group else str(col)[:18]
             ax.plot(range(len(wide)), series.values, marker="o", markersize=3,
-                    linewidth=1.6, color=color, label=str(col)[:18])
+                    linewidth=1.6, color=color, label=label)
         ax.set_xticks(range(len(wide)))
         ax.set_xticklabels(list(wide.index), rotation=45, ha="right", fontsize=7)
         ax.legend(fontsize=7, frameon=False, ncol=2, loc="upper left")
-        _apply_style(ax, f"{metric} trend by {key_col} (top {wide.shape[1]})", ylabel=metric)
+        _apply_style(ax, f"{_pretty_label(metric)} trend by {_pretty_label(key_col)} (top {wide.shape[1]})", ylabel=metric)
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"multiline_{metric}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
