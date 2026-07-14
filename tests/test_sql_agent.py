@@ -64,6 +64,12 @@ def event_pairs(adapter: BackendAdapter, run_id: str) -> list[tuple[str | None, 
     return [(e.node_name, e.event_type) for e in adapter.services.run_service.list_events(run_id)]
 
 
+def patch_staged_schema_context(monkeypatch, context_module, schema_text: str) -> None:
+    """LangGraph 테스트에 계획·생성 단계용 동일한 스키마 fixture를 주입한다."""
+    monkeypatch.setattr(context_module, "load_schema_catalog_text", lambda: schema_text)
+    monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: schema_text)
+
+
 # ── self_check tests ──
 
 class TestSQLSelfCheck:
@@ -413,6 +419,153 @@ class TestSQLRouteKindContract:
         assert any(item["category"] == "route_kind_mismatch" for item in findings)
 
 
+class TestStagedSchemaContext:
+    @pytest.fixture()
+    def schema_path(self, monkeypatch, tmp_path):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        payload = {
+            "orders": {
+                "description": "첫 번째 설명입니다.\n이 줄은 카탈로그에 포함되면 안 됩니다." + "가" * 200,
+                "primary_key": ["order_id"],
+                "foreign_keys": [{"column": "customer_id", "references": "customers.customer_id"}],
+                "columns": [
+                    {"name": "created_at", "type": "DATETIME", "nullable": False, "description": "생성일"},
+                    {"name": "customer_id", "type": "VARCHAR(50)", "nullable": False, "description": "고객"},
+                    {"name": "order_id", "type": "VARCHAR(50)", "nullable": False, "description": "주문"},
+                    {"name": "status", "type": "VARCHAR(20)", "nullable": True, "description": "상태"},
+                    {"name": "amount", "type": "DECIMAL(10,2)", "nullable": True, "description": "금액"},
+                    {"name": "ignored_column", "type": "TEXT", "nullable": True, "description": "제외"},
+                ],
+                "sample_data": [{"order_id": "sample"}],
+            },
+            "customers": {
+                "description": "고객 테이블",
+                "primary_key": ["customer_id"],
+                "foreign_keys": [],
+                "columns": [{"name": "customer_id", "type": "VARCHAR(50)", "nullable": False, "description": "고객"}],
+                "sample_data": [{"customer_id": "sample"}],
+            },
+        }
+        path = tmp_path / "db_schema.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(integrity_loader, "SCHEMA_JSON_PATH", path)
+        return path
+
+    def test_schema_catalog_omits_samples_and_limits_columns(self, schema_path):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_schema_catalog_text
+
+        catalog = json.loads(load_schema_catalog_text())
+
+        assert set(catalog) == {"orders", "customers"}
+        assert "sample_data" not in json.dumps(catalog, ensure_ascii=False)
+        assert catalog["orders"]["description"] == "첫 번째 설명입니다."
+        assert [column["name"] for column in catalog["orders"]["columns"]] == [
+            "customer_id", "order_id", "created_at", "status", "amount"
+        ]
+        assert catalog["orders"]["primary_key"] == ["order_id"]
+        assert catalog["orders"]["foreign_keys"] == [{"column": "customer_id", "references": "customers.customer_id"}]
+
+    def test_scoped_schema_keeps_selected_full_columns_without_samples(self, schema_path):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_schema_text
+
+        scoped = json.loads(load_scoped_schema_text(["analytics.orders", "`orders`", "missing"]))
+
+        assert set(scoped) == {"orders"}
+        assert "sample_data" not in json.dumps(scoped, ensure_ascii=False)
+        assert [column["name"] for column in scoped["orders"]["columns"]] == [
+            "created_at", "customer_id", "order_id", "status", "amount", "ignored_column"
+        ]
+        assert scoped["orders"]["columns"][0] == {
+            "name": "created_at", "type": "DATETIME", "nullable": False, "description": "생성일"
+        }
+        assert scoped["orders"]["foreign_keys"]
+
+    @pytest.mark.parametrize("tables", [None, [], ["missing"]])
+    def test_scoped_schema_returns_empty_for_no_valid_tables(self, schema_path, tables):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_schema_text
+
+        assert load_scoped_schema_text(tables) == ""
+
+    def test_scoped_schema_propagates_schema_read_errors(self, monkeypatch, tmp_path):
+        from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
+
+        monkeypatch.setattr(integrity_loader, "SCHEMA_JSON_PATH", tmp_path / "missing.json")
+
+        with pytest.raises(FileNotFoundError):
+            integrity_loader.load_scoped_schema_text(["orders"])
+
+    def test_refresh_schema_context_replaces_catalog_for_first_nonempty_plan_list(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+
+        monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: '{"orders":{"columns":[{"name":"order_id"}]}}')
+        result = context_module.refresh_schema_context({
+            "schema_text": '{"catalog":true}',
+            "plan": {"selected_join_tables": ["`analytics.orders`", "orders"], "relevant_tables": ["customers"]},
+        })
+
+        assert result["schema_text"] == '{"orders":{"columns":[{"name":"order_id"}]}}'
+        assert result["schema_refresh"] == {
+            "status": "refreshed",
+            "candidate_tables": ["orders"],
+            "applied_tables": ["orders"],
+            "reason": "",
+        }
+
+    def test_refresh_schema_context_keeps_catalog_when_selection_is_invalid(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+
+        monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: "")
+        result = context_module.refresh_schema_context({
+            "schema_text": '{"catalog":true}',
+            "plan": {"selected_join_tables": ["missing"], "relevant_tables": ["orders"]},
+        })
+
+        assert result["schema_text"] == '{"catalog":true}'
+        assert result["schema_refresh"]["status"] == "skipped"
+        assert result["schema_refresh"]["candidate_tables"] == ["missing"]
+        assert result["schema_refresh"]["reason"] == "no_valid_tables"
+
+    def test_plan_prompt_receives_catalog_without_sample_or_sixth_column(self, monkeypatch):
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
+        from DATA_Analyst_Assistant_Agent.agents.sql.nodes import plan as plan_module
+
+        catalog = '{"orders":{"columns":[{"name":"order_id"},{"name":"customer_id"},{"name":"created_at"},{"name":"status"},{"name":"amount"}]}}'
+        monkeypatch.setattr(context_module, "load_schema_catalog_text", lambda: catalog)
+        monkeypatch.setattr(context_module, "load_integrity_json", lambda: {})
+        prompts: list[str] = []
+        monkeypatch.setattr(
+            plan_module,
+            "try_llm_json",
+            lambda prompt: prompts.append(prompt) or '{"route_kind":"simple","selected_join_tables":["orders"]}',
+        )
+
+        state = context_module.load_context({})
+        plan_module.plan_question({"user_question": "주문 조회", **state})
+
+        assert prompts and catalog in prompts[0]
+        assert "sample_data" not in prompts[0]
+        assert "ignored_column" not in prompts[0]
+
+    def test_detailed_schema_is_shared_by_mart_design_and_sql_generation_prompts(self):
+        from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import generate_mart_prompt, generate_query_prompt
+        from DATA_Analyst_Assistant_Agent.agents.sql.prompts.mart_design import mart_design_prompt
+
+        scoped_schema = '{"orders":{"columns":[{"name":"order_id","nullable":false},{"name":"ignored_column","nullable":true}]}}'
+        state = {
+            "user_question": "주문 분석",
+            "plan": {"selected_join_tables": ["orders"]},
+            "mart_design": {},
+            "schema_text": scoped_schema,
+            "integrity_text": "",
+        }
+
+        assert scoped_schema in generate_query_prompt(state, "")
+        assert scoped_schema in mart_design_prompt(state)
+        assert scoped_schema in generate_mart_prompt(state, "")
+        assert "sample_data" not in generate_query_prompt(state, "")
+
+
 class TestSQLLangGraphSmoke:
     def test_integrity_summary_compacts_legacy_and_ge_payloads(self, monkeypatch, tmp_path):
         from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
@@ -486,7 +639,7 @@ class TestSQLLangGraphSmoke:
                 return DummyResponse('{"sql":"SELECT order_id, amount FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"columns_used":["order_id","amount"],"reasoning":"preview orders"}')
 
         monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": 'legacy pass dump should be replaced'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}')
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
 
@@ -533,7 +686,11 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(
+            monkeypatch,
+            context_module,
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_date"}]}}',
+        )
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, "2024-01-01")])
 
         class DummyResponse:
@@ -561,7 +718,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}')
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(4.2,)])
 
         class DummyResponse:
@@ -586,7 +743,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}')
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -609,10 +766,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}]}}')
 
         class DummyResponse:
             def __init__(self, content: str):
@@ -702,7 +856,11 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(
+            monkeypatch,
+            context_module,
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+        )
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         committed = []
@@ -735,10 +893,11 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(
+            monkeypatch,
+            context_module,
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+        )
 
         responses = iter([
             '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"datamart request"}',
@@ -792,10 +951,11 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(
+            monkeypatch,
+            context_module,
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+        )
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         committed = []
@@ -855,13 +1015,10 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
 
-        monkeypatch.setattr(
+        patch_staged_schema_context(
+            monkeypatch,
             context_module,
-            "load_all_metadata",
-            lambda: {
-                "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
-                "integrity_text": "{}",
-            },
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
         )
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(10,)])
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
@@ -986,10 +1143,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "customer_id"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "customer_id"}]}}')
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1,)])
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: None)
@@ -1071,7 +1225,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}')
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         responses = iter(['{"sql": "SELECT JULIANDAY(order_delivered_customer_date) - JULIANDAY(order_approved_at) AS delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "source_column_refs": ["orders.order_delivered_customer_date", "orders.order_approved_at"], "derived_columns": ["delivery_days"], "output_columns": ["delivery_days"], "reasoning": "1? ??"}', '{"sql": "SELECT AVG(DATEDIFF(order_delivered_customer_date, order_approved_at)) AS avg_delivery_days FROM orders;", "sql_type": "select", "source_tables": ["orders"], "source_column_refs": ["orders.order_delivered_customer_date", "orders.order_approved_at"], "derived_columns": ["avg_delivery_days"], "output_columns": ["avg_delivery_days"], "reasoning": "2? ??"}'])
         prompts_seen: list[str] = []
@@ -1102,10 +1256,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}')
 
         responses = iter([
             '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"two diagnostics"}',
@@ -1177,10 +1328,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {
-            "schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}',
-            "integrity_text": '{}'
-        })
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_approved_at"}, {"name": "order_delivered_customer_date"}]}}')
 
         responses = iter([
             '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"average_delivery_days","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"single_scalar","required_columns":["order_approved_at","order_delivered_customer_date"],"required_aggregations":["AVG"],"validation_contract":{"expected_result_shape":"single_scalar","required_aggregations":["AVG"],"required_columns":["order_approved_at","order_delivered_customer_date"],"expected_aliases":["avg_delivery_days"],"required_tables":["orders"],"target_metric":"average_delivery_days","dimensions":[]},"reasoning":"average delivery question"}',
@@ -1243,7 +1391,7 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "order_status"}]}}')
 
         responses = iter([
             '{"route_kind":"simple","question_type":"detail","task_type":"query_answer","requested_output":"execute_and_answer","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"expected_result_shape":"table_preview","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"table_preview","required_tables":["orders"]},"reasoning":"two diagnostics"}',
@@ -1279,7 +1427,11 @@ class TestSQLLangGraphSmoke:
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
 
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": '{}'})
+        patch_staged_schema_context(
+            monkeypatch,
+            context_module,
+            '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}',
+        )
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         committed: list[str] = []
         executed_queries: list[str] = []
@@ -1709,7 +1861,7 @@ class TestSQLAgentIntegration:
                 return DummyResponse('{"sql":"SELECT order_id, amount FROM orders LIMIT 50;","sql_type":"select","source_tables":["orders"],"source_column_refs":["orders.order_id","orders.amount"],"derived_columns":[],"output_columns":["order_id","amount"],"reasoning":"preview orders"}')
 
         monkeypatch.setattr(integrity_loader, "_post_backend_json", fake_post_backend_json)
-        monkeypatch.setattr(context_module, "load_all_metadata", lambda: {"schema_text": '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}', "integrity_text": 'legacy pass dump should be replaced'})
+        patch_staged_schema_context(monkeypatch, context_module, '{"orders": {"columns": [{"name": "order_id"}, {"name": "amount"}]}}')
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         monkeypatch.setattr(sql_steps_module, "run_sql_fetchall", lambda sql: [(1, 10)])
 

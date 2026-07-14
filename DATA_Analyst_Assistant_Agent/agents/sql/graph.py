@@ -30,13 +30,17 @@ def route_after_mart_design(state: AgentState):
     return "retry"
 
 
-def route_after_refresh_integrity_context(state: AgentState):
+def route_after_refresh_context(state: AgentState):
     route_kind = str((state.get("plan") or {}).get("route_kind") or "").strip().lower()
     if route_kind == "simple":
         return "generate"
     if route_kind == "comprehensive":
         return "design"
     raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
+
+
+# 기존 테스트와 외부 호출 호환성을 유지한다.
+route_after_refresh_integrity_context = route_after_refresh_context
 
 
 def route_after_validation(state: AgentState):
@@ -66,6 +70,7 @@ def build_app():
     graph.add_node("preplan_integrity_gate", nodes.preplan_integrity_gate)
     graph.add_node("plan_question", nodes.plan_question)
     graph.add_node("refresh_integrity_context", nodes.refresh_integrity_context)
+    graph.add_node("refresh_schema_context", nodes.refresh_schema_context)
     graph.add_node("design_mart", nodes.design_mart)
     graph.add_node("generate_sql", nodes.generate_sql)
     graph.add_node("prevalidate_sql", nodes.prevalidate_sql)
@@ -82,9 +87,10 @@ def build_app():
         route_after_plan,
         {"refresh": "refresh_integrity_context", "retry": "increase_retry", "finalize": "finalize_answer"},
     )
+    graph.add_edge("refresh_integrity_context", "refresh_schema_context")
     graph.add_conditional_edges(
-        "refresh_integrity_context",
-        route_after_refresh_integrity_context,
+        "refresh_schema_context",
+        route_after_refresh_context,
         {"generate": "generate_sql", "design": "design_mart"},
     )
     graph.add_conditional_edges(

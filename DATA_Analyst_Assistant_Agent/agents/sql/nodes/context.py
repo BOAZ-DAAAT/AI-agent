@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import (
-    load_all_metadata,
+    compact_integrity_summary_text,
+    load_integrity_json,
+    load_schema_catalog_text,
+    load_scoped_schema_text,
     load_scoped_integrity_text,
     preload_backend_integrity_summary,
     refresh_backend_integrity_summary,
@@ -14,10 +18,9 @@ from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import (
 
 
 def load_context(state: AgentState):
-    metadata = load_all_metadata()
     return {
-        "schema_text": metadata["schema_text"],
-        "integrity_text": metadata["integrity_text"],
+        "schema_text": load_schema_catalog_text(),
+        "integrity_text": compact_integrity_summary_text(load_integrity_json()),
     }
 
 
@@ -58,6 +61,63 @@ def _planned_tables(plan: dict[str, Any]) -> list[str]:
             if table not in tables:
                 tables.append(table)
     return tables
+
+
+def _first_selected_table_list(plan: dict[str, Any]) -> list[str]:
+    for key in ("selected_join_tables", "relevant_tables", "candidate_tables"):
+        tables = _as_table_list(plan.get(key))
+        if tables:
+            return tables
+    return []
+
+
+def _schema_table_names(schema_text: str) -> list[str]:
+    try:
+        schema = json.loads(schema_text)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(schema, dict):
+        return []
+    tables = schema.get("tables") if isinstance(schema.get("tables"), dict) else schema
+    return list(tables) if isinstance(tables, dict) else []
+
+
+def refresh_schema_context(state: AgentState):
+    """계획에서 선택한 테이블의 상세 스키마로 프롬프트 컨텍스트를 교체한다."""
+    tables = _first_selected_table_list(state.get("plan") or {})
+    if not tables:
+        return {
+            "schema_text": state.get("schema_text", ""),
+            "schema_refresh": {
+                "status": "skipped",
+                "candidate_tables": [],
+                "applied_tables": [],
+                "reason": "no_tables",
+            }
+        }
+
+    scoped_schema_text = load_scoped_schema_text(tables)
+    if not scoped_schema_text:
+        return {
+            "schema_text": state.get("schema_text", ""),
+            "schema_refresh": {
+                "status": "skipped",
+                "candidate_tables": tables,
+                "applied_tables": [],
+                "reason": "no_valid_tables",
+            }
+        }
+
+    applied_tables = _schema_table_names(scoped_schema_text)
+    return {
+        "schema_text": scoped_schema_text,
+        "schema_refresh": {
+            "status": "refreshed",
+            "candidate_tables": tables,
+            "applied_tables": applied_tables,
+            "reason": "",
+        },
+    }
 
 
 def refresh_integrity_context(state: AgentState):
