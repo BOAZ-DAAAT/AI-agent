@@ -4,7 +4,7 @@
 기존 `from ...sql import nodes; nodes.load_context` 사용을 그대로 지원.
 """
 
-from .context import load_context, preplan_integrity_gate, refresh_integrity_context
+from .context import load_context, preplan_integrity_gate, refresh_integrity_context, refresh_schema_context
 from .plan import plan_question
 from .mart_design import design_mart
 from .generate import generate_sql
@@ -18,6 +18,7 @@ __all__ = [
     "load_context",
     "preplan_integrity_gate",
     "refresh_integrity_context",
+    "refresh_schema_context",
     "plan_question",
     "design_mart",
     "generate_sql",

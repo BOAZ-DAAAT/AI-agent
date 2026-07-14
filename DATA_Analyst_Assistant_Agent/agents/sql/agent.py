@@ -53,6 +53,7 @@ class SQLAgent:
                 "integrity_dataset_name": state.datasource_id or "default",
                 "integrity_preplan": {},
                 "integrity_refresh": {},
+                "schema_refresh": {},
                 "plan": {},
                 "mart_design": {},
                 "sql_draft": {},

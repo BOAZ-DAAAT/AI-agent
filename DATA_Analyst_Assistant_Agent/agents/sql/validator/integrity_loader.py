@@ -39,6 +39,108 @@ def load_schema_text():
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
+def _schema_tables(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    tables = data.get("tables")
+    return tables if isinstance(tables, dict) else data
+
+
+def _schema_with_tables(data: dict[str, Any], tables: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(data.get("tables"), dict):
+        return {**data, "tables": tables}
+    return tables
+
+
+def _compact_description(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    first_line = value.splitlines()[0] if value.splitlines() else ""
+    return " ".join(first_line.split())[:160]
+
+
+def _foreign_key_columns(foreign_keys: Any) -> set[str]:
+    columns: set[str] = set()
+    if not isinstance(foreign_keys, list):
+        return columns
+    for foreign_key in foreign_keys:
+        if not isinstance(foreign_key, dict):
+            continue
+        for key in ("column", "columns", "local_column", "local_columns"):
+            value = foreign_key.get(key)
+            values = value if isinstance(value, list) else [value]
+            columns.update(str(item) for item in values if item not in (None, ""))
+    return columns
+
+
+def _catalog_columns(table: dict[str, Any]) -> list[dict[str, Any]]:
+    columns = table.get("columns")
+    if not isinstance(columns, list):
+        return []
+    primary_key = table.get("primary_key")
+    priority_names = {
+        str(column) for column in (primary_key if isinstance(primary_key, list) else [primary_key])
+        if column not in (None, "")
+    }
+    priority_names.update(_foreign_key_columns(table.get("foreign_keys")))
+    ordered = [column for column in columns if isinstance(column, dict) and str(column.get("name") or "") in priority_names]
+    ordered.extend(
+        column for column in columns
+        if isinstance(column, dict) and str(column.get("name") or "") not in priority_names
+    )
+    return [
+        {"name": column.get("name"), "type": column.get("type")}
+        for column in ordered[:5]
+    ]
+
+
+def load_schema_catalog_text() -> str:
+    """계획 단계용 축약 스키마 카탈로그를 반환한다."""
+    data = load_schema_json()
+    catalog: dict[str, Any] = {}
+    for table_name, table in _schema_tables(data).items():
+        if not isinstance(table, dict):
+            continue
+        catalog[table_name] = {
+            "description": _compact_description(table.get("description")),
+            "primary_key": table.get("primary_key", []),
+            "foreign_keys": table.get("foreign_keys", []),
+            "columns": _catalog_columns(table),
+        }
+    return json.dumps(_schema_with_tables(data, catalog), ensure_ascii=False, indent=2)
+
+
+def load_scoped_schema_text(tables: Iterable[str] | None) -> str:
+    """선택 테이블의 상세 스키마를 샘플 데이터 없이 반환한다."""
+    selected_tables = _table_filter(tables)
+    if not selected_tables:
+        return ""
+
+    data = load_schema_json()
+    scoped: dict[str, Any] = {}
+    for table_name, table in _schema_tables(data).items():
+        if table_name not in selected_tables or not isinstance(table, dict):
+            continue
+        columns = table.get("columns")
+        scoped[table_name] = {
+            "description": table.get("description", ""),
+            "primary_key": table.get("primary_key", []),
+            "foreign_keys": table.get("foreign_keys", []),
+            "columns": [
+                {
+                    "name": column.get("name"),
+                    "type": column.get("type"),
+                    "nullable": column.get("nullable"),
+                    "description": column.get("description", ""),
+                }
+                for column in columns if isinstance(columns, list) and isinstance(column, dict)
+            ],
+        }
+    if not scoped:
+        return ""
+    return json.dumps(_schema_with_tables(data, scoped), ensure_ascii=False, indent=2)
+
+
 def load_integrity_text():
     data = load_integrity_json()
     return json.dumps(data, ensure_ascii=False, indent=2)
@@ -119,6 +221,8 @@ def _normalize_table_name(table: Any) -> str:
 def _table_filter(tables: Iterable[str] | None) -> set[str] | None:
     if not tables:
         return None
+    if isinstance(tables, str):
+        tables = [tables]
     filtered = {_normalize_table_name(table) for table in tables if _normalize_table_name(table)}
     return filtered or None
 
