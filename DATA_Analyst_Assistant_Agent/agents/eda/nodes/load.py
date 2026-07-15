@@ -17,7 +17,7 @@ from typing import Optional
 import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_llm, safe_json_parse
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns, usable_time_columns
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import classify_columns_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
@@ -29,7 +29,7 @@ def _classify_columns(df: pd.DataFrame, measure_cols: list) -> dict:
 
     candidate_cols = [c for c in df.columns if c not in (measure_cols or [])]
     if not candidate_cols:
-        return {"time_columns": obvious_time, "count_column": ""}
+        return {"time_columns": usable_time_columns(df, obvious_time), "count_column": ""}
 
     sample = df[candidate_cols].head(3).to_dict(orient="list")
     prompt = classify_columns_prompt(list(df.columns), measure_cols, sample)
@@ -39,10 +39,10 @@ def _classify_columns(df: pd.DataFrame, measure_cols: list) -> dict:
         result = safe_json_parse(response, {})
         time_cols = list(set(obvious_time + result.get("time_columns", [])))
         count_col = result.get("count_column", "")
-        time_cols = [c for c in time_cols if c in df.columns]
+        time_cols = usable_time_columns(df, [c for c in time_cols if c in df.columns])
         count_col = count_col if count_col in df.columns else ""
     except Exception:
-        time_cols = obvious_time
+        time_cols = usable_time_columns(df, obvious_time)
         count_col = ""
 
     return {"time_columns": time_cols, "count_column": count_col}

@@ -16,4 +16,5 @@ def run_comparison() -> str:
     if ctx.df is None:
         return "데이터가 로드되지 않았습니다."
     return _emit_and_dump(ctx, run_comparison_skill(
-        ctx.df, key_col=ctx.key_col, measure_cols=ctx.measure_cols, question_type=ctx.question_type))
+        ctx.df, key_col=ctx.key_col, measure_cols=ctx.measure_cols, question_type=ctx.question_type,
+        priority_metrics=ctx.priority_metrics))

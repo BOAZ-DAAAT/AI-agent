@@ -169,5 +169,6 @@ def test_selector_early_exit_skips_llm_when_all_degenerate(tmp_path):
         "x": {"type": "categorical", "unique_count": 1},
         "y": {"type": "numeric", "unique_count": 1, "std": 0.0},
     }}
-    final, captions = css.run_chart_selector_skill(paths, "질문", {}, statistical_metadata=stat)
+    final, captions, visual_debug = css.run_chart_selector_skill(paths, "질문", {}, statistical_metadata=stat)
     assert final == [] and captions == {}   # LLM 미호출 + 조기 종료
+    assert visual_debug == {"dropped": [], "check_failures": 0}

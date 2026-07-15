@@ -1,16 +1,23 @@
 import os
 import json
+import base64
+
+from langchain_core.messages import HumanMessage
 
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_guards import drop_degenerate_charts
 
-TOTAL_MAX = 8
+TOTAL_MAX = 10
 WEAK_CORR_THRESHOLD = 0.2  # |r| 이 이 값 미만인 변수쌍의 scatter 는 정보가 없어 제거
 
 
 def _load_llm():
     return get_chat_model(temperature=0)
+
+
+def _load_chart_reader_llm():
+    return get_chat_model(model_env="CHART_READER_MODEL", default_model="gpt-5")
 
 
 # ─────────────────────────────
@@ -48,6 +55,119 @@ def _drop_weak_scatters(paths: list, correlation_pairs: dict) -> list:
                 continue  # 약한 상관 → 의미 없는 산점도, 제거
         kept.append(p)
     return kept
+
+
+_PREFERRED_PREFIXES = ("segment_profile_", "interval_", "ecdf_")
+_LIGHTWEIGHT_PREFIXES = ("dist_", "box_", "violin_")
+
+
+def _selection_priority(path: str) -> tuple[int, str]:
+    name = os.path.basename(path)
+    if name.startswith("segment_profile_"):
+        return (0, name)
+    if name.startswith("interval_"):
+        return (1, name)
+    if name.startswith("ecdf_"):
+        return (2, name)
+    return (3, name)
+
+
+def _promote_preferred_new_families(paths: list[str]) -> list[str]:
+    return sorted(paths, key=_selection_priority)
+
+
+def _ensure_preferred_survives(paths: list[str]) -> list[str]:
+    if len(paths) <= TOTAL_MAX:
+        return paths
+
+    selected = list(paths[:TOTAL_MAX])
+    selected_names = {os.path.basename(p) for p in selected}
+    preferred = [p for p in paths if os.path.basename(p).startswith(_PREFERRED_PREFIXES)]
+    if not preferred:
+        return selected
+    if any(os.path.basename(p) in selected_names for p in preferred):
+        return selected
+
+    candidate = preferred[0]
+    for idx in range(len(selected) - 1, -1, -1):
+        if os.path.basename(selected[idx]).startswith(_LIGHTWEIGHT_PREFIXES):
+            selected[idx] = candidate
+            return selected
+    selected[-1] = candidate
+    return selected
+
+
+_VISUAL_CHECK_PROMPT = (
+    "이 차트가 렌더링 결함 없이 정상적으로 보이는지만 판정해줘. 데이터 해석이나 인사이트의 "
+    "좋고나쁨은 판단하지 마 — 순수하게 시각적 결함만 봐:\n"
+    "- 범례/텍스트 박스가 실제 데이터 점이나 선을 가리고 있는지\n"
+    "- 축 라벨이 0/1 같은 원시값만 있어 무슨 그룹인지 알아볼 수 없는지\n"
+    "- 그려져야 할 자리가 비어있거나(데이터가 있는데 안 그려짐) 점/선이 하나뿐인지\n"
+    '반드시 JSON만 출력: {"ok": true 또는 false, "issue": "문제 설명(없으면 빈 문자열)"}'
+)
+
+
+def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
+    """최종 선정된 차트(보통 TOTAL_MAX 이하)만 멀티모달로 훑어 렌더링 결함을 거른다.
+
+    비용 통제: 전체 후보가 아니라 이미 좁혀진 최종 목록에만, 1장당 1회 호출한다.
+    반환: (유지 경로, 드롭 메타 [{"chart","reason"}], 점검 자체가 실패한 횟수).
+    check_failures를 dropped와 분리하는 이유 — 이미지 읽기/모델 호출/JSON 파싱이 실패해
+    보수적으로 통과시킨 경우와, 모델이 실제로 "결함 있음"이라 판정해 드롭한 경우를
+    구분 못 하면 "멀티모달 검사가 꺼졌는데 아무도 모르는" 상태를 감지할 수 없다.
+    """
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")):
+        return paths, [], 0
+
+    model = _load_chart_reader_llm()
+    kept: list[str] = []
+    dropped: list[dict] = []
+    check_failures = 0
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            kept.append(p)
+            check_failures += 1
+            continue
+        try:
+            response = model.invoke([HumanMessage(content=[
+                {"type": "text", "text": _VISUAL_CHECK_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+            ])])
+            raw = str(getattr(response, "content", response)).replace("```json", "").replace("```", "").strip()
+            verdict = json.loads(raw)
+        except Exception:
+            verdict = {"ok": True, "issue": ""}
+            check_failures += 1
+        if verdict.get("ok", True):
+            kept.append(p)
+        else:
+            dropped.append({"chart": os.path.basename(p), "reason": str(verdict.get("issue", "시각 결함"))})
+    return kept, dropped, check_failures
+
+
+def _backfill_after_visual_drop(
+    final: list[str], filtered: list[str], target_count: int, exclude_names: set
+) -> tuple[list[str], list[dict], int]:
+    """멀티모달이 차트를 드롭해 자리가 비면, filtered의 다음 우선순위 후보로 채우고
+    그 후보만 다시 시각 점검한다(이미 검사한 것 재검사 안 함 — 비용 통제).
+
+    이게 없으면 _ensure_preferred_survives가 지켜준 segment_profile/interval/ecdf
+    보호가 바로 다음 단계(시각 점검)에서 허무하게 깨질 수 있다.
+    """
+    if len(final) >= target_count:
+        return final, [], 0
+    final_names = {os.path.basename(p) for p in final}
+    remaining = [p for p in filtered
+                if os.path.basename(p) not in final_names and os.path.basename(p) not in exclude_names]
+    remaining = sorted(remaining, key=_selection_priority)
+    candidates = remaining[: target_count - len(final)]
+    if not candidates:
+        return final, [], 0
+    backfill_kept, backfill_dropped, backfill_failures = _visual_sanity_check(candidates)
+    return final + backfill_kept, backfill_dropped, backfill_failures
 
 
 def _call_llm_remove(
@@ -177,12 +297,14 @@ def run_chart_selector_skill(
     1단계: 기계적 품질 필터 (파일 존재 여부, 중복 경로 제거)
     1.5단계: 약한 상관 scatter 결정론 제거 (가드레일)
     2단계: LLM이 '이상적 구성'에 부합하지 않는 차트 제거 (+유지 차트 캡션 수집)
-    3단계: 8개 초과 시 LLM이 추가 제거
+    3단계: TOTAL_MAX 초과 시 LLM이 추가 제거
+    4단계: 최종 목록만 멀티모달로 렌더링 결함 점검 + 드롭된 자리 백필
 
-    반환: (선별된 경로 리스트, {파일명: 선정 이유 캡션})
+    반환: (선별된 경로 리스트, {파일명: 선정 이유 캡션}, 시각점검 디버그 정보)
+    시각점검 디버그 정보 = {"dropped": [{"chart","reason"}, ...], "check_failures": int}
     """
     if not chart_paths:
-        return [], {}
+        return [], {}, {"dropped": [], "check_failures": 0}
 
     stat = statistical_metadata or {}
     correlation_pairs = stat.get("correlation_pairs", {})
@@ -200,7 +322,7 @@ def run_chart_selector_skill(
         valid_paths.append(p)
 
     if not valid_paths:
-        return [], {}
+        return [], {}, {"dropped": [], "check_failures": 0}
 
     # ── 1.5단계: 결정론 가드레일 (약한 상관 scatter + 퇴화 차트 제거) ──
     # _drop_weak_scatters 는 scatter_* 만, drop_degenerate_charts 는 그 외(catdist/dist/bar/heatmap)만
@@ -208,8 +330,9 @@ def run_chart_selector_skill(
     valid_paths = _drop_weak_scatters(valid_paths, correlation_pairs)
     valid_paths, _ = drop_degenerate_charts(valid_paths, stat)  # 명백 퇴화(상수·단일범주·평탄) 제거
     if not valid_paths:
-        return [], {}   # 결정론 가드로 전부 걸러졌으면 LLM 호출 없이 종료
+        return [], {}, {"dropped": [], "check_failures": 0}   # 결정론 가드로 전부 걸러졌으면 LLM 호출 없이 종료
 
+    valid_paths = _promote_preferred_new_families(valid_paths)
     name_to_path = {os.path.basename(p): p for p in valid_paths}
     filenames = list(name_to_path.keys())
 
@@ -251,6 +374,22 @@ def run_chart_selector_skill(
         captions.update({k: str(v) for k, v in (result2.get("keep_captions") or {}).items()})
         filtered = [p for p in filtered if os.path.basename(p) not in to_remove2]
 
-    final = filtered[:TOTAL_MAX]
+    final = _ensure_preferred_survives(filtered)
+    pre_visual_count = len(final)
+
+    # ── 4단계: 최종 목록만 멀티모달로 렌더링 결함 사후 점검 + 드롭 시 백필 ──
+    # 통계/이름 기준 판단(2단계)은 실제 픽셀을 못 본다 — 배지가 점을 가리는 식의 순수
+    # 렌더링 버그는 여기서만 잡힌다. 이미 좁혀진 최종 목록(TOTAL_MAX 이하)에만 적용해 비용을 통제한다.
+    # 드롭돼서 자리가 비면 _ensure_preferred_survives가 지켜준 보호가 여기서 허무하게 깨질 수
+    # 있으므로, filtered의 다음 우선순위 후보로 채우고 그 후보만 다시 점검한다.
+    final, visual_dropped, check_failures = _visual_sanity_check(final)
+    if visual_dropped:
+        exclude_names = {d["chart"] for d in visual_dropped} | {os.path.basename(p) for p in final}
+        final, backfill_dropped, backfill_failures = _backfill_after_visual_drop(
+            final, filtered, pre_visual_count, exclude_names)
+        visual_dropped = visual_dropped + backfill_dropped
+        check_failures += backfill_failures
+
     final_names = {os.path.basename(p) for p in final}
-    return final, {k: v for k, v in captions.items() if k in final_names}
+    visual_debug = {"dropped": visual_dropped, "check_failures": check_failures}
+    return final, {k: v for k, v in captions.items() if k in final_names}, visual_debug
