@@ -166,7 +166,10 @@ def normalize_generated_sql(
     normalized.setdefault("source_column_refs", [])
     normalized.setdefault("derived_columns", [])
     normalized.setdefault("output_columns", [])
-    normalized.setdefault("business_grain", default_business_grain)
+    if route_kind == "comprehensive":
+        normalized["business_grain"] = default_business_grain
+    else:
+        normalized.setdefault("business_grain", default_business_grain)
     normalized.setdefault("reasoning", "")
     if route_kind == "comprehensive" and normalized["sql_type"] != "create_table_as":
         raise ValueError("comprehensive route requires create_table_as SQL")

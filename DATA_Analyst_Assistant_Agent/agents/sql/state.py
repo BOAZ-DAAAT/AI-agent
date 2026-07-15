@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
 # -----------------------------
@@ -50,21 +50,124 @@ class FinalTablePlan(BaseModel):
         return value
 
 
+class MartColumnPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output_column: str = Field(min_length=1)
+    role: Literal["dimension", "measure", "attribute"]
+    source_columns: List[str] = Field(min_length=1)
+    calculation_type: Literal["passthrough", "derived"]
+    calculation_rule: str = Field(min_length=1, description="SQL이 아닌 자연어 계산 의미")
+    aggregation_method: Literal["none", "SUM", "COUNT", "COUNT_DISTINCT", "MIN", "MAX", "AVG", "DEDUPLICATE"]
+    inclusion_reason: str = Field(min_length=1)
+
+    @field_validator("output_column", "calculation_rule", "inclusion_reason")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("빈 문자열은 허용되지 않습니다")
+        return value.strip()
+
+    @field_validator("source_columns")
+    @classmethod
+    def validate_source_columns(cls, value: List[str]) -> List[str]:
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("source_columns에는 빈 컬럼을 넣을 수 없습니다")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("source_columns는 중복될 수 없습니다")
+        return normalized
+
+
+class MetricSupport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metric_name: str = Field(min_length=1)
+    calculation_grain: List[str]
+    required_mart_columns: List[str] = Field(min_length=1)
+    downstream_calculation: str = Field(min_length=1)
+
+    @field_validator("metric_name", "downstream_calculation")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("빈 문자열은 허용되지 않습니다")
+        return value.strip()
+
+    @field_validator("calculation_grain", "required_mart_columns")
+    @classmethod
+    def validate_column_references(cls, value: List[str]) -> List[str]:
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("컬럼 참조에는 빈 값을 넣을 수 없습니다")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("컬럼 참조는 중복될 수 없습니다")
+        return normalized
+
+
 class MartDesign(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     mart_name: str
     target_schema: str
-    grain: str
-    base_grain: str = Field(default="원본 entity/event grain 유지", description="가능하면 유지할 기본 행 수준 grain")
-    source_tables: List[str] = Field(default_factory=list)
-    key_columns: List[str] = Field(default_factory=list)
-    measure_columns: List[str] = Field(default_factory=list)
-    dimension_columns: List[str] = Field(default_factory=list)
+    grain: str = Field(min_length=1, description="하위 Agent에 전달할 공통 분석 grain 설명")
+    grain_columns: List[str] = Field(min_length=1)
+    source_grains: Dict[str, List[str]] = Field(min_length=1)
+    deduplication_keys: List[str] = Field(min_length=1)
+    column_plan: List[MartColumnPlan] = Field(min_length=1)
+    metric_support: List[MetricSupport] = Field(min_length=1)
+    aggregation_policy: Literal["preserve_common_grain", "aggregate_to_common_grain"]
+    source_tables: List[str] = Field(min_length=1)
     incremental_column: Optional[str] = None
     load_strategy: str = "full_refresh"
-    row_preserving_strategy: str = Field(default="원본 행 수준 유지 우선", description="row-preserving 설계 전략")
-    aggregation_policy: str = Field(default="prefer_row_preserving", description="prefer_row_preserving / aggregate_if_justified")
-    aggregation_rationale: Optional[str] = Field(default=None, description="집계를 사용한 경우 정당화 근거")
-    design_reasoning: str
+    design_reasoning: str = Field(min_length=1)
+
+    @computed_field(return_type=List[str])
+    @property
+    def key_columns(self) -> List[str]:
+        return list(self.grain_columns)
+
+    @computed_field(return_type=List[str])
+    @property
+    def dimension_columns(self) -> List[str]:
+        return [item.output_column for item in self.column_plan if item.role == "dimension"]
+
+    @computed_field(return_type=List[str])
+    @property
+    def measure_columns(self) -> List[str]:
+        return [item.output_column for item in self.column_plan if item.role == "measure"]
+
+    @model_validator(mode="after")
+    def validate_design_contract(self) -> "MartDesign":
+        output_columns = [item.output_column for item in self.column_plan]
+        if len(set(output_columns)) != len(output_columns):
+            raise ValueError("column_plan의 output_column은 중복될 수 없습니다")
+        if len(set(self.grain_columns)) != len(self.grain_columns):
+            raise ValueError("grain_columns는 중복될 수 없습니다")
+        if self.deduplication_keys != self.grain_columns:
+            raise ValueError("deduplication_keys는 grain_columns와 순서까지 동일해야 합니다")
+        missing_grain = [column for column in self.grain_columns if column not in output_columns]
+        if missing_grain:
+            raise ValueError(f"grain_columns가 column_plan에 없습니다: {missing_grain}")
+        if len(set(self.source_tables)) != len(self.source_tables):
+            raise ValueError("source_tables는 중복될 수 없습니다")
+        if set(self.source_grains) != set(self.source_tables):
+            raise ValueError("source_grains는 source_tables의 모든 테이블과 정확히 일치해야 합니다")
+        for table, columns in self.source_grains.items():
+            if not columns or any(not str(column).strip() for column in columns):
+                raise ValueError(f"{table}의 source grain 키가 비어 있습니다")
+        has_aggregation = any(item.aggregation_method != "none" for item in self.column_plan)
+        if self.aggregation_policy == "preserve_common_grain" and has_aggregation:
+            raise ValueError("preserve_common_grain에서는 모든 aggregation_method가 none이어야 합니다")
+        available = set(output_columns)
+        metric_names = [item.metric_name for item in self.metric_support]
+        if len(set(metric_names)) != len(metric_names):
+            raise ValueError("metric_support의 metric_name은 중복될 수 없습니다")
+        for metric in self.metric_support:
+            unknown = (set(metric.calculation_grain) | set(metric.required_mart_columns)) - available
+            if unknown:
+                raise ValueError(f"metric_support가 미등록 마트 컬럼을 참조합니다: {sorted(unknown)}")
+        return self
 
 
 class SQLDraft(BaseModel):

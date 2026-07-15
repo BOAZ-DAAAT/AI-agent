@@ -75,14 +75,14 @@ def route_after_validation(state: AgentState):
     return "retry"
 
 
-# reason_code가 이 집합에 해당하면 plan 단계 재수립이 필요
-_REPLAN_CODES = {"sql_plan_failed", "sql_mart_design_failed", "invalid_join_plan", "result_shape_mismatch", "intent_mismatch"}
-
-
 def route_after_retry(state: AgentState):
-    """retry 후 plan 단계 재수립이 필요한지, SQL만 재생성할지 판단."""
+    """오류가 발생한 단계에 맞춰 질문 계획, 마트 설계 또는 SQL 생성으로 돌아간다."""
     reason_code = (state.get("retry_hint") or {}).get("reason_code", "")
-    return "replan" if reason_code in _REPLAN_CODES else "regenerate"
+    if reason_code == "sql_plan_failed":
+        return "replan"
+    if reason_code == "sql_mart_design_failed":
+        return "redesign"
+    return "regenerate"
 
 
 def build_app():
@@ -143,7 +143,7 @@ def build_app():
     graph.add_conditional_edges(
         "increase_retry",
         route_after_retry,
-        {"replan": "plan_question", "regenerate": "generate_sql"},
+        {"replan": "plan_question", "redesign": "design_mart", "regenerate": "generate_sql"},
     )
     graph.add_edge("finalize_answer", END)
 

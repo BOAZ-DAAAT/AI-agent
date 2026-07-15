@@ -21,13 +21,8 @@ def increase_retry(state: AgentState):
         "failed_statement_index": None,
         "failed_statement_sql": "",
     }
-    if retry_hint.get("reason_code") in {
-        "sql_plan_failed",
-        "sql_mart_design_failed",
-        "invalid_join_plan",
-        "result_shape_mismatch",
-        "intent_mismatch",
-    }:
+    reason_code = retry_hint.get("reason_code")
+    if reason_code == "sql_plan_failed":
         update.update({
             "question_plan": {},
             "final_table_plan": {},
@@ -36,4 +31,11 @@ def increase_retry(state: AgentState):
             "mart_design": {},
             "sql_draft": {},
         })
+    elif reason_code == "sql_mart_design_failed":
+        update.update({
+            "mart_design": {},
+            "sql_draft": {},
+        })
+    else:
+        update["sql_draft"] = {}
     return update

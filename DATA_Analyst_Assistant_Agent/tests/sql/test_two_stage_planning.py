@@ -6,13 +6,13 @@ import json
 
 import pytest
 
-from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context, finalize_plan, plan
+from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context, finalize_plan, mart_design, plan
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes import generate as generate_node
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes.retry import increase_retry
-from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
-from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import generate_query_prompt
+from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app, route_after_retry
+from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import generate_mart_prompt, generate_query_prompt
 from DATA_Analyst_Assistant_Agent.agents.sql.prompts.mart_design import mart_design_prompt
-from DATA_Analyst_Assistant_Agent.agents.sql.state import QuestionPlan
+from DATA_Analyst_Assistant_Agent.agents.sql.state import MartDesign, QuestionPlan
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import build_intent_contract
 from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
 
@@ -58,6 +58,89 @@ def base_state(**overrides):
     return state
 
 
+def mart_design_payload(**overrides):
+    payload = {
+        "mart_name": "customer_order_category_mart",
+        "target_schema": "analytics",
+        "grain": "customer_unique_id × order_id × category",
+        "grain_columns": ["customer_unique_id", "order_id", "category"],
+        "source_tables": ["customers", "orders", "order_items"],
+        "source_grains": {
+            "customers": ["customer_id"],
+            "orders": ["order_id"],
+            "order_items": ["order_id", "order_item_id"],
+        },
+        "deduplication_keys": ["customer_unique_id", "order_id", "category"],
+        "column_plan": [
+            {
+                "output_column": "customer_unique_id",
+                "role": "dimension",
+                "source_columns": ["customers.customer_unique_id"],
+                "calculation_type": "passthrough",
+                "calculation_rule": "동일 고객을 식별하는 고유 고객 키",
+                "aggregation_method": "none",
+                "inclusion_reason": "고객 단위 후속 계산에 필요",
+            },
+            {
+                "output_column": "order_id",
+                "role": "dimension",
+                "source_columns": ["orders.order_id"],
+                "calculation_type": "passthrough",
+                "calculation_rule": "주문 식별자",
+                "aggregation_method": "none",
+                "inclusion_reason": "주문 수 계산에 필요",
+            },
+            {
+                "output_column": "category",
+                "role": "dimension",
+                "source_columns": ["order_items.category"],
+                "calculation_type": "passthrough",
+                "calculation_rule": "상품 카테고리",
+                "aggregation_method": "none",
+                "inclusion_reason": "카테고리별 분석에 필요",
+            },
+            {
+                "output_column": "item_amount_sum",
+                "role": "measure",
+                "source_columns": ["order_items.price"],
+                "calculation_type": "derived",
+                "calculation_rule": "공통 grain에 속한 상품 금액의 합계",
+                "aggregation_method": "SUM",
+                "inclusion_reason": "매출 후속 계산에 필요",
+            },
+        ],
+        "metric_support": [
+            {
+                "metric_name": "매출",
+                "calculation_grain": ["category"],
+                "required_mart_columns": ["category", "item_amount_sum"],
+                "downstream_calculation": "카테고리별로 item_amount_sum을 합산한다.",
+            },
+            {
+                "metric_name": "재구매율",
+                "calculation_grain": ["category"],
+                "required_mart_columns": ["customer_unique_id", "order_id", "category"],
+                "downstream_calculation": "고객·카테고리별 COUNT(DISTINCT order_id)가 2 이상인지 판정한 뒤 카테고리 grain에서 고객 비율을 계산한다.",
+            },
+        ],
+        "aggregation_policy": "aggregate_to_common_grain",
+        "incremental_column": None,
+        "load_strategy": "full_refresh",
+        "design_reasoning": "모든 목표 지표를 계산할 수 있는 공통 분석 grain이다.",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def comprehensive_plan():
+    return {
+        **question_payload(route_kind="comprehensive", target_metrics=["매출", "재구매율"]),
+        "selected_join_tables": ["customers", "orders", "order_items"],
+        "required_columns": ["customers.customer_unique_id", "orders.order_id", "order_items.category", "order_items.price"],
+        "business_keys": {"customers": "customers.customer_unique_id", "orders": "orders.order_id"},
+    }
+
+
 def test_question_plan_contract_has_exactly_nine_fields():
     assert list(QuestionPlan.model_fields) == [
         "route_kind",
@@ -70,6 +153,53 @@ def test_question_plan_contract_has_exactly_nine_fields():
         "required_aggregations",
         "reasoning",
     ]
+
+
+def test_mart_design_preserves_common_grain_contract_and_derives_legacy_lists():
+    payload = mart_design_payload(
+        key_columns=["wrong_key"],
+        dimension_columns=["wrong_dimension"],
+        measure_columns=["wrong_measure"],
+    )
+
+    dumped = MartDesign(**payload).model_dump()
+
+    assert dumped["grain"] == "customer_unique_id × order_id × category"
+    assert dumped["source_grains"]["order_items"] == ["order_id", "order_item_id"]
+    assert dumped["deduplication_keys"] == dumped["grain_columns"]
+    assert dumped["key_columns"] == dumped["grain_columns"]
+    assert dumped["dimension_columns"] == ["customer_unique_id", "order_id", "category"]
+    assert dumped["measure_columns"] == ["item_amount_sum"]
+    assert dumped["metric_support"][1]["metric_name"] == "재구매율"
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda payload: payload.pop("grain_columns"),
+        lambda payload: payload["column_plan"].append(dict(payload["column_plan"][0])),
+        lambda payload: payload.update(deduplication_keys=["order_id"]),
+        lambda payload: payload.update(aggregation_policy="invalid_policy"),
+        lambda payload: payload["metric_support"][0].update(required_mart_columns=["unknown_column"]),
+        lambda payload: payload["metric_support"].pop(),
+    ],
+)
+def test_mart_design_node_rejects_invalid_contract_as_retryable(monkeypatch, mutator):
+    payload = mart_design_payload()
+    mutator(payload)
+    monkeypatch.setattr(mart_design, "try_llm_json", lambda _: json.dumps(payload, ensure_ascii=False))
+    state = base_state(plan=comprehensive_plan())
+
+    result = mart_design.design_mart(state)
+
+    assert result["retry_hint"]["reason_code"] == "sql_mart_design_failed"
+    assert result["retry_hint"]["retryable"] is True
+
+
+def test_preserve_common_grain_rejects_deduplication_or_aggregation():
+    payload = mart_design_payload(aggregation_policy="preserve_common_grain")
+    with pytest.raises(ValueError, match="모든 aggregation_method가 none"):
+        MartDesign(**payload)
 
 
 def test_planning_catalog_only_contains_table_name_and_description():
@@ -195,6 +325,53 @@ def test_replan_retry_clears_stale_two_stage_and_sql_state():
     assert result["sql_draft"] == {}
 
 
+def test_mart_design_retry_keeps_planning_and_clears_only_downstream_state():
+    state = base_state(
+        plan=comprehensive_plan(),
+        final_table_plan={"kept": True},
+        planning_stages={"kept": True},
+        mart_design={"old": True},
+        sql_draft={"sql": "old"},
+        retry_hint={"reason_code": "sql_mart_design_failed", "retryable": True},
+    )
+
+    result = increase_retry(state)
+
+    assert result["mart_design"] == {}
+    assert result["sql_draft"] == {}
+    assert "plan" not in result
+    assert "final_table_plan" not in result
+    assert route_after_retry({**state, **result}) == "redesign"
+
+
+@pytest.mark.parametrize("reason_code", ["sql_generation_failed", "invalid_join_plan", "result_shape_mismatch", "intent_mismatch", "mysql_dialect_error", "execution_error"])
+def test_sql_errors_retry_only_generation(reason_code):
+    state = base_state(
+        plan=comprehensive_plan(),
+        mart_design=mart_design_payload(),
+        sql_draft={"sql": "old"},
+        retry_hint={"reason_code": reason_code, "retryable": True},
+    )
+
+    result = increase_retry(state)
+
+    assert result["sql_draft"] == {}
+    assert "mart_design" not in result
+    assert "plan" not in result
+    assert route_after_retry({**state, **result}) == "regenerate"
+
+
+@pytest.mark.parametrize("reason_code", ["missing_table", "missing_column"])
+def test_missing_identifier_is_not_retryable_route(reason_code):
+    from DATA_Analyst_Assistant_Agent.agents.sql.graph import route_after_validation
+
+    state = base_state(
+        validation={"result": "invalid"},
+        retry_hint={"reason_code": reason_code, "retryable": False},
+    )
+    assert route_after_validation(state) == "finalize"
+
+
 def test_sql_regeneration_retry_keeps_planning_state():
     result = increase_retry(base_state(retry_hint={"reason_code": "mysql_dialect_error", "retryable": True}))
     assert "question_plan" not in result
@@ -216,6 +393,62 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
         assert "required_columns" in prompt_text
         assert "business_keys" in prompt_text
         assert "customers.customer_unique_id" in prompt_text
+
+
+def test_mart_generation_prompt_contains_complete_design_and_postcheck_contract():
+    state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
+
+    prompt_text = generate_mart_prompt(state, "")
+
+    for expected in (
+        "customer_unique_id × order_id × category",
+        "source_grains",
+        "deduplication_keys",
+        "column_plan",
+        "aggregation_method",
+        "metric_support",
+        "최종 재구매 판정",
+        "row_count",
+        "duplicate_grain_count",
+        "null_grain_count",
+        "정확히 한 행",
+    ):
+        assert expected in prompt_text
+
+
+def test_comprehensive_generation_normalizes_business_grain_to_mart_design(monkeypatch):
+    state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
+    monkeypatch.setattr(generate_node, "try_llm_json", lambda _: json.dumps({
+        "sql": "CREATE TABLE analytics.customer_order_category_mart AS SELECT 1 AS customer_unique_id, 1 AS order_id, 'x' AS category, 10 AS item_amount_sum",
+        "sql_type": "create_table_as",
+        "target_table": "customer_order_category_mart",
+        "source_tables": ["customers", "orders", "order_items"],
+        "source_column_refs": ["customers.customer_unique_id", "orders.order_id", "order_items.category", "order_items.price"],
+        "derived_columns": ["item_amount_sum"],
+        "output_columns": ["customer_unique_id", "order_id", "category", "item_amount_sum"],
+        "business_grain": "LLM이 임의로 바꾼 grain",
+        "precheck_sql": "SELECT COUNT(*) FROM orders",
+        "postcheck_sql": "SELECT 1 AS row_count, 0 AS duplicate_grain_count, 0 AS null_grain_count FROM customer_order_category_mart",
+        "reasoning": "계약 구현",
+    }, ensure_ascii=False))
+
+    result = generate_node.generate_sql(state)
+
+    assert result["sql_draft"]["business_grain"] == mart_design_payload()["grain"]
+    assert result["sql_draft"]["target_table"] == "analytics.customer_order_category_mart"
+
+
+def test_legacy_mart_design_is_discarded_before_sql_generation():
+    state = base_state(
+        plan=comprehensive_plan(),
+        mart_design={"mart_name": "legacy", "grain": "old"},
+        sql_draft={"sql": "old"},
+    )
+
+    result = generate_node.generate_sql(state)
+
+    assert result["mart_design"] == {}
+    assert result["retry_hint"]["reason_code"] == "sql_mart_design_failed"
 
 
 def test_build_intent_contract_uses_plural_metrics_only():
@@ -342,6 +575,73 @@ def test_final_plan_failure_restarts_from_question_planning(monkeypatch):
     assert result["retry_count"] == 1
     assert result["validation"]["result"] == "valid"
     assert result["planning_stages"]["question_plan"]["candidate_tables"] == ["orders"]
+
+
+def test_mart_design_failure_retries_only_design_stage(monkeypatch):
+    from DATA_Analyst_Assistant_Agent.agents.sql import planner_support
+    from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute
+
+    calls = {"question": 0, "final": 0, "design": 0, "sql": 0}
+
+    class Response:
+        def __init__(self, content):
+            self.content = content
+
+    class LLM:
+        def invoke(self, prompt_text):
+            if "MySQL 기반 SQL/데이터마트 planner" in prompt_text:
+                calls["question"] += 1
+                return Response(json.dumps(question_payload(
+                    route_kind="comprehensive",
+                    target_metrics=["매출", "재구매율"],
+                    candidate_tables=["customers", "orders", "order_items"],
+                ), ensure_ascii=False))
+            if "MySQL 물리 테이블 계획자" in prompt_text:
+                calls["final"] += 1
+                return Response(json.dumps({
+                    "selected_join_tables": ["customers", "orders", "order_items"],
+                    "required_columns": ["customers.customer_unique_id", "orders.order_id", "order_items.category", "order_items.price"],
+                    "business_keys": {"customers": "customers.customer_unique_id", "orders": "orders.order_id"},
+                    "reasoning": "고객과 주문 키로 공통 grain을 만든다.",
+                }, ensure_ascii=False))
+            if "분석용 데이터마트 설계자" in prompt_text:
+                calls["design"] += 1
+                if calls["design"] == 1:
+                    return Response("{}")
+                return Response(json.dumps(mart_design_payload(), ensure_ascii=False))
+            if "데이터마트 생성 SQL" in prompt_text:
+                calls["sql"] += 1
+                return Response(json.dumps({
+                    "sql": "CREATE TABLE analytics.customer_order_category_mart AS SELECT c.customer_unique_id, o.order_id, oi.category, SUM(oi.price) AS item_amount_sum FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id GROUP BY c.customer_unique_id, o.order_id, oi.category",
+                    "sql_type": "create_table_as",
+                    "target_table": "analytics.customer_order_category_mart",
+                    "source_tables": ["customers", "orders", "order_items"],
+                    "source_column_refs": ["customers.customer_unique_id", "customers.customer_id", "orders.customer_id", "orders.order_id", "order_items.order_id", "order_items.category", "order_items.price"],
+                    "derived_columns": ["item_amount_sum"],
+                    "output_columns": ["customer_unique_id", "order_id", "category", "item_amount_sum"],
+                    "business_grain": "잘못된 grain",
+                    "precheck_sql": None,
+                    "postcheck_sql": "SELECT COUNT(*) AS row_count, 0 AS duplicate_grain_count, 0 AS null_grain_count FROM analytics.customer_order_category_mart",
+                    "reasoning": "공통 분석 grain으로 집계한다.",
+                }, ensure_ascii=False))
+            raise AssertionError(prompt_text[:100])
+
+    schema = json.dumps({
+        "customers": {"description": "고객", "columns": [{"name": "customer_id"}, {"name": "customer_unique_id"}]},
+        "orders": {"description": "주문", "columns": [{"name": "order_id"}, {"name": "customer_id"}]},
+        "order_items": {"description": "상품", "columns": [{"name": "order_id"}, {"name": "category"}, {"name": "price"}]},
+    }, ensure_ascii=False)
+    monkeypatch.setattr(context, "load_schema_catalog_text", lambda: json.dumps({name: {"description": value["description"]} for name, value in json.loads(schema).items()}, ensure_ascii=False))
+    monkeypatch.setattr(context, "load_scoped_schema_text", lambda _: schema)
+    monkeypatch.setattr(planner_support, "get_llm", lambda: LLM())
+    monkeypatch.setattr(execute, "can_use_live_db", lambda: False)
+
+    result = build_app().invoke(graph_state(max_retries=2))
+
+    assert calls == {"question": 1, "final": 1, "design": 2, "sql": 1}
+    assert result["retry_count"] == 1
+    assert result["validation"]["result"] == "valid"
+    assert result["sql_draft"]["business_grain"] == mart_design_payload()["grain"]
 
 
 def test_sql_generation_retry_does_not_repeat_two_stage_planning(monkeypatch):

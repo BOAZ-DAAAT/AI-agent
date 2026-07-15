@@ -113,16 +113,12 @@ def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, A
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
     has_aggregate_summary = any(token in sql for token in ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX("))
-    if not has_aggregate_summary:
-        return findings
-    policy = str((mart_design or {}).get("aggregation_policy") or contract.get("mart_policy") or "prefer_row_preserving")
-    rationale = " ".join(str(value or "") for value in ((mart_design or {}).get("aggregation_rationale"), (mart_design or {}).get("design_reasoning"), sql_draft.get("reasoning")))
-    has_justification = any(token in rationale for token in ("원본 행", "행 수준", "row-level", "row level", "불가피", "정당화", "예외"))
-    base_grain = str((mart_design or {}).get("base_grain") or (mart_design or {}).get("grain") or "")
-    if policy == "prefer_row_preserving" and not has_justification:
-        findings.append({"category": "mart_summary_bias", "severity": "error", "retryable": True, "detail": "datamart가 재사용 가능한 기반 테이블보다 질문 전용 요약 결과에 가깝습니다. 원본 행 수준 유지 전략 또는 집계 정당화가 필요합니다."})
-    elif not base_grain.strip():
-        findings.append({"category": "mart_grain_missing", "severity": "warning", "retryable": True, "detail": "datamart 설계에 base grain 설명이 없습니다."})
+    policy = str((mart_design or {}).get("aggregation_policy") or "")
+    grain = str((mart_design or {}).get("grain") or "")
+    if not grain.strip():
+        findings.append({"category": "mart_grain_missing", "severity": "error", "retryable": True, "detail": "datamart 설계에 공통 분석 grain 설명이 없습니다."})
+    if policy == "preserve_common_grain" and has_aggregate_summary:
+        findings.append({"category": "mart_policy_mismatch", "severity": "error", "retryable": True, "detail": "preserve_common_grain 설계인데 SQL에 집계가 포함되었습니다. 설계 계약에 맞게 SQL을 다시 생성해야 합니다."})
     return findings
 
 

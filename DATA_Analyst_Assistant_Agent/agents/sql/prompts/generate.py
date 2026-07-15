@@ -33,16 +33,19 @@ def generate_mart_prompt(state, feedback: str) -> str:
 - CREATE TABLE ... AS SELECT 형태만 허용
 - 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
 - source는 실제 존재 테이블만 사용
-- 질문 분석 결과의 required_columns를 원천 컬럼 선택의 우선 근거로 사용
-- 질문 분석 결과의 business_keys를 조인 조건과 식별자 선택의 우선 근거로 사용
-- 데이터마트는 최종 리포트용 요약 결과보다 재사용 가능한 기반 테이블이어야 함
-- 가능한 한 원본 데이터의 행 수준 grain을 유지
-- 우선 조인, 정제, 표준화, 필수 파생 컬럼 추가로 해결
-- 집계는 꼭 필요한 경우에만 최소 수준으로 사용
-- 집계를 사용했다면 왜 row-level mart가 부적절한지 reasoning에 명시
+- 사용자 질문보다 확정된 mart_design을 우선 계약으로 사용
+- 최종 SELECT에는 column_plan의 output_column만 선언된 순서와 alias로 정확히 출력
+- mart_design.grain_columns가 최종 한 행을 유일하게 만들도록 작성
+- source_grains가 더 세밀한 원천은 deduplication_keys와 각 column_plan.aggregation_method에 따라 공통 grain으로 집계 또는 중복 제거
+- preserve_common_grain이면 집계하지 않고 공통 grain을 보존하고, aggregate_to_common_grain이면 선언된 집계 계약만 사용
+- calculation_rule의 자연어 의미를 SQL로 구현하되 임의의 새 출력 컬럼을 추가하지 말 것
+- metric_support의 downstream_calculation이 후속 수행 가능하도록 required_mart_columns를 보존
+- 원자적 파생값은 포함할 수 있지만 비율, 순위, 최종 재구매 판정, 카테고리 요약 지표는 생성 금지
+- 질문 분석 결과의 required_columns와 business_keys는 원천 참조와 조인 조건에 사용하되 mart_design을 변경하지 말 것
 - 모호한 기준은 reasoning에 명시
 - precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
-- postcheck_sql에는 생성 후 row_count / 중복 / null 점검용 SELECT
+- postcheck_sql은 타겟 마트에 대한 단일 SELECT이며 정확히 한 행을 반환
+- postcheck_sql은 전체 행 수 AS row_count, grain_columns 기준 2행 이상인 grain 그룹 수 AS duplicate_grain_count, grain 컬럼 중 하나라도 NULL인 행 수 AS null_grain_count를 모두 제공
 - DROP, ALTER, TRUNCATE 금지
 - source_column_refs에는 실제 원천 table.column만 작성하고, 계산 alias나 최종 출력 alias는 넣지 말 것
 - derived_columns에는 계산식으로 만든 alias만, output_columns에는 최종 SELECT에 노출되는 컬럼만 작성
@@ -57,7 +60,7 @@ def generate_mart_prompt(state, feedback: str) -> str:
   "source_column_refs": ["table.column"],
   "derived_columns": ["계산식 alias"],
   "output_columns": ["최종 노출 컬럼"],
-  "business_grain": "...",
+  "business_grain": "mart_design.grain과 동일한 값",
   "precheck_sql": "SELECT ...",
   "postcheck_sql": "SELECT ...",
   "reasoning": "..."

@@ -22,7 +22,7 @@ def _merge_plan(question_plan: dict[str, Any], table_plan: dict[str, Any]) -> di
         "expected_result_shape": "datamart_creation" if route_kind == "comprehensive" else "table_preview",
         "expected_aliases": [],
         "target_table": None,
-        "mart_policy": "prefer_row_preserving" if route_kind == "comprehensive" else None,
+        "mart_policy": "common_analysis_grain" if route_kind == "comprehensive" else None,
     }
     return {
         **{key: value for key, value in question_plan.items() if key != "reasoning"},
