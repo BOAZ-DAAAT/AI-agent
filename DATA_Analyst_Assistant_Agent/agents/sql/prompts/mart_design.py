@@ -30,6 +30,8 @@ def mart_design_prompt(state) -> str:
 - 우선 조인, 정제, 표준화, 필수 파생 컬럼 추가로 해결
 - 특정 질문의 최종 요약 결과 테이블처럼 과하게 집계하지 말 것
 - key_columns, dimension_columns, measure_columns를 분리
+- 최종 계획의 required_columns를 마트 컬럼 선택의 우선 근거로 사용
+- 최종 계획의 business_keys를 조인과 key_columns 선택의 우선 근거로 사용
 - target_schema는 "{ALLOWED_MART_SCHEMA}" 로 고정
 - incremental이 자연스러우면 incremental_column 제안
 - 집계를 사용해야 한다면 왜 row-level mart가 부적절한지 aggregation_rationale과 design_reasoning에 설명

@@ -28,9 +28,9 @@ def plan_prompt(state) -> str:
   - 사용자가 명시적으로 "데이터마트", "마트 생성", "분석용 테이블 만들어줘" 등을 요청한 경우
   - 또는 일별/월별 매출 추이 등 추세 분석, 카테고리별 성과 분석, 복잡한 다중 조인(Multi-join) 및 다단계 CTE(Common Table Expression) 분석, 복잡한 비즈니스 로직(예: 코호트 분석, LTV 분석, 리텐션 분석, 고객 세그먼트별 다차원 교차 분석 등)이 포함되어 깊은 분석이 필요한 경우
 
-## selected_join_tables 선택 (핵심)
+## candidate_tables 선택
 
-스키마에 실제 존재하는 테이블명만 사용. 질문에 이름이 없어도 의도상 필요하면 포함.
+카탈로그에 실제 존재하는 테이블명만 사용한다. 이 단계에서는 컬럼이나 조인 키를 결정하지 않고 상세 검토 후보만 고른다.
 
 - "매출", "수익", "revenue", "sales" → orders, order_items 우선 (customers 불필요)
 - "일별/월별 추이" → 날짜 컬럼이 있는 orders 우선
@@ -38,27 +38,23 @@ def plan_prompt(state) -> str:
 - 불필요한 테이블은 제외
 
 ## 공통 규칙
-- relevant_tables와 selected_join_tables는 스키마에 실제 존재하는 테이블만
+- candidate_tables는 카탈로그에 실제 존재하는 테이블만 사용
+- target_metrics는 질문의 지표를 빠짐없이 복수 목록으로 기록
+- analysis_entities는 고객, 주문, 상품 등 분석 주체를 기록
+- 시간 조건은 별도 필드가 아니라 filters에 포함
 - 질문에 없는 조건 임의 추가 금지
-- 애매한 점은 ambiguity_note에 기록
 - 반드시 JSON만 출력
 
 ## 출력 형식
 {{
-  "original_question": "...",
-  "question_type": "aggregation / comparison / ranking / filter / detail / trend / identification / mart_build 중 하나",
   "route_kind": "simple 또는 comprehensive",
-  "target_metric": "핵심 지표명 (예: 일별 매출합계)",
+  "question_type": "aggregation / comparison / ranking / filter / detail / trend / identification / mart_build 중 하나",
+  "target_metrics": ["핵심 지표명"],
+  "analysis_entities": ["분석 주체"],
   "dimensions": ["일", "월", ...],
-  "filters": ["조건1", ...],
-  "time_condition": "예: 2017년 6월 또는 null",
-  "selected_join_tables": ["실제 테이블명", ...],
-  "relevant_tables": ["실제 테이블명", ...],
+  "filters": ["조건과 시간 조건", ...],
+  "candidate_tables": ["상세 검토할 실제 테이블명", ...],
   "required_aggregations": ["SUM", "COUNT", ...],
-  "mart_name": "... 또는 null",
-  "grain": "... 또는 null",
-  "load_strategy": "... 또는 null",
-  "ambiguity_note": "... 또는 null",
-  "reasoning": "테이블 선택과 route 판단 근거를 한 문장으로"
+  "reasoning": "후보 테이블 선택과 route 판단 근거"
 }}
 """

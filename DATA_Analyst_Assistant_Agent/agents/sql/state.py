@@ -7,34 +7,47 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # -----------------------------
 # Pydantic Models
 # -----------------------------
 class QuestionPlan(BaseModel):
-    original_question: str = Field(description="사용자 원문 질문")
+    model_config = ConfigDict(extra="ignore")
+
     route_kind: str = Field(description="simple / comprehensive")
-    question_type: str = Field(description="aggregation/comparison/ranking/filter/detail/trend/identification/mart_build")
-    task_type: str = Field(description="query_answer 또는 data_mart_build")
-    requested_output: str = Field(description="sql_only / execute_and_answer / create_table")
-    target_metric: str = Field(description="핵심 지표")
-    dimensions: List[str] = Field(default_factory=list, description="그룹 기준")
-    filters: List[str] = Field(default_factory=list, description="필터 조건")
-    time_condition: Optional[str] = Field(default=None, description="시간 조건")
-    selected_join_tables: List[str] = Field(default_factory=list, description="조인 또는 조회 대상 테이블")
-    relevant_tables: List[str] = Field(default_factory=list, description="관련 테이블")
-    candidate_tables: List[str] = Field(default_factory=list, description="검토 후보 테이블")
-    mart_name: Optional[str] = Field(default=None, description="생성 대상 마트명")
-    grain: Optional[str] = Field(default=None, description="마트 grain")
-    load_strategy: Optional[str] = Field(default=None, description="full_refresh / incremental")
-    ambiguity_note: Optional[str] = Field(default=None, description="애매한 표현")
-    expected_result_shape: str = Field(description="table_preview / datamart_creation")
-    required_columns: List[str] = Field(default_factory=list, description="반드시 필요하다고 판단한 컬럼")
-    required_aggregations: List[str] = Field(default_factory=list, description="필수 집계 함수")
-    validation_contract: Dict[str, Any] = Field(default_factory=dict, description="validation용 구조화 계약")
-    reasoning: str = Field(default="", description="planner 근거")
+    question_type: str = Field(min_length=1, description="aggregation/comparison/ranking/filter/detail/trend/identification/mart_build")
+    target_metrics: List[str] = Field(description="핵심 지표 목록")
+    analysis_entities: List[str] = Field(description="분석 주체 목록")
+    dimensions: List[str] = Field(description="그룹 기준")
+    filters: List[str] = Field(description="필터와 시간 조건")
+    candidate_tables: List[str] = Field(description="상세 검토 후보 테이블")
+    required_aggregations: List[str] = Field(description="필수 집계 함수")
+    reasoning: str = Field(min_length=1, description="후보 선정과 경로 판단 근거")
+
+    @field_validator("question_type", "reasoning")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("빈 문자열은 허용되지 않습니다")
+        return value
+
+
+class FinalTablePlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    selected_join_tables: List[str] = Field(min_length=1, description="최종 조회 및 조인 테이블")
+    required_columns: List[str] = Field(min_length=1, description="최종 필수 컬럼")
+    business_keys: Dict[str, str] = Field(description="테이블별 비즈니스 키")
+    reasoning: str = Field(min_length=1, description="물리 테이블 계획 근거")
+
+    @field_validator("reasoning")
+    @classmethod
+    def reject_blank_reasoning(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("빈 문자열은 허용되지 않습니다")
+        return value
 
 
 class MartDesign(BaseModel):
@@ -87,6 +100,9 @@ class AgentState(TypedDict):
     integrity_preplan: Dict[str, Any]
     integrity_refresh: Dict[str, Any]
     schema_refresh: Dict[str, Any]
+    question_plan: Dict[str, Any]
+    final_table_plan: Dict[str, Any]
+    planning_stages: Dict[str, Any]
 
     plan: Dict[str, Any]
     mart_design: Dict[str, Any]

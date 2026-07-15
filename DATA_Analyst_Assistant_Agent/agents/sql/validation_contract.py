@@ -29,9 +29,9 @@ def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
     )
     contract.setdefault("required_columns", list(plan.get("required_columns") or []))
     contract.setdefault("required_aggregations", list(plan.get("required_aggregations") or []))
-    contract.setdefault("required_tables", list(plan.get("selected_join_tables") or plan.get("relevant_tables") or []))
+    contract.setdefault("required_tables", list(plan.get("selected_join_tables") or []))
     contract.setdefault("dimensions", list(plan.get("dimensions") or []))
-    contract.setdefault("target_metric", plan.get("target_metric") or "")
+    contract.setdefault("target_metrics", list(plan.get("target_metrics") or []))
     contract.setdefault("expected_aliases", [])
     contract.setdefault("target_table", None)
     return contract

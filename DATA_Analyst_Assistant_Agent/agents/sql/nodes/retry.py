@@ -8,7 +8,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 def increase_retry(state: AgentState):
     validation = state.get("validation") or {}
     retry_hint = state.get("retry_hint") or validation.get("retry_hint", {})
-    return {
+    update = {
         "retry_count": state["retry_count"] + 1,
         # 직전 검증 피드백을 명시적으로 state에 유지.
         # retry_feedback_text()가 generate_sql에서 이 값을 prompt에 포함한다.
@@ -21,3 +21,19 @@ def increase_retry(state: AgentState):
         "failed_statement_index": None,
         "failed_statement_sql": "",
     }
+    if retry_hint.get("reason_code") in {
+        "sql_plan_failed",
+        "sql_mart_design_failed",
+        "invalid_join_plan",
+        "result_shape_mismatch",
+        "intent_mismatch",
+    }:
+        update.update({
+            "question_plan": {},
+            "final_table_plan": {},
+            "planning_stages": {},
+            "plan": {},
+            "mart_design": {},
+            "sql_draft": {},
+        })
+    return update
