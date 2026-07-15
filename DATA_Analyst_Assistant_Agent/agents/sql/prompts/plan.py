@@ -32,9 +32,9 @@ def plan_prompt(state) -> str:
 
 카탈로그에 실제 존재하는 테이블명만 사용한다. 이 단계에서는 컬럼이나 조인 키를 결정하지 않고 상세 검토 후보만 고른다.
 
-- "매출", "수익", "revenue", "sales" → orders, order_items 우선 (customers 불필요)
+- "매출", "수익", "revenue", "sales" → orders, order_items 우선
 - "일별/월별 추이" → 날짜 컬럼이 있는 orders 우선
-- "고객 수", "고객별 분석"처럼 고객이 분석 주체일 때만 customers 포함
+- "고객 수", "고객별 분석"처럼 고객이 분석 주체일 때 customers 포함
 - 불필요한 테이블은 제외
 
 ## 공통 규칙
