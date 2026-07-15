@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
+from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import require_route_kind
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 
 
@@ -29,7 +30,7 @@ def finalize_answer(state: AgentState):
             )
         }
 
-    route_kind = state.get("plan", {}).get("route_kind") or ("comprehensive" if state["plan"].get("task_type") == "data_mart_build" else "simple")
+    route_kind = require_route_kind(state.get("plan", {}))
     sql_text = state.get("sql_draft", {}).get("sql", "")
     if route_kind == "comprehensive":
         return {

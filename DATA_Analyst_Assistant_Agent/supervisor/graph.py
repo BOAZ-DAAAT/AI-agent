@@ -6,7 +6,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState, ValidationFinding
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    SupervisorInterruptPayload,
+    SupervisorTerminalState,
+    ValidationFinding,
+)
+from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
+    validate_analysis_review_resume,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     AnalysisPlanDecision,
     ClarificationDecision,
@@ -31,6 +38,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     AgentName,
     NextAction,
+    PendingApproval,
     StepSummary,
     SupervisorState,
     artifact_ids_by_agent,
@@ -149,6 +157,131 @@ def make_collect_clarification_node():
         }
 
     return collect_clarification_node
+
+
+def make_collect_analysis_review_node():
+    def collect_analysis_review_node(state: SupervisorState) -> SupervisorState:
+        pending_approval = state.get("pending_approval")
+        pending_result = state.get("pending_result")
+        if not isinstance(pending_approval, dict) or not isinstance(pending_result, dict):
+            raise ValueError("analysis review에 필요한 pending approval/candidate가 없습니다.")
+        review_request = pending_approval.get("review_request")
+        if not isinstance(review_request, dict):
+            raise ValueError("analysis review request가 없습니다.")
+        payload = SupervisorInterruptPayload(
+            type="analysis_review",
+            status="waiting_input",
+            run_id=state["current_run_id"],
+            thread_id=state["thread_id"],
+            question=str(review_request.get("question") or pending_approval.get("reason") or ""),
+            node="collect_analysis_review",
+            approval_id=str(pending_approval.get("approval_id") or ""),
+            review_request=review_request,
+            expected_resume=dict(pending_approval.get("expected_resume") or {}),
+        ).model_dump(mode="json")
+        resume_value = interrupt(payload)
+        decision = validate_analysis_review_resume(
+            resume_value,
+            pending_approval=pending_approval,
+            pending_candidate_id=str(pending_result.get("candidate_id") or ""),
+            review_request=review_request,
+        )
+        return {
+            "analysis_selection_response": decision.selection_response.model_dump(mode="json"),
+            "current_step": "collect_analysis_review",
+        }
+
+    return collect_analysis_review_node
+
+
+def make_resolve_analysis_review_node(backend_adapter: Any | None = None):
+    def resolve_analysis_review_node(state: SupervisorState) -> SupervisorState:
+        pending_approval = state.get("pending_approval")
+        pending_result = state.get("pending_result")
+        selection = state.get("analysis_selection_response")
+        if not isinstance(pending_approval, dict) or not isinstance(pending_result, dict):
+            return _terminal_failure_updates(
+                state,
+                "resolve_analysis_review",
+                "analysis review에 필요한 pending approval/candidate가 없습니다.",
+            )
+        if not isinstance(selection, dict):
+            return _terminal_failure_updates(
+                state,
+                "resolve_analysis_review",
+                "analysis review selection이 없습니다.",
+            )
+        decision = validate_analysis_review_resume(
+            {"approval_id": pending_approval.get("approval_id"), **selection},
+            pending_approval=pending_approval,
+            pending_candidate_id=str(pending_result.get("candidate_id") or ""),
+            review_request=pending_approval.get("review_request") or {},
+        )
+        decisions = list(state.get("analysis_review_decisions", []))
+        decision_payload = decision.model_dump(mode="json")
+        if not any(
+            item.get("approval_id") == decision.approval_id
+            and item.get("candidate_id") == decision.candidate_id
+            for item in decisions
+        ):
+            decisions.append(decision_payload)
+
+        if decision.review_request.requires_followup_analysis:
+            previous_quarantine_count = len(state.get("quarantined_artifacts", []))
+            rejected = reject_pending_result(
+                state,
+                "사용자 선택에 따라 기존 분석 후보를 재분석 대상으로 대체했습니다.",
+                metadata={
+                    "agent": "analysis_agent",
+                    "reason_code": "analysis.review_superseded",
+                    "disposition": "superseded",
+                },
+                event_type="analysis.review_superseded",
+            )
+            quarantined = list(rejected.get("quarantined_artifacts", []))
+            rejected["quarantined_artifacts"] = [
+                (
+                    artifact
+                    if index < previous_quarantine_count
+                    else {
+                        **artifact,
+                        "quarantine_reason": "analysis.review_superseded",
+                    }
+                )
+                for index, artifact in enumerate(quarantined)
+            ]
+            rejected.update(
+                {
+                    "pending_approval": None,
+                    "pending_validation": None,
+                    "analysis_selection_response": decision.selection_response.model_dump(mode="json"),
+                    "analysis_selection_review_request": decision.review_request.model_dump(mode="json"),
+                    "analysis_review_decisions": decisions,
+                    "terminal_state": "running",
+                    "next_action": "call_analysis_agent",
+                    "final_answer": "",
+                    "current_step": "resolve_analysis_review",
+                }
+            )
+            return rejected
+
+        promoted = commit_candidate(state, backend_adapter, approval_granted=True)
+        if promoted.get("next_action") == "call_analysis_agent":
+            promoted["next_action"] = "decide_next_action"
+        promoted.update(
+            {
+                "pending_approval": None,
+                "analysis_selection_response": None,
+                "analysis_selection_review_request": None,
+                "analysis_review_decisions": decisions,
+                "terminal_state": "running",
+                "final_answer": "",
+                "current_step": "resolve_analysis_review",
+            }
+        )
+        return promoted
+
+    return resolve_analysis_review_node
 
 
 def _clarified_query_from_answer(base_query: Any, answer: Any) -> str:
@@ -540,15 +673,15 @@ def make_resolve_candidate_node(backend_adapter: Any | None = None):
             return _terminal_failure_updates(state, "resolve_candidate", "승격할 후보 결과가 없습니다.")
         result = AgentCompactResult.model_validate(pending.get("result") or {})
         if result.approval.required:
-            approval = {
-                "approval_id": f"{state['current_run_id']}:{result.agent}:approval",
-                "agent": result.agent,
-                "reason": result.approval.reason or result.summary,
-                "approval_type": result.approval.approval_type or "agent_approval",
-                "candidate_id": pending.get("candidate_id", ""),
-                "validation_id": pending.get("validation_id", ""),
-                "content_hashes": dict(pending.get("content_hashes") or {}),
-            }
+            approval = PendingApproval(
+                approval_id=f"{state['current_run_id']}:{result.agent}:approval",
+                agent=result.agent,
+                reason=result.approval.reason or result.summary,
+                approval_type=result.approval.approval_type or "agent_approval",
+                candidate_id=str(pending.get("candidate_id", "")),
+                validation_id=str(pending.get("validation_id", "")),
+                content_hashes=dict(pending.get("content_hashes") or {}),
+            ).model_dump(mode="json")
             return {
                 "pending_approval": approval,
                 "terminal_state": SupervisorTerminalState.needs_user_approval.value,
@@ -726,6 +859,8 @@ def build_graph(
     graph.add_node("generate_report", make_generate_report_node(report_generator))
     graph.add_node("validate_candidate", make_validate_candidate_node(model))
     graph.add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
+    graph.add_node("collect_analysis_review", make_collect_analysis_review_node())
+    graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model))
 
     graph.add_edge(START, "clarify_query")
@@ -747,6 +882,20 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_report": "generate_report",
             "completion_guard": "completion_guard",
+            "collect_analysis_review": "collect_analysis_review",
+            "finalize": "finalize",
+        },
+    )
+    graph.add_edge("collect_analysis_review", "resolve_analysis_review")
+    graph.add_conditional_edges(
+        "resolve_analysis_review",
+        _route_after_commit_candidate,
+        {
+            "decide_next_action": "decide_next_action",
+            "execute_subagent": "execute_subagent",
+            "generate_report": "generate_report",
+            "completion_guard": "completion_guard",
+            "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
     )
@@ -769,6 +918,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_report": "generate_report",
             "completion_guard": "completion_guard",
+            "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
     )
@@ -925,6 +1075,8 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
     next_action = state.get("next_action")
+    if next_action == "collect_analysis_review":
+        return "collect_analysis_review"
     if next_action == "decide_next_action":
         return "decide_next_action"
     if next_action == "call_report_agent":

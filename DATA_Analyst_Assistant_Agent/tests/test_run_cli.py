@@ -96,6 +96,37 @@ def _interrupt_result() -> SupervisorRunResult:
     )
 
 
+def _analysis_interrupt_result(*, allow_free_text: bool = True) -> SupervisorRunResult:
+    review_request = {
+        "question": "대표값은?",
+        "proposal": "대표값 선택",
+        "options": [
+            {"id": "mean", "label": "평균", "method": "산술 평균", "impact": "평균", "recommended": False},
+            {"id": "median", "label": "중앙값", "method": "50% 분위수", "impact": "중앙값", "recommended": True},
+        ],
+        "recommended_option_id": "median",
+        "allow_free_text": allow_free_text,
+    }
+    return SupervisorRunResult(
+        kind="interrupt",
+        interrupt=SupervisorInterruptPayload(
+            type="analysis_review",
+            status="waiting_input",
+            run_id="run_001",
+            thread_id="thread_1",
+            question="대표값은?",
+            node="collect_analysis_review",
+            approval_id="approval_001",
+            review_request=review_request,
+            expected_resume={
+                "approval_id": "string",
+                "selected_option_id": "string?",
+                "free_text": "string?",
+            },
+        ),
+    )
+
+
 def _patch_cli_runtime(monkeypatch: pytest.MonkeyPatch, result: Any) -> FakeSupervisor:
     supervisor = FakeSupervisor(result)
     monkeypatch.setattr(cli, "load_dotenv", lambda _path: None)
@@ -141,6 +172,20 @@ def test_parser_accepts_approval_resume_aliases() -> None:
 
     assert approve_args.resume_approved is True
     assert resume_approved_args.resume_approved is True
+
+
+def test_parser_accepts_analysis_review_resume_flags() -> None:
+    parser = cli.build_parser()
+
+    option = parser.parse_args(
+        ["--thread-id", "thread_1", "--resume-approval-id", "approval_001", "--resume-option-id", "median"]
+    )
+    free_text = parser.parse_args(
+        ["--thread-id", "thread_1", "--resume-approval-id", "approval_001", "--resume-free-text", "중앙값 사용"]
+    )
+
+    assert option.resume_option_id == "median"
+    assert free_text.resume_free_text == "중앙값 사용"
 
 
 def test_parser_accepts_no_interactive_for_scripted_interrupt_handling() -> None:
@@ -284,6 +329,61 @@ def test_main_approval_resume_calls_resume_without_prompting_or_running(monkeypa
     assert supervisor.run_calls == []
 
 
+@pytest.mark.parametrize(
+    ("flag", "value", "expected"),
+    [
+        ("--resume-option-id", " median ", {"approval_id": "approval_001", "selected_option_id": "median"}),
+        ("--resume-free-text", " 중앙값 사용 ", {"approval_id": "approval_001", "free_text": "중앙값 사용"}),
+    ],
+)
+def test_main_analysis_review_resume_calls_flat_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    value: str,
+    expected: dict[str, str],
+) -> None:
+    supervisor = _patch_cli_runtime(monkeypatch, _state_result())
+    monkeypatch.setattr(cli, "_write_outputs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "run.py",
+            "--thread-id",
+            "thread_1",
+            "--resume-approval-id",
+            " approval_001 ",
+            flag,
+            value,
+            "--no-output",
+        ],
+    )
+
+    cli.main()
+
+    assert supervisor.resume_calls == [("thread_1", expected)]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run.py", "--thread-id", "thread_1", "--resume-option-id", "median"],
+        ["run.py", "--thread-id", "thread_1", "--resume-free-text", "중앙값"],
+        ["run.py", "--thread-id", "thread_1", "--approve", "--resume-approval-id", "approval_001"],
+        ["run.py", "매출", "--resume-approval-id", "approval_001"],
+    ],
+)
+def test_analysis_review_resume_approval_id_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    _patch_cli_runtime(monkeypatch, _state_result())
+    monkeypatch.setattr(cli.sys, "argv", argv)
+
+    with pytest.raises(SystemExit, match="resume-approval-id"):
+        cli.main()
+
+
 def test_resume_answer_with_query_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_cli_runtime(monkeypatch, _state_result())
     monkeypatch.setattr(
@@ -378,6 +478,47 @@ def test_interrupt_text_output_includes_copyable_resume_command(
     assert "--resume-answer" in output
     assert "--show-sql" in output
     assert "--no-open" in output
+
+
+@pytest.mark.parametrize("allow_free_text", [True, False])
+def test_analysis_interrupt_json_examples_respect_free_text_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    allow_free_text: bool,
+) -> None:
+    _patch_cli_runtime(monkeypatch, _analysis_interrupt_result(allow_free_text=allow_free_text))
+    monkeypatch.setattr(cli.sys, "argv", ["run.py", "매출", "--json", "--no-output"])
+
+    cli.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resume_payload"] == {
+        "approval_id": "approval_001",
+        "selected_option_id": "median",
+    }
+    assert "--resume-option-id median" in payload["resume_command"]
+    assert ("free_text_resume_payload" in payload) is allow_free_text
+
+
+def test_interactive_analysis_review_classifies_option_and_reprompts_disallowed_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = SequencedFakeSupervisor(
+        run_result=_analysis_interrupt_result(allow_free_text=False),
+        resume_results=[_state_result()],
+    )
+    _patch_cli_runtime_with_supervisor(monkeypatch, supervisor)
+    monkeypatch.setattr(cli, "_write_outputs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    answers = iter(["알 수 없는 선택", " median "])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli.sys, "argv", ["run.py", "매출", "--no-output"])
+
+    cli.main()
+
+    assert supervisor.resume_calls == [
+        ("thread_1", {"approval_id": "approval_001", "selected_option_id": "median"})
+    ]
 
 
 def test_approval_waiting_json_output_includes_approval_resume_command(

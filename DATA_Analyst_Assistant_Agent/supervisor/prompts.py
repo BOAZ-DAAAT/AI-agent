@@ -68,6 +68,12 @@ available_next_actions만 보지 말고 agent_capabilities도 참고해 선택�
 agent_capabilities는 선택을 강제하지 않는 참고 정보입니다.
 선행 artifact가 없거나 avoid_when에 해당하면 다른 action을 고려하세요.
 
+역할 경계를 지키세요.
+SQL Agent는 분석용 데이터를 만드는 역할입니다.
+SQL 결과를 탐색해 데이터 특성, 분포·결측·이상치·품질·기본 패턴, 가설 후보, 분석 방향을 발견·제안하는 것은 EDA Agent 역할입니다.
+EDA Agent는 최종 검정/모델링을 확정하지 않고, 탐색적 근거와 후속 분석 방향을 제안합니다.
+Analysis Agent는 SQL/EDA 근거를 바탕으로 필요한 분석을 설계·수행하며, EDA 후보가 있으면 선별해 검증하거나 심화 해석에 활용합니다.
+
 허용되는 next_action:
 - call_sql_agent
 - call_eda_agent

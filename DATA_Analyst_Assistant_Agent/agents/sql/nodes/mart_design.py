@@ -1,4 +1,4 @@
-"""design_mart 노드: 데이터마트 설계(task_type=data_mart_build 일 때만)."""
+"""design_mart 노드: comprehensive 경로의 데이터마트 설계."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     normalize_mart_column_lists,
+    require_route_kind,
     try_llm_json,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, MartDesign
@@ -84,7 +85,7 @@ def _mart_design_failure(*, reason_code: str, detail: str, retryable: bool) -> d
 
 
 def design_mart(state: AgentState):
-    if state["plan"].get("task_type") != "data_mart_build":
+    if require_route_kind(state["plan"]) != "comprehensive":
         return {"mart_design": {}}
 
     response = try_llm_json(prompts.mart_design_prompt(state))

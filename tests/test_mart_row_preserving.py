@@ -5,6 +5,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import validate
 
 def _plan() -> dict:
     return {
+        "route_kind": "comprehensive",
         "validation_contract": {
             "expected_result_shape": "datamart_creation",
             "mart_policy": "prefer_row_preserving",

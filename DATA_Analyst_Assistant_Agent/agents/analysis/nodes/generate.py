@@ -204,6 +204,24 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         )
     if context.selection_response is not None:
         constraint = context.selection_response.constraint_text()
+        if (
+            context.selection_response.selected_option_id
+            and context.review_request is not None
+        ):
+            selected_option = next(
+                (
+                    option
+                    for option in context.review_request.options
+                    if option.id == context.selection_response.selected_option_id
+                ),
+                None,
+            )
+            if selected_option is not None:
+                constraint = json.dumps(
+                    selected_option.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
         if constraint:
             prompt += (
                 "\nUser response to an earlier analysis decision (binding constraint):\n"

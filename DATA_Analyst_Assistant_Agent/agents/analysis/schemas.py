@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AnalysisKind(str, Enum):
@@ -112,6 +112,7 @@ class AnalysisContext(BaseModel):
     known_data_quality_issues: list[str] = Field(default_factory=list)
     source_artifact_ids: list[str] = Field(default_factory=list)
     last_failure: dict[str, str] | None = None
+    review_request: "ReviewRequest | None" = None
     selection_response: "AnalysisSelectionResponse | None" = None
 
 
@@ -184,6 +185,11 @@ class ReviewOption(BaseModel):
     impact: str
     recommended: bool = False
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
 
 class ReviewRequest(BaseModel):
     decision_type: str = ""
@@ -196,14 +202,57 @@ class ReviewRequest(BaseModel):
     allow_free_text: bool = True
     free_text_prompt: str = "Provide a different analysis constraint or preference."
     impact_if_approved: str = ""
-    requires_followup_analysis: bool = False
+    requires_followup_analysis: bool = True
+
+    @model_validator(mode="after")
+    def validate_review_contract(self) -> "ReviewRequest":
+        if not self.question.strip() or not self.proposal.strip():
+            raise ValueError("review_request에는 question과 proposal이 필요합니다.")
+        if len(self.options) < 2:
+            raise ValueError("review_request에는 최소 두 개의 option이 필요합니다.")
+        option_ids = [option.id.strip() for option in self.options]
+        if any(not option_id for option_id in option_ids) or len(option_ids) != len(set(option_ids)):
+            raise ValueError("review_request option ID는 비어 있지 않고 고유해야 합니다.")
+        if self.recommended_option_id not in option_ids:
+            raise ValueError("recommended_option_id는 review option을 참조해야 합니다.")
+        recommended_ids = [option.id for option in self.options if option.recommended]
+        if recommended_ids != [self.recommended_option_id]:
+            raise ValueError("추천 option은 recommended_option_id와 일치하는 하나여야 합니다.")
+        if any(
+            not option.label.strip() or not option.method.strip() or not option.impact.strip()
+            for option in self.options
+        ):
+            raise ValueError("각 review option에는 label, method, impact가 필요합니다.")
+        if self.requires_followup_analysis:
+            return self
+        analyzed = self.evidence.get("analyzed_option_ids")
+        if not isinstance(analyzed, list) or not all(isinstance(item, str) for item in analyzed):
+            raise ValueError(
+                "requires_followup_analysis=false이면 evidence.analyzed_option_ids가 필요합니다."
+            )
+        if len(analyzed) != len(set(analyzed)) or set(analyzed) != set(option_ids):
+            raise ValueError(
+                "evidence.analyzed_option_ids는 모든 option ID를 중복 없이 정확히 포함해야 합니다."
+            )
+        return self
 
 
 class AnalysisSelectionResponse(BaseModel):
     """Future resume payload accepted by Analysis when a review request is answered."""
 
+    model_config = ConfigDict(extra="forbid")
+
     selected_option_id: str | None = None
     free_text: str | None = None
+
+    @field_validator("selected_option_id", "free_text", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return value.strip()
 
     @model_validator(mode="after")
     def require_exactly_one_response(self) -> "AnalysisSelectionResponse":
@@ -289,6 +338,7 @@ class AnalysisResult(BaseModel):
     evidence_tables: list[EvidenceTable] = Field(default_factory=list)
     interpretation: list[str] = Field(default_factory=list)
     review_request: ReviewRequest | None = None
+    selection_response: AnalysisSelectionResponse | None = None
     method_decision: MethodDecision | None = None
     method_notes: list[str] = Field(default_factory=list)
     debug_artifact_id: str | None = None

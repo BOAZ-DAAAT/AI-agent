@@ -105,8 +105,11 @@ class CapturingGraph:
 
 
 class StateSnapshot:
-    def __init__(self, values: dict[str, Any]) -> None:
+    def __init__(self, values: dict[str, Any], interrupts: list[dict[str, Any]] | None = None) -> None:
         self.values = values
+        self.tasks = [
+            type("FakeTask", (), {"interrupts": tuple(FakeInterrupt(value) for value in interrupts or [])})()
+        ] if interrupts is not None else []
 
 
 class ApprovalResumeGraph(CapturingGraph):
@@ -126,14 +129,21 @@ class ApprovalResumeGraph(CapturingGraph):
 
 
 class CheckpointResumeGraph(CapturingGraph):
-    def __init__(self, checkpoint_state: dict[str, Any], result: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        checkpoint_state: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        interrupts: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(result=result)
         self.checkpoint_state = checkpoint_state
+        self.interrupts = interrupts
         self.state_reads: list[dict[str, Any]] = []
 
     def get_state(self, config):
         self.state_reads.append(config)
-        return StateSnapshot(self.checkpoint_state)
+        return StateSnapshot(self.checkpoint_state, self.interrupts)
 
 
 class CatalogFailingBackendAdapter(FakeBackendAdapter):
@@ -485,6 +495,17 @@ def test_resume_with_clarification_answer_uses_command_resume_and_updates_status
     graph = CheckpointResumeGraph(
         checkpoint_state,
         _completed_graph_state(checkpoint_state, run_id="run_resumed_001"),
+        interrupts=[
+            {
+                "type": "clarification",
+                "status": "waiting_input",
+                "run_id": "run_resumed_001",
+                "thread_id": "thread_sales_001",
+                "question": "기간은?",
+                "node": "collect_clarification",
+                "expected_resume": {"answer": "string"},
+            }
+        ],
     )
     agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
     monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
@@ -510,6 +531,187 @@ def test_resume_with_clarification_answer_without_checkpoint_run_id_raises(monke
 
     with pytest.raises(ValueError, match="thread_id"):
         agent.resume("missing_thread", {"answer": "최근 6개월 월별 매출"})
+
+    assert graph.invocations == []
+    assert adapter.status_updates == []
+
+
+def _analysis_review_checkpoint() -> tuple[dict[str, Any], dict[str, Any]]:
+    review_request = {
+        "decision_type": "aggregation_method",
+        "question": "대표값은?",
+        "proposal": "대표값 선택",
+        "rationale": ["분포가 비대칭입니다."],
+        "evidence": {"sample_size": 10},
+        "options": [
+            {
+                "id": "mean",
+                "label": "평균",
+                "method": "산술 평균",
+                "assumptions": [],
+                "advantages": [],
+                "limitations": ["극단값 영향"],
+                "impact": "평균을 사용합니다.",
+                "recommended": False,
+            },
+            {
+                "id": "median",
+                "label": "중앙값",
+                "method": "50% 분위수",
+                "assumptions": [],
+                "advantages": ["강건함"],
+                "limitations": [],
+                "impact": "중앙값을 사용합니다.",
+                "recommended": True,
+            },
+        ],
+        "recommended_option_id": "median",
+        "allow_free_text": True,
+        "free_text_prompt": "다른 제약",
+        "impact_if_approved": "선택을 반영합니다.",
+        "requires_followup_analysis": True,
+    }
+    approval_id = "run_resumed_001:analysis_agent:candidate_001:approval"
+    checkpoint = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "매출 분석",
+        "state_schema_version": 5,
+        "pending_result": {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"analysis_001": "hash_001"},
+            "result": {"agent": "analysis_agent", "status": "approval_required", "summary": "선택 필요"},
+        },
+        "pending_approval": {
+            "approval_id": approval_id,
+            "agent": "analysis_agent",
+            "reason": "선택 필요",
+            "approval_type": "analysis.review",
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"analysis_001": "hash_001"},
+            "review_request": review_request,
+            "expected_resume": {
+                "approval_id": "string",
+                "selected_option_id": "string?",
+                "free_text": "string?",
+            },
+        },
+        "terminal_state": "running",
+        "next_action": "collect_analysis_review",
+    }
+    interrupt_payload = {
+        "type": "analysis_review",
+        "status": "waiting_input",
+        "run_id": "run_resumed_001",
+        "thread_id": "thread_sales_001",
+        "question": "대표값은?",
+        "node": "collect_analysis_review",
+        "expected_resume": checkpoint["pending_approval"]["expected_resume"],
+        "approval_id": approval_id,
+        "review_request": review_request,
+    }
+    return checkpoint, interrupt_payload
+
+
+def test_resume_analysis_review_validates_checkpoint_before_status_update(monkeypatch) -> None:
+    checkpoint, interrupt_payload = _analysis_review_checkpoint()
+    adapter = FakeBackendAdapter()
+    adapter.artifact_hashes["analysis_001"] = "hash_001"
+    resumed_result = {**checkpoint, "terminal_state": "running"}
+    graph = CheckpointResumeGraph(
+        checkpoint,
+        resumed_result,
+        interrupts=[interrupt_payload],
+    )
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    returned = agent.resume(
+        "thread_sales_001",
+        {"approval_id": interrupt_payload["approval_id"], "selected_option_id": " median "},
+    )
+
+    command, _ = graph.invocations[-1]
+    assert returned is resumed_result
+    assert command.resume == {
+        "approval_id": interrupt_payload["approval_id"],
+        "selected_option_id": "median",
+    }
+    assert adapter.status_updates == [
+        ("run_resumed_001", RunStatus.running, {"resumed_from": "analysis_review"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"approval_id": "stale", "selected_option_id": "median"},
+        {"approval_id": "run_resumed_001:analysis_agent:candidate_001:approval", "selected_option_id": "unknown"},
+        {"approved": True},
+        {"answer": "중앙값"},
+    ],
+)
+def test_invalid_analysis_review_resume_leaves_backend_and_graph_unchanged(
+    monkeypatch,
+    payload: dict[str, Any],
+) -> None:
+    checkpoint, interrupt_payload = _analysis_review_checkpoint()
+    adapter = FakeBackendAdapter()
+    adapter.artifact_hashes["analysis_001"] = "hash_001"
+    graph = CheckpointResumeGraph(checkpoint, {"resumed": True}, interrupts=[interrupt_payload])
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError):
+        agent.resume("thread_sales_001", payload)
+
+    assert graph.invocations == []
+    assert adapter.status_updates == []
+    assert adapter.events == []
+
+
+def test_analysis_review_resume_rejects_changed_artifact_hash_without_mutation(monkeypatch) -> None:
+    checkpoint, interrupt_payload = _analysis_review_checkpoint()
+    adapter = FakeBackendAdapter()
+    adapter.artifact_hashes["analysis_001"] = "changed"
+    graph = CheckpointResumeGraph(checkpoint, {"resumed": True}, interrupts=[interrupt_payload])
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError, match="content hash"):
+        agent.resume(
+            "thread_sales_001",
+            {"approval_id": interrupt_payload["approval_id"], "selected_option_id": "median"},
+        )
+
+    assert graph.invocations == []
+    assert adapter.status_updates == []
+
+
+def test_clarification_interrupt_rejects_structured_analysis_pending_state(monkeypatch) -> None:
+    checkpoint, _ = _analysis_review_checkpoint()
+    clarification_interrupt = {
+        "type": "clarification",
+        "status": "waiting_input",
+        "run_id": "run_resumed_001",
+        "thread_id": "thread_sales_001",
+        "question": "기간은?",
+        "node": "collect_clarification",
+        "expected_resume": {"answer": "string"},
+    }
+    adapter = FakeBackendAdapter()
+    graph = CheckpointResumeGraph(
+        checkpoint,
+        {"resumed": True},
+        interrupts=[clarification_interrupt],
+    )
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    with pytest.raises(ValueError, match="불일치"):
+        agent.resume("thread_sales_001", {"answer": "최근 6개월"})
 
     assert graph.invocations == []
     assert adapter.status_updates == []
