@@ -29,6 +29,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     parse_decision_json_as,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
+    CLARIFY_DECISION_PROMPT,
     DECIDE_NEXT_ACTION_PROMPT,
     EXECUTION_GUARD_DECISION_PROMPT,
     RESULT_VALIDATION_DECISION_PROMPT,
@@ -432,6 +433,18 @@ def test_prompts_expose_redecision_action_only_to_internal_transition_models() -
     assert "decide_next_action" not in DECIDE_NEXT_ACTION_PROMPT
     assert '"next_action":"decide_next_action"' in RESULT_VALIDATION_DECISION_PROMPT
     assert '"next_action":"decide_next_action"' in STEP_SUMMARY_DECISION_PROMPT
+
+
+def test_clarification_prompt_limits_questions_to_user_owned_ambiguity() -> None:
+    assert "사용자 답변 없이는 실행 방향이나 분석 범위를 확정할 수 없을 때만" in CLARIFY_DECISION_PROMPT
+    assert "데이터/스키마 탐색" in CLARIFY_DECISION_PROMPT
+    assert "하위 에이전트의 휴리스틱" in CLARIFY_DECISION_PROMPT
+    assert "사용할 데이터소스, 테이블, 컬럼, 조인 경로" in CLARIFY_DECISION_PROMPT
+    assert "결과에 기준·가정·한계를 명시" in CLARIFY_DECISION_PROMPT
+    assert '"needs_clarification":false' in CLARIFY_DECISION_PROMPT
+    assert '"needs_clarification":true' in CLARIFY_DECISION_PROMPT
+    assert "RFM과 평균 리뷰점수" in CLARIFY_DECISION_PROMPT
+    assert "최근 매출 추이" in CLARIFY_DECISION_PROMPT
 
 
 @pytest.mark.parametrize(

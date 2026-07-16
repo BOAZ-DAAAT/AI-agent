@@ -14,6 +14,12 @@ CLARIFY_DECISION_PROMPT = """
 추가 질문이 필요하면 needs_clarification=true로 두고 clarification_question에 사용자에게 물을 한 문장을 작성하세요.
 충분하면 needs_clarification=false로 두고 clarified_query에 분석에 사용할 정제된 질문을 작성하세요.
 
+판단 원칙:
+- clarification은 사용자 답변 없이는 실행 방향이나 분석 범위를 확정할 수 없을 때만 사용하세요.
+- 데이터/스키마 탐색, 통계적 분포, 일반적인 분석 관례, 또는 하위 에이전트의 휴리스틱으로 정할 수 있는 실행 세부사항은 사용자에게 묻지 마세요.
+- 사용할 데이터소스, 테이블, 컬럼, 조인 경로, 분석 방법, 집계 단위, 기본 필터, 운영 임계값, 세그먼트 기준, 일반적인 데이터 처리 정책은 분석 중 합리적으로 선택하고 결과에 기준·가정·한계를 명시하게 하세요.
+- 상대 기간처럼 결과 범위를 직접 바꾸는 조건이 불명확하거나, 사용자 의도 자체가 여러 갈래이거나, 조직/업무 정책처럼 데이터에서 추론하면 안 되는 기준이 필요하거나, 승인/외부 데이터/파괴적 작업처럼 임의 진행이 위험할 때만 질문하세요.
+
 반드시 JSON 객체만 반환하세요.
 허용 필드:
 - needs_clarification: boolean
@@ -22,7 +28,11 @@ CLARIFY_DECISION_PROMPT = """
 - reason: string
 
 예시:
-{"needs_clarification":false,"clarified_query":"월별 매출 추이를 분석해줘","clarification_question":"","reason":"분석 목표가 충분히 명확합니다."}
+입력: {"latest_user_query":"고객 단위로 RFM과 평균 리뷰점수를 결합해 고가치 저만족 고객군을 찾아줘"}
+출력: {"needs_clarification":false,"clarified_query":"고객 단위로 RFM과 평균 리뷰점수를 결합해 고가치 저만족 고객군을 분석한다.","clarification_question":"","reason":"분석 목표, 단위, 핵심 지표가 충분하며 테이블/컬럼/임계값은 데이터 탐색과 휴리스틱으로 정하고 결과에 명시할 수 있습니다."}
+
+입력: {"latest_user_query":"최근 매출 추이를 분석해줘"}
+출력: {"needs_clarification":true,"clarified_query":"","clarification_question":"최근의 기준 기간을 알려주세요. 예: 최근 7일, 30일, 이번 달","reason":"기간 범위가 분석 대상 데이터를 직접 바꾸며 입력만으로 확정할 수 없습니다."}
 """.strip()
 
 
