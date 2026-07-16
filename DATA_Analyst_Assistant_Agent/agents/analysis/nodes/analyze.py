@@ -28,6 +28,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     execute_generated_code,
     generate_analysis_code,
 )
+from DATA_Analyst_Assistant_Agent.agents.analysis.result_contract import fatal_result_contract_errors
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisIntent,
@@ -101,6 +102,29 @@ def run_analysis(
                     critique=last_critique,
                     error_history=history,
                     early_stop_reason="same execution failure repeated after regeneration",
+                )
+            previous_failure_signature = signature
+            continue
+        contract_errors = fatal_result_contract_errors(result)
+        if contract_errors:
+            _notify_progress(progress_callback, "execute", "failed", attempt)
+            last_result = result
+            feedback = (
+                "The previous code produced a result dict that does not match the "
+                "AnalysisResult contract. Fix these result payload issues and regenerate: "
+                + " ".join(contract_errors)
+            )
+            history.append({"stage": "result_contract", "code": code.code, "error": feedback})
+            signature = _failure_signature("result_contract", feedback)
+            if signature == previous_failure_signature:
+                return AnalysisOutcome(
+                    status="failed",
+                    attempts=attempt,
+                    code=last_code,
+                    result=last_result,
+                    critique=last_critique,
+                    error_history=history,
+                    early_stop_reason="same result contract failure repeated after regeneration",
                 )
             previous_failure_signature = signature
             continue
