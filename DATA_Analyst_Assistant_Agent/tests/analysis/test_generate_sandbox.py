@@ -227,6 +227,23 @@ def test_generate_prompt_exposes_eda_candidates_without_requiring_all_of_them() 
     assert "Do not test or report every EDA candidate by default" in human_prompt
 
 
+def test_generate_prompt_specifies_result_contract_shapes() -> None:
+    context = AnalysisContext(
+        user_question="compare price bands",
+        goal="compare price bands",
+        route_kind="simple",
+        columns=["price_band", "review_score"],
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="compare price bands"), context, model=model)
+
+    system_prompt = model.messages[0].content
+    assert "title (str), columns (list[str]), rows (list[dict])" in system_prompt
+    assert "do not use `name`" in system_prompt
+    assert "The `n` value MUST be an integer sample" in system_prompt
+
+
 def test_selection_response_requires_one_choice_or_free_text() -> None:
     with pytest.raises(ValueError):
         AnalysisSelectionResponse()
