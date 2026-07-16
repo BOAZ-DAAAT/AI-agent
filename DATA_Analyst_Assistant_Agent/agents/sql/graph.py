@@ -76,12 +76,25 @@ def route_after_validation(state: AgentState):
 
 
 def route_after_retry(state: AgentState):
-    """오류가 발생한 단계에 맞춰 질문 계획, 마트 설계 또는 SQL 생성으로 돌아간다."""
+    """오류가 발생한 단계와 repair 가능성에 맞는 최소 노드로 돌아간다."""
     reason_code = (state.get("retry_hint") or {}).get("reason_code", "")
+    retry_details = (state.get("retry_hint") or {}).get("details") or {}
     if reason_code == "sql_plan_failed":
         return "replan"
-    if reason_code == "sql_mart_design_failed":
+    if reason_code in {"sql_mart_design_failed", "mart_grain_missing", "mart_column_contract_invalid"}:
         return "redesign"
+    if reason_code in {
+        "mysql_dialect_error",
+        "route_kind_mismatch",
+        "intent_mismatch",
+        "result_shape_mismatch",
+        "mart_policy_mismatch",
+        "mart_summary_bias",
+        "execution_error",
+    }:
+        return "repair"
+    if reason_code == "sql_generation_failed" and retry_details.get("generation_stage") == "repair":
+        return "repair"
     return "regenerate"
 
 
@@ -96,6 +109,7 @@ def build_app():
     graph.add_node("finalize_table_plan", nodes.finalize_table_plan)
     graph.add_node("design_mart", nodes.design_mart)
     graph.add_node("generate_sql", nodes.generate_sql)
+    graph.add_node("repair_sql", nodes.repair_sql)
     graph.add_node("prevalidate_sql", nodes.prevalidate_sql)
     graph.add_node("execute_sql", nodes.execute_sql)
     graph.add_node("validate_sql_and_result", nodes.validate_sql_and_result)
@@ -127,6 +141,7 @@ def build_app():
         {"generate": "generate_sql", "retry": "increase_retry", "finalize": "finalize_answer"},
     )
     graph.add_edge("generate_sql", "prevalidate_sql")
+    graph.add_edge("repair_sql", "prevalidate_sql")
     graph.add_conditional_edges(
         "prevalidate_sql",
         nodes.route_after_prevalidation,
@@ -143,7 +158,7 @@ def build_app():
     graph.add_conditional_edges(
         "increase_retry",
         route_after_retry,
-        {"replan": "plan_question", "redesign": "design_mart", "regenerate": "generate_sql"},
+        {"replan": "plan_question", "redesign": "design_mart", "regenerate": "generate_sql", "repair": "repair_sql"},
     )
     graph.add_edge("finalize_answer", END)
 

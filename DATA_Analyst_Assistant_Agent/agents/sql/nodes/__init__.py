@@ -9,6 +9,7 @@ from .plan import plan_question
 from .finalize_plan import finalize_table_plan
 from .mart_design import design_mart
 from .generate import generate_sql
+from .repair import repair_sql
 from .prevalidate import prevalidate_sql, route_after_prevalidation
 from .execute import execute_sql
 from .validate import validate_sql_and_result
@@ -24,6 +25,7 @@ __all__ = [
     "finalize_table_plan",
     "design_mart",
     "generate_sql",
+    "repair_sql",
     "prevalidate_sql",
     "route_after_prevalidation",
     "execute_sql",

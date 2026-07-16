@@ -44,6 +44,7 @@ def base_state(**overrides):
         "plan": {},
         "mart_design": {},
         "sql_draft": {},
+        "previous_sql_draft": {},
         "validation": {},
         "validation_findings": [],
         "retry_hint": {},
@@ -53,6 +54,8 @@ def base_state(**overrides):
         "error": "",
         "failed_statement_index": None,
         "failed_statement_sql": "",
+        "failed_sql_component": None,
+        "execution_error_info": {},
     }
     state.update(overrides)
     return state
@@ -344,8 +347,8 @@ def test_mart_design_retry_keeps_planning_and_clears_only_downstream_state():
     assert route_after_retry({**state, **result}) == "redesign"
 
 
-@pytest.mark.parametrize("reason_code", ["sql_generation_failed", "invalid_join_plan", "result_shape_mismatch", "intent_mismatch", "mysql_dialect_error", "execution_error"])
-def test_sql_errors_retry_only_generation(reason_code):
+@pytest.mark.parametrize("reason_code", ["sql_generation_failed", "invalid_join_plan"])
+def test_initial_generation_errors_retry_generation(reason_code):
     state = base_state(
         plan=comprehensive_plan(),
         mart_design=mart_design_payload(),
@@ -359,6 +362,27 @@ def test_sql_errors_retry_only_generation(reason_code):
     assert "mart_design" not in result
     assert "plan" not in result
     assert route_after_retry({**state, **result}) == "regenerate"
+
+
+@pytest.mark.parametrize("reason_code", ["result_shape_mismatch", "intent_mismatch", "mysql_dialect_error", "execution_error"])
+def test_local_sql_errors_retry_repair(reason_code):
+    state = base_state(
+        plan=comprehensive_plan(),
+        mart_design=mart_design_payload(),
+        sql_draft={"sql": "SELECT broken", "sql_type": "select"},
+        validation_findings=[{"category": reason_code, "detail": "정확한 오류"}],
+        retry_hint={"reason_code": reason_code, "retryable": True},
+        error="정확한 오류",
+        failed_statement_sql="SELECT broken",
+    )
+
+    result = increase_retry(state)
+
+    assert result["sql_draft"] == {}
+    assert result["previous_sql_draft"]["sql"] == "SELECT broken"
+    assert "validation_findings" not in result
+    assert "error" not in result
+    assert route_after_retry({**state, **result}) == "repair"
 
 
 @pytest.mark.parametrize("reason_code", ["missing_table", "missing_column"])
@@ -473,6 +497,7 @@ def test_graph_wires_two_stage_order_for_both_routes():
     assert ("finalize_table_plan", "generate_sql") in edges
     assert ("finalize_table_plan", "design_mart") in edges
     assert ("design_mart", "generate_sql") in edges
+    assert ("repair_sql", "prevalidate_sql") in edges
 
 
 def graph_state(**overrides):
@@ -493,6 +518,7 @@ def graph_state(**overrides):
         "plan": {},
         "mart_design": {},
         "sql_draft": {},
+        "previous_sql_draft": {},
         "sql_result": None,
         "statement_results": [],
         "row_count": 0,
@@ -511,6 +537,8 @@ def graph_state(**overrides):
         "generation_failure_reason": "",
         "failed_statement_index": None,
         "failed_statement_sql": "",
+        "failed_sql_component": None,
+        "execution_error_info": {},
         "final_answer": "",
     }
     state.update(overrides)

@@ -210,6 +210,7 @@ class AgentState(TypedDict):
     plan: Dict[str, Any]
     mart_design: Dict[str, Any]
     sql_draft: Dict[str, Any]
+    previous_sql_draft: Dict[str, Any]
 
     sql_result: Any
     statement_results: List[Dict[str, Any]]
@@ -231,4 +232,6 @@ class AgentState(TypedDict):
     generation_failure_reason: str
     failed_statement_index: Optional[int]
     failed_statement_sql: str
+    failed_sql_component: Optional[Literal["precheck", "main", "postcheck"]]
+    execution_error_info: Dict[str, Any]
     final_answer: str
