@@ -41,9 +41,33 @@ def _normalize_column_list(values: Any) -> list[str]:
 
 def _normalize_mart_design_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
-    for key in ("key_columns", "measure_columns", "dimension_columns", "source_tables"):
+    for key in ("source_tables", "grain_columns", "deduplication_keys"):
         normalized[key] = _normalize_column_list(normalized.get(key))
+    source_grains = normalized.get("source_grains")
+    if isinstance(source_grains, dict):
+        normalized["source_grains"] = {
+            str(table).strip(): _normalize_column_list(columns)
+            for table, columns in source_grains.items()
+            if str(table).strip()
+        }
     return normalized
+
+
+def _validate_target_metric_support(design: MartDesign, plan: dict[str, Any]) -> None:
+    target_metrics = list(dict.fromkeys(str(metric).strip() for metric in plan.get("target_metrics", []) if str(metric).strip()))
+    supported_metrics = [item.metric_name for item in design.metric_support]
+    if supported_metrics != target_metrics:
+        raise ValueError(
+            "metric_support는 고유 target_metrics를 같은 순서로 정확히 한 번 포함해야 합니다: "
+            f"expected={target_metrics}, actual={supported_metrics}"
+        )
+
+
+def validate_mart_design_state(payload: dict[str, Any], plan: dict[str, Any]) -> MartDesign:
+    """저장되었거나 새로 생성된 마트 설계가 현재 계약과 계획을 만족하는지 확인한다."""
+    design = MartDesign(**_normalize_mart_design_payload(payload))
+    _validate_target_metric_support(design, plan)
+    return design
 
 
 def _mart_design_failure(*, reason_code: str, detail: str, retryable: bool) -> dict[str, Any]:
@@ -115,7 +139,7 @@ def design_mart(state: AgentState):
 
     normalized = normalize_mart_column_lists(_normalize_mart_design_payload(parsed))
     try:
-        design = MartDesign(**normalized)
+        design = validate_mart_design_state(normalized, state.get("plan") or {})
     except Exception as exc:
         return _mart_design_failure(
             reason_code="invalid_mart_design_payload",

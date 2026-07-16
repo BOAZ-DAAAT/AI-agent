@@ -14,6 +14,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     try_llm_json,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
+from DATA_Analyst_Assistant_Agent.agents.sql.nodes.mart_design import (
+    _mart_design_failure,
+    validate_mart_design_state,
+)
 
 
 def _generation_failure(
@@ -64,6 +68,15 @@ def _generation_failure(
 
 def generate_sql(state: AgentState):
     route_kind = require_route_kind(state["plan"])
+    if route_kind == "comprehensive":
+        try:
+            validate_mart_design_state(state.get("mart_design") or {}, state.get("plan") or {})
+        except Exception as exc:
+            return _mart_design_failure(
+                reason_code="stale_or_invalid_mart_design",
+                detail=f"현재 계약을 만족하지 않는 mart 설계를 폐기하고 다시 설계해야 합니다: {exc}",
+                retryable=True,
+            )
     retry_hint = state.get("retry_hint") or {}
     if state.get("retry_count", 0) > 0 and retry_hint.get("reason_code") in {"missing_table", "missing_column"}:
         return _generation_failure(

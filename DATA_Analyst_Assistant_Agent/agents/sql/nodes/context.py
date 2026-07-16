@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
+from DATA_Analyst_Assistant_Agent.agents.sql.nodes.plan import _plan_failure
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import (
     compact_integrity_summary_text,
     load_integrity_json,
@@ -55,20 +56,7 @@ def _as_table_list(value: Any) -> list[str]:
 
 
 def _planned_tables(plan: dict[str, Any]) -> list[str]:
-    tables: list[str] = []
-    for key in ("selected_join_tables", "relevant_tables", "candidate_tables"):
-        for table in _as_table_list(plan.get(key)):
-            if table not in tables:
-                tables.append(table)
-    return tables
-
-
-def _first_selected_table_list(plan: dict[str, Any]) -> list[str]:
-    for key in ("selected_join_tables", "relevant_tables", "candidate_tables"):
-        tables = _as_table_list(plan.get(key))
-        if tables:
-            return tables
-    return []
+    return _as_table_list(plan.get("candidate_tables"))
 
 
 def _schema_table_names(schema_text: str) -> list[str]:
@@ -84,28 +72,38 @@ def _schema_table_names(schema_text: str) -> list[str]:
 
 def refresh_schema_context(state: AgentState):
     """계획에서 선택한 테이블의 상세 스키마로 프롬프트 컨텍스트를 교체한다."""
-    tables = _first_selected_table_list(state.get("plan") or {})
+    tables = _planned_tables(state.get("question_plan") or {})
     if not tables:
+        failure = _plan_failure(
+            reason_code="candidate_tables_empty",
+            detail="질문 계획에 후보 테이블이 없어 상세 스키마를 불러올 수 없습니다.",
+            retryable=True,
+        )
         return {
-            "schema_text": state.get("schema_text", ""),
+            **failure,
             "schema_refresh": {
-                "status": "skipped",
+                "status": "failed",
                 "candidate_tables": [],
                 "applied_tables": [],
                 "reason": "no_tables",
-            }
+            },
         }
 
     scoped_schema_text = load_scoped_schema_text(tables)
     if not scoped_schema_text:
+        failure = _plan_failure(
+            reason_code="candidate_tables_invalid",
+            detail="질문 계획의 후보 테이블 중 유효한 테이블이 없습니다.",
+            retryable=True,
+        )
         return {
-            "schema_text": state.get("schema_text", ""),
+            **failure,
             "schema_refresh": {
-                "status": "skipped",
+                "status": "failed",
                 "candidate_tables": tables,
                 "applied_tables": [],
                 "reason": "no_valid_tables",
-            }
+            },
         }
 
     applied_tables = _schema_table_names(scoped_schema_text)
@@ -126,7 +124,7 @@ def refresh_integrity_context(state: AgentState):
     The backend integrity service is optional. If absent or failing, this node is
     a no-op for prompt context and records only small refresh metadata.
     """
-    plan = state.get("plan") or {}
+    plan = state.get("question_plan") or {}
     tables = _planned_tables(plan)
     if not tables:
         return {"integrity_refresh": {"status": "skipped", "reason": "no_tables", "tables": []}}
