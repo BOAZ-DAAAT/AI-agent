@@ -8,9 +8,9 @@ import pytest
 from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.report import ReportAgent
-from DATA_Analyst_Assistant_Agent.agents.report.builder import build_report
-from DATA_Analyst_Assistant_Agent.agents.report.service import generate_report_envelope
+from DATA_Analyst_Assistant_Agent.supervisor.report import ReportGenerator
+from DATA_Analyst_Assistant_Agent.supervisor.report.builder import build_report
+from DATA_Analyst_Assistant_Agent.supervisor.report.service import generate_report_envelope
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, LocalCheck, OrchestrationState
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph, make_generate_report_node
@@ -154,7 +154,7 @@ def test_report_agent_remains_compatibility_wrapper(adapter: BackendAdapter) -> 
     run = adapter.create_run()
     sql_id = _register_sql(adapter, run.run_id)
 
-    envelope = ReportAgent().run(_orchestration_state(run.run_id, sql_id), AgentRuntime(adapter))
+    envelope = ReportGenerator().run(_orchestration_state(run.run_id, sql_id), AgentRuntime(adapter))
 
     artifact = adapter.get_artifact(envelope.artifact_ids()[0])
     assert artifact.created_by_node == "report_agent"
@@ -209,7 +209,7 @@ def test_generate_report_self_check_failure_returns_failed_envelope(
     run = adapter.create_run()
     sql_id = _register_sql(adapter, run.run_id)
     monkeypatch.setattr(
-        "DATA_Analyst_Assistant_Agent.agents.report.service.run_report_self_check",
+        "DATA_Analyst_Assistant_Agent.supervisor.report.service.run_report_self_check",
         lambda markdown: [LocalCheck(name="summary_present", passed=False, detail="요약 누락")],
     )
 
@@ -300,7 +300,7 @@ def test_generate_report_node_stages_self_check_failure_without_polluting_state(
     run = adapter.create_run()
     sql_id = _register_sql(adapter, run.run_id)
     monkeypatch.setattr(
-        "DATA_Analyst_Assistant_Agent.agents.report.service.run_report_self_check",
+        "DATA_Analyst_Assistant_Agent.supervisor.report.service.run_report_self_check",
         lambda markdown: [LocalCheck(name="summary_present", passed=False, detail="요약 누락")],
     )
 

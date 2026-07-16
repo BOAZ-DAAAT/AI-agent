@@ -6,7 +6,7 @@ from data_agent_backend.config import BackendConfig
 from data_agent_backend.models.artifacts import ArtifactType
 from data_agent_backend.models.common import BackendError
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.report import ReportAgent
+from DATA_Analyst_Assistant_Agent.supervisor.report import ReportGenerator
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
 
@@ -49,7 +49,7 @@ def test_report_agent_registers_report_artifact_directly(tmp_path) -> None:
         route_kind="simple",
     )
 
-    envelope = ReportAgent().run(state, AgentRuntime(adapter))
+    envelope = ReportGenerator().run(state, AgentRuntime(adapter))
     artifact = adapter.get_artifact(envelope.artifact_ids()[0])
 
     assert artifact.type == ArtifactType.report

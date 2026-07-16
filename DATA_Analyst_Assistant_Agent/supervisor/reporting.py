@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.report.service import generate_report_envelope
+from DATA_Analyst_Assistant_Agent.supervisor.report.service import generate_report_envelope
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,

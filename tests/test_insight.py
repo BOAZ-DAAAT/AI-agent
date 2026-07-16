@@ -1,7 +1,7 @@
 """Insight Agent 테스트 — 전부 FakeLLM/FakeAdapter (실제 LLM·백엔드 호출 0, 토큰 0).
 
 검증 대상: 증거팩 조립 / 숫자 검증 게이트 / compute·chart 도구(게이트·범위·렌더) /
-bounded ReAct 루프(성공·검증실패 피드백·폴백) / InsightAgent.run 아티팩트 등록.
+bounded ReAct 루프(성공·검증실패 피드백·폴백) / InsightGenerator.run 아티팩트 등록.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ import pytest
 from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.insight.evidence import EvidencePack, build_evidence_pack
-from DATA_Analyst_Assistant_Agent.agents.insight.loop import run_insight_loop
-from DATA_Analyst_Assistant_Agent.agents.insight.tools import run_chart, run_compute, run_look
-from DATA_Analyst_Assistant_Agent.agents.insight.verify import build_evidence_corpus, verify_texts
+from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import EvidencePack, build_evidence_pack
+from DATA_Analyst_Assistant_Agent.supervisor.insight.loop import run_insight_loop
+from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import run_chart, run_compute, run_look
+from DATA_Analyst_Assistant_Agent.supervisor.insight.verify import build_evidence_corpus, verify_texts
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 # ─────────────────────────────
@@ -87,7 +87,7 @@ def _runtime(adapter: FakeAdapter) -> AgentRuntime:
 
 def _pack(with_eda: bool = False) -> EvidencePack:
     df = pd.read_csv(__import__("io").StringIO(_CSV))
-    from DATA_Analyst_Assistant_Agent.agents.insight.evidence import _summarize_table
+    from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import _summarize_table
     eda = {"final_summary": "toys 중심 매출 집중 구조입니다."} if with_eda else {}
     return EvidencePack(user_question="카테고리별 매출 상위는?", route_kind="simple",
                         df=df, table_summary=_summarize_table(df), eda=eda)
@@ -234,7 +234,7 @@ def test_chart_grouped_bar_renders(tmp_path):
 
 
 def test_fmt_num_no_scientific_notation():
-    from DATA_Analyst_Assistant_Agent.agents.insight.tools import _fmt_num
+    from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import _fmt_num
     assert _fmt_num(25236.0) == "25,236"               # 2.524e+04 방지
     assert _fmt_num(163.567) == "163.57"
     assert _fmt_num(0.845) == "0.845"
@@ -347,18 +347,18 @@ def test_loop_action_plan_gets_forced_caveat(tmp_path):
 
 
 # ─────────────────────────────
-# InsightAgent.run (end-to-end, 페이크)
+# InsightGenerator.run (end-to-end, 페이크)
 # ─────────────────────────────
 def _run_agent(monkeypatch, tmp_path, adapter):
-    import DATA_Analyst_Assistant_Agent.agents.insight.loop as L
-    from DATA_Analyst_Assistant_Agent.agents.insight import InsightAgent
+    import DATA_Analyst_Assistant_Agent.supervisor.insight.loop as L
+    from DATA_Analyst_Assistant_Agent.supervisor.insight import InsightGenerator
     monkeypatch.setenv("INSIGHT_CHART_DIR", str(tmp_path))
     monkeypatch.setattr(L, "get_chat_model", lambda *a, **k: FakeLLM(_COMPUTE, _CHART, _FINISH_GOOD))
-    return InsightAgent().run(_state(sql_agent=["s1"]), _runtime(adapter))
+    return InsightGenerator().run(_state(sql_agent=["s1"]), _runtime(adapter))
 
 
 def test_markdown_embeds_chart_and_labels_sources():
-    from DATA_Analyst_Assistant_Agent.agents.insight.agent import _build_markdown
+    from DATA_Analyst_Assistant_Agent.supervisor.insight.agent import _build_markdown
     payload = {"answer": "답", "key_insights": [], "action_plan": [], "limitations": [],
                "charts": [{"title": "차트", "filename": "c.png", "supports": "answer",
                            "local_path": "/tmp/insight_charts/c.png", "kind": "bar", "artifact_id": None}],
@@ -388,9 +388,9 @@ def test_agent_run_chart_guard_when_bytes_unsupported(monkeypatch, tmp_path):
 
 
 def test_agent_run_without_any_evidence_flags_error(monkeypatch, tmp_path):
-    import DATA_Analyst_Assistant_Agent.agents.insight.loop as L
-    from DATA_Analyst_Assistant_Agent.agents.insight import InsightAgent
+    import DATA_Analyst_Assistant_Agent.supervisor.insight.loop as L
+    from DATA_Analyst_Assistant_Agent.supervisor.insight import InsightGenerator
     monkeypatch.setenv("INSIGHT_CHART_DIR", str(tmp_path))
     monkeypatch.setattr(L, "get_chat_model", lambda *a, **k: FakeLLM(_FINISH_BAD))
-    envelope = InsightAgent().run(_state(), _runtime(FakeAdapter()))
+    envelope = InsightGenerator().run(_state(), _runtime(FakeAdapter()))
     assert envelope.validation.has_errors              # evidence_present 실패

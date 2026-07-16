@@ -7,8 +7,8 @@ from data_agent_backend.models.artifacts import ArtifactRecord, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import generated_sql_from_artifacts, read_json_artifact
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.report.builder import build_report
-from DATA_Analyst_Assistant_Agent.agents.report.self_check import run_report_self_check
+from DATA_Analyst_Assistant_Agent.supervisor.report.builder import build_report
+from DATA_Analyst_Assistant_Agent.supervisor.report.self_check import run_report_self_check
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     AgentStatus,
