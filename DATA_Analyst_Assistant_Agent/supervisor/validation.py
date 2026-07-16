@@ -73,7 +73,7 @@ class ResultValidationDecision(BaseModel):
 
 
 class CompletionReadinessDecision(BaseModel):
-    status: Literal["ready", "report_required", "invalid"]
+    status: Literal["ready", "insight_required", "report_required", "invalid"]
     reason: str
 
 
@@ -118,9 +118,12 @@ _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
     "report_agent": "call_report_agent",
+    "insight_agent": "call_insight_agent",
 }
 
-_KNOWN_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent", "report_agent"}
+_KNOWN_AGENTS: set[AgentName] = {
+    "sql_agent", "eda_agent", "analysis_agent", "report_agent", "insight_agent",
+}
 _EVIDENCE_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent"}
 
 
@@ -151,6 +154,24 @@ def _check_completion_readiness(state: SupervisorState) -> CompletionReadinessDe
         return CompletionReadinessDecision(
             status="invalid",
             reason="검증·승격된 SQL, EDA, 분석 근거가 없어 완료할 수 없습니다.",
+        )
+
+    insight_completed = "insight_agent" in state.get("completed_agents", [])
+    has_insight_artifact = _has_valid_accepted_artifact(state, "insight_agent")
+    if insight_completed and not has_insight_artifact:
+        return CompletionReadinessDecision(
+            status="invalid",
+            reason="insight_agent 완료 표식은 있지만 승격된 인사이트 아티팩트가 없습니다.",
+        )
+    if has_insight_artifact and not insight_completed:
+        return CompletionReadinessDecision(
+            status="invalid",
+            reason="승격된 인사이트 아티팩트는 있지만 insight_agent 완료 표식이 없습니다.",
+        )
+    if not insight_completed:
+        return CompletionReadinessDecision(
+            status="insight_required",
+            reason="검증·승격된 분석 근거가 있어 인사이트 생성이 필요합니다.",
         )
 
     report_completed = "report_agent" in state.get("completed_agents", [])
@@ -215,6 +236,19 @@ def guard_agent_preconditions(agent: AgentName | str, state: SupervisorState) ->
             allowed=False,
             next_action="call_sql_agent",
             reason="분석을 실행하려면 먼저 SQL 또는 EDA 산출물이 필요합니다.",
+        )
+
+    if agent == "insight_agent":
+        if _has_completed_evidence(state):
+            return GuardDecision(
+                allowed=True,
+                next_action="call_insight_agent",
+                reason="SQL, EDA, 분석 중 하나 이상의 근거 산출물이 있어 인사이트를 생성할 수 있습니다.",
+            )
+        return GuardDecision(
+            allowed=False,
+            next_action="call_analysis_agent",
+            reason="인사이트를 생성하려면 먼저 SQL, EDA, 분석 중 하나 이상의 근거가 필요합니다.",
         )
 
     if _has_completed_evidence(state):

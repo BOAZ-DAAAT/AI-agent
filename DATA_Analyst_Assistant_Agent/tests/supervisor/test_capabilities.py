@@ -14,6 +14,7 @@ def test_default_capabilities_include_all_supervisor_agents() -> None:
         "eda_agent",
         "analysis_agent",
         "report_agent",
+        "insight_agent",
     }
 
 

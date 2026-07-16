@@ -96,12 +96,26 @@ def test_completion_readiness_rejects_state_without_analysis_evidence() -> None:
     assert "근거" in decision.reason
 
 
-def test_completion_readiness_requires_report_after_analysis_evidence() -> None:
+def test_completion_readiness_requires_insight_after_analysis_evidence() -> None:
     state = _state()
     state["accepted_evidence"] = {
         "sql_agent": [{"artifact_id": "artifact_sql"}],
     }
     state["completed_agents"] = ["sql_agent"]
+
+    decision = _check_completion_readiness(state)
+
+    assert decision.status == "insight_required"
+    assert "인사이트" in decision.reason
+
+
+def test_completion_readiness_requires_report_after_insight_evidence() -> None:
+    state = _state()
+    state["accepted_evidence"] = {
+        "sql_agent": [{"artifact_id": "artifact_sql"}],
+        "insight_agent": [{"artifact_id": "artifact_insight"}],
+    }
+    state["completed_agents"] = ["sql_agent", "insight_agent"]
 
     decision = _check_completion_readiness(state)
 
@@ -113,8 +127,9 @@ def test_completion_readiness_rejects_report_completion_without_artifact() -> No
     state = _state()
     state["accepted_evidence"] = {
         "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "insight_agent": [{"artifact_id": "artifact_insight"}],
     }
-    state["completed_agents"] = ["analysis_agent", "report_agent"]
+    state["completed_agents"] = ["analysis_agent", "insight_agent", "report_agent"]
 
     decision = _check_completion_readiness(state)
 
@@ -126,9 +141,10 @@ def test_completion_readiness_rejects_report_artifact_without_completion() -> No
     state = _state()
     state["accepted_evidence"] = {
         "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "insight_agent": [{"artifact_id": "artifact_insight"}],
         "report_agent": [{"artifact_id": "artifact_report"}],
     }
-    state["completed_agents"] = ["analysis_agent"]
+    state["completed_agents"] = ["analysis_agent", "insight_agent"]
 
     decision = _check_completion_readiness(state)
 
@@ -140,9 +156,10 @@ def test_completion_readiness_allows_promoted_report_with_analysis_evidence() ->
     state = _state()
     state["accepted_evidence"] = {
         "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "insight_agent": [{"artifact_id": "artifact_insight"}],
         "report_agent": [{"artifact_id": "artifact_report"}],
     }
-    state["completed_agents"] = ["analysis_agent", "report_agent"]
+    state["completed_agents"] = ["analysis_agent", "insight_agent", "report_agent"]
 
     decision = _check_completion_readiness(state)
 

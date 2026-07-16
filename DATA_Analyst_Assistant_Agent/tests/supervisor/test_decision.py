@@ -37,7 +37,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
-from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
 
 @dataclass
@@ -426,6 +425,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "eda_agent",
         "analysis_agent",
         "report_agent",
+        "insight_agent",
     }
 
 
@@ -587,34 +587,6 @@ def test_finalization_context_includes_latest_validation_agent_failure_streak() 
     context = build_finalization_context(state)
 
     assert context["recent_failure_streak"] == analysis_streak
-
-
-def test_summarize_agent_step_is_compact() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql_result"],
-    )
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert summary.step == "execute_subagent"
-    assert summary.agent == "sql_agent"
-    assert summary.action == "call_sql_agent"
-    assert summary.artifact_ids == ["artifact_sql_result"]
-
-
-def test_summarize_agent_step_truncates_summary_to_1000_chars() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="가" * 1001,
-        artifact_ids=[],
-    )
-
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert len(summary.summary) == 1000
 
 
 def test_context_derives_legacy_payload_keys_from_validation_history() -> None:

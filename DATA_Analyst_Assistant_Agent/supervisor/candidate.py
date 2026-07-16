@@ -40,6 +40,7 @@ _ACTION_BY_AGENT: dict[AgentName, NextAction] = {
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
     "report_agent": "call_report_agent",
+    "insight_agent": "call_insight_agent",
 }
 _AGENT_BY_ACTION: dict[str, AgentName] = {
     action: agent for agent, action in _ACTION_BY_AGENT.items()
@@ -902,7 +903,7 @@ def _append_recovery_event(
 
 
 def _next_action(result: AgentCompactResult, record: ValidationRecord) -> NextAction:
-    if result.agent == "report_agent":
+    if result.agent in {"report_agent", "insight_agent"}:
         return "finalize"
     semantic = next((check.details for check in record.checks if check.name == "semantic"), {})
     recommendation = str(semantic.get("recommended_next_action") or "")
@@ -921,6 +922,7 @@ def _semantic_action_allowed(agent: str, action: str) -> bool:
         "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
         "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
         "report_agent": {"call_report_agent"},
+        "insight_agent": {"call_insight_agent"},
     }
     return action in allowed.get(agent, set())
 

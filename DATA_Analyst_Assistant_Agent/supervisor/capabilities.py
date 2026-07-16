@@ -89,6 +89,22 @@ DEFAULT_AGENT_CAPABILITIES: list[AgentCapability] = [
         output_evidence=[EvidenceRequirement(type="report", kind="final_report", non_empty=True)],
         avoid_when=["리포트에 포함할 근거 artifact가 없을 때"],
     ),
+    AgentCapability(
+        agent="insight_agent",
+        action="call_insight_agent",
+        description="상류 근거를 종합해 사용자 질문에 대한 직답과 핵심 인사이트, 근거 차트를 생성합니다.",
+        when_to_use="분석 근거가 준비된 뒤, 사용자 질문 전체에 대한 최종 답을 종합해야 할 때 자동으로(결정론적으로) 실행됩니다. LLM이 호출 여부를 판단하지 않습니다.",
+        requires_any_artifacts_from=["sql_agent", "eda_agent", "analysis_agent"],
+        produces_artifacts=["insight_payload"],
+        input_evidence=[
+            EvidenceRequirement(type="sql_result", kind="sql_result"),
+            EvidenceRequirement(type="data_profile", kind="eda_summary"),
+            EvidenceRequirement(type="file", kind="analysis_result"),
+        ],
+        input_evidence_mode="any",
+        output_evidence=[EvidenceRequirement(type="file", kind="insight_payload", non_empty=True)],
+        avoid_when=["인사이트에 포함할 근거 artifact가 없을 때"],
+    ),
 ]
 
 
