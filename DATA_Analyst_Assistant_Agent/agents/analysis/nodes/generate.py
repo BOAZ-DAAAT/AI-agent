@@ -119,6 +119,20 @@ Rules:
   str), statistics (dict of computed numbers), limitations (list of str).
   Optional but preferred keys: hypothesis_tests, evidence_tables, interpretation,
   method_notes, review_request.
+- If you include `evidence_tables`, every item MUST be a dict with exactly this
+  stable shape: title (str), columns (list[str]), rows (list[dict]). Use `title`;
+  do not use `name` as the table label key.
+- If you include `hypothesis_tests`, every tested item should contain hypothesis,
+  test_name, null_hypothesis, alternative_hypothesis, statistic, p_value,
+  effect_size, n, decision, and caveats. The `n` value MUST be an integer sample
+  count. Never put a mean count, weighted value, percentage, ratio, or any float
+  with a fractional part in `n`.
+- Example:
+  result["evidence_tables"] = [{{
+      "title": "group summary",
+      "columns": ["group", "n", "mean_value"],
+      "rows": [{{"group": "A", "n": 10, "mean_value": 3.2}}],
+  }}]
 - When a previous selection response is supplied, treat it as a binding
   constraint for this analysis. A free-text response is a new analysis
   constraint, not a note to append to the report.

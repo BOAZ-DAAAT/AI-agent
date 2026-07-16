@@ -83,6 +83,26 @@ _HYPOTHESIS_CODE = GeneratedAnalysisCode(
     ),
 )
 
+_RECOVERABLE_CONTRACT_CODE = GeneratedAnalysisCode(
+    rationale="recoverable result contract aliases",
+    code=(
+        "result = {\n"
+        "  'summary': 'recoverable contract payload',\n"
+        "  'findings': ['recoverable contract payload'],\n"
+        "  'statistics': {'n': len(df)},\n"
+        "  'method_decision': {'selected_method': 'summary', 'rationale': 'fixture', 'assumptions_checked': [], 'fallbacks_considered': []},\n"
+        "  'limitations': [],\n"
+        "  'hypothesis_tests': [{\n"
+        "    'hypothesis': 'revenue is associated with fixture order',\n"
+        "    'test_name': 'spearman',\n"
+        "    'n': 87448.08854062065,\n"
+        "    'decision': 'inconclusive'\n"
+        "  }],\n"
+        "  'evidence_tables': [{'name': 'risk_segment_summary', 'columns': ['metric', 'value'], 'rows': [{'metric': 'n', 'value': len(df)}]}]\n"
+        "}\n"
+    ),
+)
+
 
 def test_graph_produces_valid_analysis_result() -> None:
     classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance", metric_hints=["revenue"])])
@@ -154,6 +174,30 @@ def test_graph_review_required_is_validated_result_with_hypothesis_tests() -> No
     assert parsed.evidence[0].status == "review_required"
     assert parsed.hypothesis_tests[0].decision == "supported"
     assert parsed.evidence_tables[0].title == "summary"
+    assert all(check.passed for check in checks)
+
+
+def test_graph_normalizes_recoverable_result_contract_payload() -> None:
+    classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance", metric_hints=["revenue"])])
+    generate = _FakeModel([_RECOVERABLE_CONTRACT_CODE])
+    critic = _FakeModel([CodeCritique(verdict="pass")])
+
+    result, checks, terminal = run_analysis_workflow(
+        _state(), _df(), [],
+        planner_model=classify,
+        code_generator_model=generate,
+        critic_model=critic,
+    )
+
+    parsed = AnalysisResult.model_validate(result)
+    assert terminal == "validated_result"
+    assert parsed.evidence_tables[0].title == "risk_segment_summary"
+    assert parsed.hypothesis_tests[0].n is None
+    assert "Normalized evidence_tables[0].name to title." in parsed.method_notes
+    assert (
+        "Cleared hypothesis_tests[0].n because sample size was a non-integer float."
+        in parsed.method_notes
+    )
     assert all(check.passed for check in checks)
 
 
