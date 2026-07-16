@@ -17,7 +17,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import EvidencePac
 from DATA_Analyst_Assistant_Agent.supervisor.insight.schemas import ChartEntry, InsightResult, ToolCall
 from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import run_chart, run_compute, run_look
 from DATA_Analyst_Assistant_Agent.supervisor.insight.validator import validate_result
-from DATA_Analyst_Assistant_Agent.supervisor.insight.verify import build_evidence_corpus, verify_texts
+from DATA_Analyst_Assistant_Agent.shared.numeric_verify import build_evidence_corpus, verify_texts
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 MAX_ROUNDS = 8                                        # LLM 호출 상한 (배회 방지)

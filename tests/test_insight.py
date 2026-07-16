@@ -19,7 +19,6 @@ from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import EvidencePack, build_evidence_pack
 from DATA_Analyst_Assistant_Agent.supervisor.insight.loop import run_insight_loop
 from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import run_chart, run_compute, run_look
-from DATA_Analyst_Assistant_Agent.supervisor.insight.verify import build_evidence_corpus, verify_texts
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 # ─────────────────────────────
@@ -126,44 +125,6 @@ def test_evidence_pack_comprehensive():
     assert pack.eda["final_summary"].startswith("toys")
     assert pack.analysis["key_findings"] == ["toys가 매출 1위(900.0)"]
     assert set(pack.source_artifact_ids) == {"s1", "e1", "a1"}
-
-
-# ─────────────────────────────
-# 숫자 검증 게이트
-# ─────────────────────────────
-def test_verify_passes_numbers_from_evidence():
-    pack = _pack()
-    numbers, corpus = build_evidence_corpus(pack, [])
-    ok, missing = verify_texts(["최대 매출은 500.0입니다."], numbers, corpus)
-    assert ok, missing
-
-
-def test_verify_percent_and_rounding_tolerance():
-    numbers = {0.4176, 0.8450704}
-    ok, missing = verify_texts(["비중은 41.8%이고 비율은 0.845입니다."], numbers, "[]")
-    assert ok, missing
-
-
-def test_verify_rejects_fabricated_number():
-    pack = _pack()
-    numbers, corpus = build_evidence_corpus(pack, [])
-    ok, missing = verify_texts(["매출이 7777.7로 증가했습니다."], numbers, corpus)
-    assert not ok and "7777.7" in missing
-
-
-def test_verify_skips_small_ordinal_but_checks_percent():
-    ok, missing = verify_texts(["상위 10개 중 3개"], set(), "[]")     # 서수 → 검증 제외
-    assert ok
-    ok, missing = verify_texts(["10% 증가했습니다"], set(), "[]")     # %는 주장 → 검증
-    assert not ok and "10" in missing
-
-
-def test_verify_compute_result_becomes_citable():
-    pack = _pack()
-    computes = [{"ok": True, "result": {"toys": 900.0}}]
-    numbers, corpus = build_evidence_corpus(pack, computes)
-    ok, missing = verify_texts(["toys 합계는 900.0입니다."], numbers, corpus)
-    assert ok, missing
 
 
 # ─────────────────────────────
