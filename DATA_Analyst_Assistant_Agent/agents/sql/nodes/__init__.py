@@ -6,6 +6,7 @@
 
 from .context import load_context, preplan_integrity_gate, refresh_integrity_context, refresh_schema_context
 from .plan import plan_question
+from .finalize_plan import finalize_table_plan
 from .mart_design import design_mart
 from .generate import generate_sql
 from .prevalidate import prevalidate_sql, route_after_prevalidation
@@ -20,6 +21,7 @@ __all__ = [
     "refresh_integrity_context",
     "refresh_schema_context",
     "plan_question",
+    "finalize_table_plan",
     "design_mart",
     "generate_sql",
     "prevalidate_sql",

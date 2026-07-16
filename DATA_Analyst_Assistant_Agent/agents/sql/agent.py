@@ -54,6 +54,9 @@ class SQLAgent:
                 "integrity_preplan": {},
                 "integrity_refresh": {},
                 "schema_refresh": {},
+                "question_plan": {},
+                "final_table_plan": {},
+                "planning_stages": {},
                 "plan": {},
                 "mart_design": {},
                 "sql_draft": {},
@@ -106,6 +109,10 @@ class SQLAgent:
 
         plan_payload = {
             "plan": result.get("plan") or {},
+            "planning_stages": result.get("planning_stages") or {
+                "question_plan": result.get("question_plan") or {},
+                "final_table_plan": result.get("final_table_plan") or {},
+            },
             "mart_design": result.get("mart_design") or {},
             "sql_draft": sql_draft,
             "statement_results": result.get("statement_results") or [],

@@ -70,6 +70,62 @@ def patch_staged_schema_context(monkeypatch, context_module, schema_text: str) -
     monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: schema_text)
 
 
+def install_two_stage_llm_adapter(monkeypatch) -> None:
+    """기존 그래프 fixture의 1단계 응답을 새 2단계 계약으로 변환한다."""
+    from DATA_Analyst_Assistant_Agent.agents.sql import planner_support
+    from DATA_Analyst_Assistant_Agent.agents.sql.nodes import finalize_plan as finalize_plan_module
+    from DATA_Analyst_Assistant_Agent.agents.sql.nodes import plan as plan_module
+
+    original_try_llm_json = planner_support.try_llm_json
+    last_question_plan: dict[str, object] = {}
+
+    def adapted_question_plan(prompt: str):
+        response = original_try_llm_json(prompt)
+        if not response:
+            return response
+        try:
+            parsed = json.loads(response.strip().replace("```json", "").replace("```", "").strip())
+        except Exception:
+            return response
+        if not isinstance(parsed, dict):
+            return response
+        if "target_metrics" in parsed:
+            normalized = parsed
+        else:
+            target_metric = str(parsed.get("target_metric") or "").strip()
+            candidates = list(parsed.get("candidate_tables") or parsed.get("selected_join_tables") or parsed.get("relevant_tables") or [])
+            normalized = {
+                "route_kind": parsed.get("route_kind"),
+                "question_type": parsed.get("question_type") or "detail",
+                "target_metrics": [target_metric] if target_metric else [],
+                "analysis_entities": [],
+                "dimensions": list(parsed.get("dimensions") or []),
+                "filters": list(parsed.get("filters") or []),
+                "candidate_tables": candidates,
+                "required_aggregations": list(parsed.get("required_aggregations") or []),
+                "reasoning": parsed.get("reasoning") or "테스트 계획 근거",
+            }
+        last_question_plan.clear()
+        last_question_plan.update(normalized)
+        last_question_plan["required_columns"] = list(parsed.get("required_columns") or [])
+        return json.dumps(normalized, ensure_ascii=False)
+
+    def synthesized_final_plan(prompt: str):
+        candidates = list(last_question_plan.get("candidate_tables") or [])
+        required_columns = list(last_question_plan.get("required_columns") or [])
+        if not required_columns and candidates:
+            required_columns = [f"{candidates[0]}.order_id"]
+        return json.dumps({
+            "selected_join_tables": candidates,
+            "required_columns": required_columns,
+            "business_keys": {},
+            "reasoning": "후보 상세 스키마를 사용한 테스트 최종 계획",
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(plan_module, "try_llm_json", adapted_question_plan)
+    monkeypatch.setattr(finalize_plan_module, "try_llm_json", synthesized_final_plan)
+
+
 # ── self_check tests ──
 
 class TestSQLSelfCheck:
@@ -312,7 +368,7 @@ class TestSQLRouteKindContract:
             ),
         ],
     )
-    def test_question_plan_derives_legacy_fields_from_route_kind(
+    def test_question_plan_ignores_legacy_fields(
         self,
         route_kind,
         legacy_fields,
@@ -322,19 +378,27 @@ class TestSQLRouteKindContract:
 
         parsed = {
             "route_kind": route_kind,
-            "selected_join_tables": ["orders"],
+            "question_type": "detail",
+            "target_metrics": [],
+            "analysis_entities": [],
+            "dimensions": [],
+            "filters": [],
+            "candidate_tables": ["orders"],
+            "required_aggregations": [],
+            "reasoning": "테스트",
+            "selected_join_tables": ["legacy_orders"],
             "validation_contract": {"expected_result_shape": "contradictory_shape"},
             **legacy_fields,
         }
 
         normalized = _normalize_question_plan({"user_question": "질문"}, parsed)
 
-        assert (
-            normalized["task_type"],
-            normalized["requested_output"],
-            normalized["expected_result_shape"],
-        ) == expected
-        assert normalized["validation_contract"]["expected_result_shape"] == expected[2]
+        assert normalized["route_kind"] == route_kind
+        assert normalized["candidate_tables"] == ["orders"]
+        assert set(normalized) == {
+            "route_kind", "question_type", "target_metrics", "analysis_entities",
+            "dimensions", "filters", "candidate_tables", "required_aggregations", "reasoning",
+        }
 
     @pytest.mark.parametrize("route_kind", [None, "", "mart", "eda", "trend"])
     def test_question_plan_rejects_missing_or_unsupported_route_kind(self, monkeypatch, route_kind):
@@ -452,7 +516,7 @@ class TestStagedSchemaContext:
         monkeypatch.setattr(integrity_loader, "SCHEMA_JSON_PATH", path)
         return path
 
-    def test_schema_catalog_omits_samples_and_limits_columns(self, schema_path):
+    def test_schema_catalog_only_contains_names_and_descriptions(self, schema_path):
         from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_schema_catalog_text
 
         catalog = json.loads(load_schema_catalog_text())
@@ -460,11 +524,7 @@ class TestStagedSchemaContext:
         assert set(catalog) == {"orders", "customers"}
         assert "sample_data" not in json.dumps(catalog, ensure_ascii=False)
         assert catalog["orders"]["description"] == "첫 번째 설명입니다."
-        assert [column["name"] for column in catalog["orders"]["columns"]] == [
-            "customer_id", "order_id", "created_at", "status", "amount"
-        ]
-        assert catalog["orders"]["primary_key"] == ["order_id"]
-        assert catalog["orders"]["foreign_keys"] == [{"column": "customer_id", "references": "customers.customer_id"}]
+        assert set(catalog["orders"]) == {"description"}
 
     def test_scoped_schema_keeps_selected_full_columns_without_samples(self, schema_path):
         from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_schema_text
@@ -495,13 +555,13 @@ class TestStagedSchemaContext:
         with pytest.raises(FileNotFoundError):
             integrity_loader.load_scoped_schema_text(["orders"])
 
-    def test_refresh_schema_context_replaces_catalog_for_first_nonempty_plan_list(self, monkeypatch):
+    def test_refresh_schema_context_uses_candidate_tables(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
 
         monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: '{"orders":{"columns":[{"name":"order_id"}]}}')
         result = context_module.refresh_schema_context({
             "schema_text": '{"catalog":true}',
-            "plan": {"selected_join_tables": ["`analytics.orders`", "orders"], "relevant_tables": ["customers"]},
+            "question_plan": {"candidate_tables": ["`analytics.orders`", "orders"]},
         })
 
         assert result["schema_text"] == '{"orders":{"columns":[{"name":"order_id"}]}}'
@@ -512,19 +572,19 @@ class TestStagedSchemaContext:
             "reason": "",
         }
 
-    def test_refresh_schema_context_keeps_catalog_when_selection_is_invalid(self, monkeypatch):
+    def test_refresh_schema_context_fails_when_all_candidates_are_invalid(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
 
         monkeypatch.setattr(context_module, "load_scoped_schema_text", lambda tables: "")
         result = context_module.refresh_schema_context({
             "schema_text": '{"catalog":true}',
-            "plan": {"selected_join_tables": ["missing"], "relevant_tables": ["orders"]},
+            "question_plan": {"candidate_tables": ["missing"]},
         })
 
-        assert result["schema_text"] == '{"catalog":true}'
-        assert result["schema_refresh"]["status"] == "skipped"
+        assert result["schema_refresh"]["status"] == "failed"
         assert result["schema_refresh"]["candidate_tables"] == ["missing"]
         assert result["schema_refresh"]["reason"] == "no_valid_tables"
+        assert result["retry_hint"]["reason_code"] == "sql_plan_failed"
 
     def test_plan_prompt_receives_catalog_without_sample_or_sixth_column(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -567,6 +627,10 @@ class TestStagedSchemaContext:
 
 
 class TestSQLLangGraphSmoke:
+    @pytest.fixture(autouse=True)
+    def _adapt_legacy_llm_fixtures(self, monkeypatch):
+        install_two_stage_llm_adapter(monkeypatch)
+
     def test_integrity_summary_compacts_legacy_and_ge_payloads(self, monkeypatch, tmp_path):
         from DATA_Analyst_Assistant_Agent.agents.sql.validator import integrity_loader
 
@@ -737,7 +801,7 @@ class TestSQLLangGraphSmoke:
         assert "AVG(DATEDIFF(order_delivered_customer_date, order_approved_at))" in result["sql_draft"]["sql"]
         assert "WHERE order_approved_at IS NOT NULL" in result["sql_draft"]["sql"]
         assert result["validation"]["result"] == "valid"
-        assert result["plan"]["expected_result_shape"] == "table_preview"
+        assert result["plan"]["validation_contract"]["expected_result_shape"] == "table_preview"
 
     def test_build_app_rejects_non_aggregate_sql_for_average_question(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -1131,8 +1195,7 @@ class TestSQLLangGraphSmoke:
 
         assert result["retry_count"] == 1
         assert result["plan"]["route_kind"] == "comprehensive"
-        assert result["plan"]["task_type"] == "data_mart_build"
-        assert result["plan"]["expected_result_shape"] == "datamart_creation"
+        assert result["plan"]["validation_contract"]["expected_result_shape"] == "datamart_creation"
         assert result["validation"]["result"] == "valid"
         assert committed == ["CREATE TABLE analytics.orders_analysis_mart AS SELECT * FROM orders;"]
         assert sum("MySQL 기반 SQL/데이터마트 planner" in prompt for prompt in prompts_seen) == 2
@@ -1579,6 +1642,10 @@ class _PassThroughValidationAgent:
 
 
 class TestSQLAgentIntegration:
+    @pytest.fixture(autouse=True)
+    def _adapt_legacy_llm_fixtures(self, monkeypatch):
+        install_two_stage_llm_adapter(monkeypatch)
+
     def test_main_sql_envelope_preserves_retry_required_findings_on_success(self, adapter):
         from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 
@@ -1588,7 +1655,16 @@ class TestSQLAgentIntegration:
             user_query="주문과 고객을 조인해줘",
         )
         result = {
-            "plan": {},
+            "plan": {"route_kind": "simple"},
+            "planning_stages": {
+                "question_plan": {"candidate_tables": ["orders"]},
+                "final_table_plan": {
+                    "selected_join_tables": ["orders"],
+                    "required_columns": ["orders.order_id"],
+                    "business_keys": {},
+                    "reasoning": "주문 조회",
+                },
+            },
             "mart_design": {},
             "sql_draft": {
                 "sql": "SELECT 1 AS value",
@@ -1633,6 +1709,10 @@ class TestSQLAgentIntegration:
         ]
         assert len(artifact_payloads) == 2
         assert all("columns_used" not in payload["sql_draft"] for payload in artifact_payloads)
+        assert all(
+            set(payload["planning_stages"]) == {"question_plan", "final_table_plan"}
+            for payload in artifact_payloads
+        )
 
     @pytest.mark.skip(reason="제거된 레거시 parse_plan API 테스트입니다.")
     def test_supervisor_parse_plan_transfers_retry_context(self, adapter):
