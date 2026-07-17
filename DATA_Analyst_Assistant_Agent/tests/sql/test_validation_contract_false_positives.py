@@ -190,6 +190,32 @@ def test_count_distinct_contract_accepts_mysql_count_distinct_syntax() -> None:
     assert not any(f["category"] == "intent_mismatch" for f in findings)
 
 
+def test_required_aggregation_expressions_are_matched_by_function_semantics() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": [
+            "COUNT(DISTINCT order_id)",
+            "SUM(payment_value)",
+            "MAX(order_purchase_timestamp)",
+        ],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm AS "
+            "SELECT customer_unique_id, "
+            "COUNT(DISTINCT order_id) AS frequency_orders, "
+            "SUM(payment_value) AS monetary_value, "
+            "MAX(order_purchase_timestamp) AS last_purchase_at "
+            "FROM orders GROUP BY customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
 def test_count_distinct_contract_still_flags_plain_count_only() -> None:
     plan = {
         "route_kind": "comprehensive",

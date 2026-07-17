@@ -39,15 +39,35 @@ def bare_identifier(value: Any) -> str:
 
 
 def canonical_aggregation(value: Any) -> str:
+    raw = str(value or "").strip()
+    parsed = _canonical_aggregation_expression(raw)
+    if parsed:
+        return parsed
     token = "".join(
         ch if ch.isalnum() else "_"
-        for ch in str(value or "").strip().upper()
+        for ch in raw.upper()
     ).strip("_")
     while "__" in token:
         token = token.replace("__", "_")
     if not token:
         return ""
     return AGGREGATION_ALIASES.get(token, token)
+
+
+def _canonical_aggregation_expression(value: str) -> str:
+    if not value or "(" not in value:
+        return ""
+    try:
+        expression = sqlglot.parse_one(f"SELECT {value}", read="mysql")
+    except Exception:
+        return ""
+    features = _aggregation_features(expression)
+    if "COUNT_DISTINCT" in features:
+        return "COUNT_DISTINCT"
+    for name in ("SUM", "AVG", "MIN", "MAX", "COUNT", "NTILE", "DEDUPLICATE"):
+        if name in features:
+            return name
+    return ""
 
 
 def extract_sql_features(sql: str, *, dialect: str = "mysql") -> SQLFeatures:
