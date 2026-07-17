@@ -53,7 +53,6 @@ class FakeSubAgentAdapter:
     def __init__(self, results: dict[str, AgentToolResult] | None = None) -> None:
         self.results = results or {}
         self.calls: list[str] = []
-        self.report_calls = 0
 
     def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
         self.calls.append(agent_name)
@@ -77,25 +76,6 @@ class FakeSubAgentAdapter:
             state_updates={
                 "generated_sql": "SELECT 1 AS sample_value" if agent_name == "sql_agent" else "",
             },
-        )
-
-    def generate(self, state: dict[str, Any]) -> AgentCompactResult:
-        self.report_calls += 1
-        if "report_agent" in self.results:
-            return self.results["report_agent"].agent_result
-        return AgentCompactResult(
-            agent="report_agent",
-            status="success",
-            summary="report_agent 완료",
-            artifact_ids=["artifact_report_agent"],
-            artifacts=[
-                ArtifactSummary(
-                    artifact_id="artifact_report_agent",
-                    type="report",
-                    kind="final_report",
-                    summary="report_agent 산출물 요약",
-                )
-            ],
         )
 
     def generate_insight(self, state: dict[str, Any]) -> AgentCompactResult:
@@ -126,6 +106,23 @@ class SequencedSubAgentAdapter:
     def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
         self.calls.append(agent_name)
         return self.results[agent_name].pop(0)
+
+    def generate_insight(self, state: dict[str, Any]) -> AgentCompactResult:
+        self.insight_calls = getattr(self, "insight_calls", 0) + 1
+        return AgentCompactResult(
+            agent="insight_agent",
+            status="success",
+            summary="insight_agent 완료",
+            artifact_ids=["artifact_insight_agent"],
+            artifacts=[
+                ArtifactSummary(
+                    artifact_id="artifact_insight_agent",
+                    type="file",
+                    kind="insight_payload",
+                    summary="insight_agent 산출물 요약",
+                )
+            ],
+        )
 
 
 class ContractViolatingSubAgentAdapter:
@@ -263,10 +260,6 @@ def _agent_flow_decisions(
         summary_next_actions,
         strict=True,
     ):
-        if action == "call_report_agent":
-            decisions.append(_next_action_decision(action))
-            decisions.append(_semantic_decision())
-            continue
         decisions.extend(
             [
                 _next_action_decision(action),
@@ -283,7 +276,6 @@ def _agent_flow_decisions(
         ("call_sql_agent", "execute_subagent"),
         ("call_eda_agent", "execute_subagent"),
         ("call_analysis_agent", "execute_subagent"),
-        ("call_report_agent", "generate_report"),
         ("finalize", "completion_guard"),
         ("fail", "completion_guard"),
     ],
@@ -374,20 +366,8 @@ def test_route_after_summarize_prioritizes_terminal_state() -> None:
 
 
 def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
-    actions = ["call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"]
-    decisions = _agent_flow_decisions(
-        actions,
-        summary_next_actions=[
-            "decide_next_action",
-            "decide_next_action",
-            "decide_next_action",
-            "finalize",
-        ],
-        final_answer="리포트가 완료되었습니다.",
-    )
-    # report_agent가 명시적으로 호출된 뒤에도 completion_guard가 insight_agent를
-    # 결정론적으로 강제하므로, insight의 validate_candidate 몫 semantic decision을 추가한다.
-    decisions.insert(-1, _semantic_decision())
+    actions = ["call_sql_agent", "call_eda_agent", "call_analysis_agent", "finalize"]
+    decisions = _agent_flow_decisions(actions, final_answer="분석이 완료되었습니다.")
     model = SequencedDecisionModel(decisions)
     graph = build_graph(subagent_adapter=FakeSubAgentAdapter(), model=model)
 
@@ -395,9 +375,9 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
 
     assert result["terminal_state"] == "completed"
     assert result["completed_agents"] == [
-        "sql_agent", "eda_agent", "analysis_agent", "report_agent", "insight_agent",
+        "sql_agent", "eda_agent", "analysis_agent", "insight_agent",
     ]
-    assert result["final_answer"] == "리포트가 완료되었습니다."
+    assert result["final_answer"] == "분석이 완료되었습니다."
     assert [entry["node"] for entry in result["llm_decisions"]] == [
         "clarify_query",
         "create_analysis_plan",
@@ -409,13 +389,12 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
         "validate_candidate",
         "decide_next_action",
         "validate_candidate",
-        "validate_candidate",
         "finalize",
     ]
     assert len(model.messages) == len(result["llm_decisions"])
 
 
-def test_semantic_recovery_routes_analysis_candidate_to_sql_then_report() -> None:
+def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> None:
     adapter = FakeSubAgentAdapter()
     model = SequencedDecisionModel(
         [
@@ -427,34 +406,32 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_report() -> Non
                 severity="error",
                 recommended_next_action="call_sql_agent",
             ),
-            _semantic_decision(recommended_next_action="call_report_agent"),
+            _semantic_decision(recommended_next_action="finalize"),
+            # completion_guard가 insight_agent를 결정론적으로 강제하므로, insight의
+            # validate_candidate 몫 semantic decision.
             _semantic_decision(),
-            # report_agent가 semantic 추천으로 먼저 호출된 뒤에도 completion_guard가
-            # insight_agent를 결정론적으로 강제하므로, insight의 validate_candidate 몫.
-            _semantic_decision(),
-            _final_decision("completed", "복구된 근거로 리포트를 완료했습니다."),
+            _final_decision("completed", "복구된 근거로 인사이트를 완료했습니다."),
         ]
     )
     graph = build_graph(
         subagent_adapter=adapter,
-        report_generator=adapter,
         model=model,
     )
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_semantic_recovery"}})
 
     assert adapter.calls == ["analysis_agent", "sql_agent"]
-    assert adapter.report_calls == 1
+    assert adapter.insight_calls == 1
     assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "report_agent", "insight_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
     assert result["failed_agents"] == []
-    assert result["accepted_evidence"].keys() == {"sql_agent", "report_agent", "insight_agent"}
+    assert result["accepted_evidence"].keys() == {"sql_agent", "insight_agent"}
     assert len(result["rejected_results"]) == 1
     assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
     assert result["terminal_state"] == "completed"
 
 
-def test_semantic_recovery_without_recommendation_generates_limited_report_from_accepted_evidence() -> None:
+def test_semantic_recovery_without_recommendation_generates_limited_insight_from_accepted_evidence() -> None:
     adapter = FakeSubAgentAdapter()
     model = SequencedDecisionModel(
         [
@@ -464,28 +441,27 @@ def test_semantic_recovery_without_recommendation_generates_limited_report_from_
             _semantic_decision(),
             _next_action_decision("call_analysis_agent"),
             _semantic_decision(semantic_valid=False, severity="error"),
+            # analysis 실패 → 복구 권고가 없고 근거는 있어 제한적 인사이트 폴백이
+            # insight_agent를 직접 스케줄한다(completion_guard가 아니라 semantic recovery).
             _semantic_decision(),
-            # insight_agent가 completion_guard에서 결정론적으로 강제되는 몫.
-            _semantic_decision(),
-            _final_decision("completed", "제한적 리포트를 완료했습니다."),
+            _final_decision("completed", "제한적 인사이트를 완료했습니다."),
         ]
     )
     graph = build_graph(
         subagent_adapter=adapter,
-        report_generator=adapter,
         model=model,
     )
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_limited_report"}})
 
     assert adapter.calls == ["sql_agent", "analysis_agent"]
-    assert adapter.report_calls == 1
-    assert result["semantic_recovery_attempts"] == {"report_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "report_agent", "insight_agent"]
+    assert adapter.insight_calls == 1
+    assert result["semantic_recovery_attempts"] == {"insight_agent": 1}
+    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
     assert "analysis_agent" not in result["accepted_evidence"]
-    assert any("제한적 Report" in item for item in result["limitations"])
+    assert any("제한적 인사이트" in item for item in result["limitations"])
     assert any(
-        event["type"] == "semantic_recovery.limited_report"
+        event["type"] == "semantic_recovery.limited_insight"
         for event in result["run_events"]
     )
     assert result["terminal_state"] == "completed"
@@ -495,19 +471,14 @@ def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation()
     backend = ForbiddenArtifactBackend()
     adapter = FakeSubAgentAdapter()
     adapter.backend_adapter = backend
-    decisions = _agent_flow_decisions(
-        ["call_analysis_agent", "call_report_agent"],
-        summary_next_actions=["decide_next_action", "finalize"],
-    )
-    # insight_agent가 completion_guard에서 결정론적으로 강제되는 몫.
-    decisions.insert(-1, _semantic_decision())
+    decisions = _agent_flow_decisions(["call_analysis_agent", "finalize"])
     model = SequencedDecisionModel(decisions)
     graph = build_graph(subagent_adapter=adapter, model=model)
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_no_artifact_read"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["analysis_agent", "report_agent", "insight_agent"]
+    assert result["completed_agents"] == ["analysis_agent", "insight_agent"]
     assert any(event["event_type"] == "evidence.promoted" for event in backend.events)
 
 
@@ -523,7 +494,6 @@ def test_supervisor_graph_has_expected_nodes() -> None:
         "create_analysis_plan",
         "decide_next_action",
         "execute_subagent",
-        "generate_report",
         "generate_insight",
         "validate_candidate",
         "commit_candidate",
@@ -532,7 +502,7 @@ def test_supervisor_graph_has_expected_nodes() -> None:
     }
 
 
-def test_finalize_request_after_sql_forces_report_generation_before_completion() -> None:
+def test_finalize_request_after_sql_forces_insight_generation_before_completion() -> None:
     adapter = FakeSubAgentAdapter()
     model = SequencedDecisionModel(
         [
@@ -541,10 +511,9 @@ def test_finalize_request_after_sql_forces_report_generation_before_completion()
             _next_action_decision("call_sql_agent"),
             _semantic_decision(),
             _next_action_decision("finalize"),
+            # completion_guard가 insight_agent를 결정론적으로 강제한다.
             _semantic_decision(),
-            # completion_guard가 insight_agent를 report_agent보다 먼저 결정론적으로 강제한다.
-            _semantic_decision(),
-            _final_decision("completed", "최종 리포트가 완료되었습니다."),
+            _final_decision("completed", "최종 인사이트가 완료되었습니다."),
         ]
     )
     graph = build_graph(subagent_adapter=adapter, model=model)
@@ -552,9 +521,9 @@ def test_finalize_request_after_sql_forces_report_generation_before_completion()
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_force_report"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["sql_agent", "insight_agent", "report_agent"]
-    assert result["accepted_evidence"]["report_agent"][0]["artifact_id"] == "artifact_report_agent"
-    assert adapter.report_calls == 1
+    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
+    assert result["accepted_evidence"]["insight_agent"][0]["artifact_id"] == "artifact_insight_agent"
+    assert adapter.insight_calls == 1
 
 
 def test_finalize_request_without_evidence_fails_without_calling_agents() -> None:
@@ -576,10 +545,10 @@ def test_finalize_request_without_evidence_fails_without_calling_agents() -> Non
     assert result["terminal_state"] == "failed_terminal"
     assert "근거" in result["final_answer"]
     assert adapter.calls == []
-    assert adapter.report_calls == 0
+    assert getattr(adapter, "insight_calls", 0) == 0
 
 
-def test_finalize_request_with_promoted_report_does_not_generate_duplicate() -> None:
+def test_finalize_request_with_promoted_insight_does_not_generate_duplicate() -> None:
     adapter = FakeSubAgentAdapter()
     state = merge_agent_result(
         _state(),
@@ -593,10 +562,10 @@ def test_finalize_request_with_promoted_report_does_not_generate_duplicate() -> 
     state = merge_agent_result(
         state,
         AgentCompactResult(
-            agent="report_agent",
+            agent="insight_agent",
             status="success",
-            summary="리포트 완료",
-            artifact_ids=["artifact_report"],
+            summary="인사이트 완료",
+            artifact_ids=["artifact_insight"],
         ),
     )
     graph = build_graph(
@@ -606,18 +575,16 @@ def test_finalize_request_with_promoted_report_does_not_generate_duplicate() -> 
                 _clarify_decision(),
                 _plan_decision(),
                 _next_action_decision("finalize"),
-                # insight_agent가 아직 없어 completion_guard가 결정론적으로 강제한다.
-                _semantic_decision(),
+                # insight_agent가 이미 완료돼있어 completion_guard가 바로 ready를 반환한다.
                 _final_decision(),
             ]
         ),
     )
 
-    result = graph.invoke(state, {"configurable": {"thread_id": "thread_existing_report"}})
+    result = graph.invoke(state, {"configurable": {"thread_id": "thread_existing_insight"}})
 
     assert result["terminal_state"] == "completed"
-    assert adapter.report_calls == 0
-    assert result["completed_agents"].count("report_agent") == 1
+    assert getattr(adapter, "insight_calls", 0) == 0
     assert result["completed_agents"].count("insight_agent") == 1
 
 
@@ -650,35 +617,6 @@ def test_finalize_node_rejects_completed_checkpoint_without_insight() -> None:
 
     assert result["terminal_state"] == "failed_terminal"
     assert "인사이트" in result["final_answer"]
-
-
-def test_finalize_node_rejects_completed_checkpoint_without_report() -> None:
-    state = merge_agent_result(
-        _state(),
-        AgentCompactResult(
-            agent="analysis_agent",
-            status="success",
-            summary="분석 완료",
-            artifact_ids=["artifact_analysis"],
-        ),
-    )
-    state = merge_agent_result(
-        state,
-        AgentCompactResult(
-            agent="insight_agent",
-            status="success",
-            summary="인사이트 완료",
-            artifact_ids=["artifact_insight"],
-        ),
-    )
-    node = make_finalize_node(
-        SequencedDecisionModel([_final_decision("completed", "LLM은 완료로 판단했습니다.")])
-    )
-
-    result = node(state)
-
-    assert result["terminal_state"] == "failed_terminal"
-    assert "리포트" in result["final_answer"]
 
 
 @pytest.mark.parametrize(
@@ -735,12 +673,7 @@ def test_decide_next_action_rejects_initial_only_llm_response_as_decision_error(
 
 
 def test_build_graph_accepts_positional_subagent_adapter() -> None:
-    decisions = _agent_flow_decisions(
-        ["call_sql_agent", "call_report_agent"],
-        summary_next_actions=["decide_next_action", "finalize"],
-    )
-    # insight_agent가 completion_guard에서 결정론적으로 강제되는 몫.
-    decisions.insert(-1, _semantic_decision())
+    decisions = _agent_flow_decisions(["call_sql_agent", "finalize"])
     graph = build_graph(
         FakeSubAgentAdapter(),
         model=SequencedDecisionModel(decisions),
@@ -749,7 +682,7 @@ def test_build_graph_accepts_positional_subagent_adapter() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["sql_agent", "report_agent", "insight_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
 
 
 def test_clarification_interrupt_returns_payload_and_skips_subagents() -> None:
@@ -822,7 +755,7 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
     assert adapter.calls == []
 
 
-def test_finalize_llm_can_fail_without_report_evidence() -> None:
+def test_finalize_llm_can_fail_without_insight_evidence() -> None:
     graph = build_graph(
         FakeSubAgentAdapter(),
         model=SequencedDecisionModel(
@@ -832,10 +765,9 @@ def test_finalize_llm_can_fail_without_report_evidence() -> None:
                 _next_action_decision("call_sql_agent"),
                 _semantic_decision(),
                 _next_action_decision("finalize"),
-                # completion_guard가 insight_agent, 이어서 report_agent를 결정론적으로 강제한다.
+                # completion_guard가 insight_agent를 결정론적으로 강제한다.
                 _semantic_decision(),
-                _semantic_decision(),
-                _final_decision("failed_terminal", "리포트 근거가 부족합니다."),
+                _final_decision("failed_terminal", "인사이트 근거가 부족합니다."),
             ]
         ),
     )
@@ -843,7 +775,7 @@ def test_finalize_llm_can_fail_without_report_evidence() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "failed_terminal"
-    assert result["final_answer"] == "리포트 근거가 부족합니다."
+    assert result["final_answer"] == "인사이트 근거가 부족합니다."
 
 
 def test_plan_node_records_llm_planner_mode() -> None:
@@ -864,8 +796,7 @@ def test_execute_subagent_runs_only_the_registered_action() -> None:
         _next_action_decision("call_eda_agent"),
         _semantic_decision(),
         _next_action_decision("finalize"),
-        # completion_guard가 insight_agent, 이어서 report_agent를 결정론적으로 강제한다.
-        _semantic_decision(),
+        # completion_guard가 insight_agent를 결정론적으로 강제한다.
         _semantic_decision(),
         _final_decision(),
     ]
@@ -874,7 +805,7 @@ def test_execute_subagent_runs_only_the_registered_action() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert adapter.calls == ["eda_agent"]
-    assert result["completed_agents"] == ["eda_agent", "insight_agent", "report_agent"]
+    assert result["completed_agents"] == ["eda_agent", "insight_agent"]
     assert result["terminal_state"] == "completed"
 
 
@@ -967,8 +898,7 @@ def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> 
                 _next_action_decision("call_eda_agent"),
                 _semantic_decision(),
                 _next_action_decision("finalize"),
-                # completion_guard가 insight_agent, 이어서 report_agent를 결정론적으로 강제한다.
-                _semantic_decision(),
+                # completion_guard가 insight_agent를 결정론적으로 강제한다.
                 _semantic_decision(),
                 _final_decision(),
             ]
@@ -983,7 +913,7 @@ def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> 
     assert result["analysis_plan"]["planner_mode"] == "llm"
     assert result["error_state"] == {"warning": "테스트 경고"}
     assert result["terminal_state"] == "completed"
-    assert "report_agent" in result["completed_agents"]
+    assert "insight_agent" in result["completed_agents"]
 
 
 def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
@@ -1201,22 +1131,20 @@ def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_
         _next_action_decision("call_sql_agent"),
         _semantic_decision(),
         _next_action_decision("finalize"),
-        # completion_guard가 insight_agent, 이어서 report_agent를 결정론적으로 강제한다.
-        _semantic_decision(),
+        # completion_guard가 insight_agent를 결정론적으로 강제한다.
         _semantic_decision(),
         _final_decision(),
     ]
     graph = build_graph(
         subagent_adapter=adapter,
         model=SequencedDecisionModel(decisions),
-        report_generator=FakeSubAgentAdapter(),
     )
 
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert adapter.calls == ["sql_agent", "sql_agent"]
     assert result["retry_counts"]["sql_agent"] == 1
-    assert result["completed_agents"] == ["sql_agent", "insight_agent", "report_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
     assert result["failed_agents"] == []
     assert result["failure_streaks"] == {}
     assert result["terminal_state"] == "completed"
@@ -1353,51 +1281,6 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
     assert result["pending_result"]["state_updates"]["analysis_plan"]["route_kind"] == "updated"
 
 
-def test_report_success_without_artifact_fails_terminally_without_validation_llm() -> None:
-    adapter = FakeSubAgentAdapter(
-        {
-            "report_agent": AgentToolResult(
-                agent_result=AgentCompactResult(
-                    agent="report_agent",
-                    status="success",
-                    summary="리포트 생성 완료",
-                )
-            )
-        }
-    )
-    model = SequencedDecisionModel(
-        [
-            _clarify_decision(),
-            _plan_decision(),
-            _next_action_decision("call_report_agent"),
-            _final_decision("failed_terminal", "리포트 산출물이 없습니다."),
-        ]
-    )
-    graph = build_graph(subagent_adapter=adapter, model=model)
-    state = merge_agent_result(
-        _state(),
-        AgentCompactResult(
-            agent="sql_agent",
-            status="success",
-            summary="SQL 완료",
-            artifact_ids=["artifact_sql"],
-        ),
-    )
-
-    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
-
-    assert result["terminal_state"] == "failed_terminal"
-    assert "리포트 산출물 ID" in result["final_answer"]
-    assert "report_agent" not in result["completed_agents"]
-    assert [entry["node"] for entry in result["llm_decisions"]] == [
-        "clarify_query",
-        "create_analysis_plan",
-        "decide_next_action",
-        "finalize",
-    ]
-    assert len(model.messages) == len(result["llm_decisions"])
-
-
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
     state = stage_candidate_result(
         _state(),
@@ -1435,45 +1318,6 @@ def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
 
     assert result["next_action"] == "call_eda_agent"
     assert result["completed_agents"] == ["sql_agent"]
-
-
-def test_finalize_preserves_validation_terminal_state_when_llm_returns_completed() -> None:
-    adapter = FakeSubAgentAdapter(
-        {
-            "report_agent": AgentToolResult(
-                agent_result=AgentCompactResult(
-                    agent="report_agent",
-                    status="success",
-                    summary="리포트 생성 완료",
-                )
-            )
-        }
-    )
-    graph = build_graph(
-        subagent_adapter=adapter,
-        model=SequencedDecisionModel(
-            [
-                _clarify_decision(),
-                _plan_decision(),
-                _next_action_decision("call_report_agent"),
-                _final_decision("completed", "LLM은 완료로 판단했습니다."),
-            ]
-        ),
-    )
-    state = merge_agent_result(
-        _state(),
-        AgentCompactResult(
-            agent="sql_agent",
-            status="success",
-            summary="SQL 완료",
-            artifact_ids=["artifact_sql"],
-        ),
-    )
-
-    result = graph.invoke(state, {"configurable": {"thread_id": "thread_sales_001"}})
-
-    assert result["terminal_state"] == "failed_terminal"
-    assert "리포트 산출물 ID" in result["final_answer"]
 
 
 def test_clarify_llm_decision_interrupts_with_question() -> None:

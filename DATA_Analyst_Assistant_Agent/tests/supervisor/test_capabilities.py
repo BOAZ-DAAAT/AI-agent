@@ -13,7 +13,6 @@ def test_default_capabilities_include_all_supervisor_agents() -> None:
         "sql_agent",
         "eda_agent",
         "analysis_agent",
-        "report_agent",
         "insight_agent",
     }
 
@@ -25,7 +24,7 @@ def test_default_capability_actions_match_action_to_agent_mapping() -> None:
         assert capability.action == actions_by_agent[capability.agent]
 
 
-def test_subagent_action_mapping_excludes_report_agent() -> None:
+def test_subagent_action_mapping_excludes_insight_agent() -> None:
     assert SUBAGENT_ACTION_TO_AGENT == {
         "call_sql_agent": "sql_agent",
         "call_eda_agent": "eda_agent",
@@ -46,7 +45,7 @@ def test_default_capabilities_capture_or_artifact_preconditions() -> None:
         "sql_agent",
         "eda_agent",
     ]
-    assert capabilities_by_agent["report_agent"].requires_any_artifacts_from == [
+    assert capabilities_by_agent["insight_agent"].requires_any_artifacts_from == [
         "sql_agent",
         "eda_agent",
         "analysis_agent",
@@ -66,11 +65,11 @@ def test_default_capabilities_declare_required_output_evidence_contracts() -> No
     assert [(item.type, item.kind) for item in capabilities["analysis_agent"].output_evidence] == [
         ("file", "analysis_result")
     ]
-    assert [(item.type, item.kind) for item in capabilities["report_agent"].output_evidence] == [
-        ("report", "final_report")
+    assert [(item.type, item.kind) for item in capabilities["insight_agent"].output_evidence] == [
+        ("file", "insight_payload")
     ]
     assert capabilities["analysis_agent"].input_evidence_mode == "any"
-    assert capabilities["report_agent"].input_evidence_mode == "any"
+    assert capabilities["insight_agent"].input_evidence_mode == "any"
 
 
 def test_default_capabilities_describe_sql_as_data_preparation_only() -> None:

@@ -9,7 +9,6 @@ __all__ = [
     "BackendAdapter",
     "EDAAgent",
     "OrchestrationState",
-    "ReportGenerator",
     "SQLAgent",
     "SQLAgentSupervisor",
     "SupervisorAgent",
@@ -26,7 +25,6 @@ _EXPORT_MAP = {
     "BackendAdapter": ("DATA_Analyst_Assistant_Agent.shared.backend_adapter", "BackendAdapter"),
     "EDAAgent": ("DATA_Analyst_Assistant_Agent.agents", "EDAAgent"),
     "OrchestrationState": ("DATA_Analyst_Assistant_Agent.shared.contracts", "OrchestrationState"),
-    "ReportGenerator": ("DATA_Analyst_Assistant_Agent.supervisor.report", "ReportGenerator"),
     "SQLAgent": ("DATA_Analyst_Assistant_Agent.agents", "SQLAgent"),
     "SQLAgentSupervisor": ("DATA_Analyst_Assistant_Agent.supervisor", "SQLAgentSupervisor"),
     "SupervisorAgent": ("DATA_Analyst_Assistant_Agent.supervisor", "SupervisorAgent"),
@@ -36,7 +34,7 @@ _EXPORT_MAP = {
     "build_graph": ("DATA_Analyst_Assistant_Agent.supervisor.graph", "build_graph"),
 }
 
-for _deleted_export in ("CentralValidationAgent", "VisualizationAgent"):
+for _deleted_export in ("CentralValidationAgent", "VisualizationAgent", "ReportGenerator"):
     globals().pop(_deleted_export, None)
 
 

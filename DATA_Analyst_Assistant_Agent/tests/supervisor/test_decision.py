@@ -52,7 +52,7 @@ class FakeModel:
 class FencedJsonModel:
     def invoke(self, messages):
         return FakeMessage(
-            '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+            '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
         )
 
 
@@ -89,10 +89,10 @@ def test_parse_decision_json_extracts_next_action() -> None:
 
 def test_parse_decision_json_extracts_fenced_json() -> None:
     decision = parse_decision_json(
-        '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+        '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
     )
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
     assert decision.reason == "분석 완료"
 
 
@@ -224,7 +224,7 @@ def test_decide_next_action_uses_model_fenced_json_when_available() -> None:
 
     decision = decide_next_action(state, model=FencedJsonModel())
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
 
 
 def test_decide_next_action_requires_model() -> None:
@@ -415,7 +415,6 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "call_sql_agent",
         "call_eda_agent",
         "call_analysis_agent",
-        "call_report_agent",
         "finalize",
         "fail",
     ]
@@ -424,7 +423,6 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "sql_agent",
         "eda_agent",
         "analysis_agent",
-        "report_agent",
         "insight_agent",
     }
 

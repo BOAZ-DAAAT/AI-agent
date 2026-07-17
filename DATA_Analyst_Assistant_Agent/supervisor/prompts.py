@@ -88,7 +88,6 @@ Analysis Agent는 SQL/EDA 근거를 바탕으로 필요한 분석을 설계·수
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -109,7 +108,6 @@ allowed=false인 경우 next_action은 필요한 대체 action, finalize, fail �
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -136,7 +134,6 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -184,7 +181,6 @@ recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확�
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 - 빈 문자열
@@ -212,7 +208,6 @@ STEP_SUMMARY_DECISION_PROMPT = """
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 - 빈 문자열
@@ -220,7 +215,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 반드시 JSON 객체만 반환하세요.
 허용 필드:
 - step: string
-- agent: "sql_agent", "eda_agent", "analysis_agent", "report_agent" 또는 null
+- agent: "sql_agent", "eda_agent", "analysis_agent" 또는 null
 - action: string
 - summary: string
 - artifact_ids: string 배열

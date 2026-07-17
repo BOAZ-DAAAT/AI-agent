@@ -22,7 +22,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
     AnalysisReviewResumePayload,
     validate_analysis_review_resume,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
@@ -343,8 +342,7 @@ class SupervisorAgent:
             ) or "finalize",
             "run_events": events,
         }
-        agent_name = str((pending_result.get("result") or {}).get("agent") or "")
-        anchor = "generate_report" if agent_name == "report_agent" else "execute_subagent"
+        anchor = "execute_subagent"
         updates["current_step"] = anchor
         returned_config = graph.update_state(config, updates, as_node=anchor)
         return graph.invoke(None, returned_config or config)
@@ -355,7 +353,6 @@ class SupervisorAgent:
             "sql_agent": "call_sql_agent",
             "eda_agent": "call_eda_agent",
             "analysis_agent": "call_analysis_agent",
-            "report_agent": "call_report_agent",
         }.get(str(agent_name))
 
     def _update_run_status_from_resume_result(self, result: Any) -> Any:
@@ -389,7 +386,6 @@ class SupervisorAgent:
     def _build_runtime_graph(self, checkpointer: Any):
         return build_graph(
             SubAgentAdapter(backend_adapter=self.adapter),
-            report_generator=SupervisorReportGenerator(self.adapter),
             model=self._decision_model(),
             checkpointer=checkpointer,
         )

@@ -557,23 +557,55 @@ def _list_html(items: list[Any], fallback: str) -> str:
     return "<ul>" + "".join(f"<li>{html.escape(str(item))}</li>" for item in items) + "</ul>"
 
 
-def _metric_cards(cards: list[tuple[str, str]]) -> str:
-    return "".join(
-        f'<div class="metric-card"><div class="metric-value">{html.escape(value)}</div><div class="metric-label">{html.escape(label)}</div></div>'
-        for label, value in cards
-    )
+def _artifact_index(artifacts: dict[str, list[dict[str, Any]]]) -> dict[str, tuple[str, dict[str, Any]]]:
+    """artifact_id → (agent_name, item). eda/insight의 key_charts/charts가 참조하는
+    차트 아티팩트id로 실제 파일을 찾기 위한 용도(어느 agent 버킷에 있는지 몰라도 찾게)."""
+    index: dict[str, tuple[str, dict[str, Any]]] = {}
+    for agent_name, items in artifacts.items():
+        for item in items:
+            artifact_id = str(item.get("artifact_id") or "")
+            if artifact_id:
+                index[artifact_id] = (agent_name, item)
+    return index
+
+
+def _chart_gallery_html(
+    chart_refs: list[Any],
+    artifact_index: dict[str, tuple[str, dict[str, Any]]],
+    *,
+    caption_key: str,
+) -> str:
+    figures = []
+    for ref in chart_refs or []:
+        if not isinstance(ref, dict):
+            continue
+        artifact_id = str(ref.get("artifact_id") or "")
+        agent_name, item = artifact_index.get(artifact_id, (None, None))
+        if not item or not item.get("local_path"):
+            continue
+        image_path = f"artifacts/{agent_name}/{artifact_id}_{Path(item['local_path']).name}"
+        caption = html.escape(str(ref.get(caption_key) or ""))
+        figures.append(
+            f'<figure><img src="{html.escape(image_path)}" alt="{caption}" loading="lazy">'
+            f"<figcaption>{caption}</figcaption></figure>"
+        )
+    if not figures:
+        return ""
+    return f'<div class="chart-gallery">{"".join(figures)}</div>'
 
 
 def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, Any]]]) -> str:
     sql_item = _first_artifact(artifacts, "sql_agent", "sql_result")
     sql_plan = _artifact_json(_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result"))
+    eda = _artifact_json(_first_artifact(artifacts, "eda_agent", "eda_summary"))
     analysis = _artifact_json(_first_artifact(artifacts, "analysis_agent", "analysis_result"))
+    insight = _artifact_json(_first_artifact(artifacts, "insight_agent", "insight_payload"))
     columns, rows = _read_csv_artifact(sql_item)
+    artifact_index = _artifact_index(artifacts)
 
-    final_answer = str(sql_plan.get("final_answer") or sql_plan.get("preview", {}).get("final_answer") or "")
-    if not final_answer:
-        preview = (_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result") or {}).get("preview", {})
-        final_answer = str(preview.get("final_answer") or "")
+    # 인사이트가 있으면(파이프라인이 정상 종료됐다면 항상 있음) 그게 진짜 최종 답변이다.
+    # SQL의 final_answer는 인사이트가 없을 때(예: 실패/중단된 실행)에만 보조로 쓴다.
+    final_answer = str(insight.get("answer") or "") or str(sql_plan.get("final_answer") or "")
 
     artifact_rows = []
     for agent_name, items in artifacts.items():
@@ -587,17 +619,30 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
                 "</tr>"
             )
 
-    chart_preview = {}
-    encoding = chart_preview.get("encoding", {}) if isinstance(chart_preview, dict) else {}
-    x_field = ((encoding.get("x") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
-    y_field = ((encoding.get("y") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
-    chart_type = "not_generated"
-    chart_title = "Visualization artifact not generated"
-    chart_body = "<p>Visualization is disabled as a separate agent in the current flow.</p>"
+    eda_final_summary = str(eda.get("final_summary") or "")
+    eda_hypotheses = str(eda.get("hypotheses") or "")
+    eda_cautions = eda.get("cautions") or []
 
-    key_findings = analysis.get("key_findings") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("key_findings") or []
-    limitations = analysis.get("limitations") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("limitations") or []
-    method = analysis.get("method_summary") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("method_summary") or ""
+    # 필드명 확인: analysis_result의 실제 요약 필드는 method_summary가 아니라
+    # executive_summary다(agents/analysis/agent.py::_public_result_payload).
+    key_findings = analysis.get("key_findings") or []
+    limitations = analysis.get("limitations") or []
+    method = str(analysis.get("executive_summary") or "")
+
+    key_insights = insight.get("key_insights") or []
+    action_plan = insight.get("action_plan") or []
+    insight_limitations = insight.get("limitations") or []
+
+    # 차트는 EDA/인사이트가 실제로 등록한 이미지를 그대로 보여준다(하드코딩 placeholder 없음).
+    chart_gallery = _chart_gallery_html(eda.get("key_charts") or [], artifact_index, caption_key="caption")
+    chart_gallery += _chart_gallery_html(insight.get("charts") or [], artifact_index, caption_key="title")
+    if not chart_gallery:
+        # 등록된 차트 아티팩트가 하나도 없으면, SQL 결과 표에서라도 간단한 추세 차트를 시도한다.
+        numeric_columns = [c for c in columns if any(_coerce_float(row.get(c)) is not None for row in rows)]
+        if columns and numeric_columns:
+            chart_gallery = _chart_svg(columns, rows, columns[0], numeric_columns[0])
+        else:
+            chart_gallery = "<p>표시할 차트 아티팩트가 없습니다.</p>"
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -621,11 +666,11 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     .table-wrap {{ overflow-x: auto; }}
     .badge {{ display: inline-block; background: #e8f0fe; color: #174ea6; border-radius: 999px; padding: 3px 10px; font-size: 12px; }}
     .bullet {{ margin-left: 12px; }}
-    .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }}
-    .metric-card {{ background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }}
-    .metric-value {{ font-size: 19px; font-weight: 700; color: #111827; }}
-    .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 4px; }}
     .chart-wrap {{ overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; margin-top: 14px; padding: 10px; }}
+    .chart-gallery {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 14px; }}
+    .chart-gallery figure {{ margin: 0; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; background: #fff; }}
+    .chart-gallery img {{ width: 100%; height: auto; border-radius: 4px; }}
+    .chart-gallery figcaption {{ font-size: 12px; color: #6b7280; margin-top: 6px; }}
     svg {{ width: 100%; min-width: 680px; height: auto; }}
     .axis {{ stroke: #9ca3af; stroke-width: 1; }}
     .grid {{ stroke: #e5e7eb; stroke-width: 1; }}
@@ -655,6 +700,15 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     </section>
 
     <section>
+      <h2>EDA Findings</h2>
+      <p>{html.escape(eda_final_summary or "EDA 요약이 생성되지 않았습니다(이 경로에서는 EDA가 생략됐을 수 있습니다).")}</p>
+      <h3>Hypotheses</h3>
+      <p>{html.escape(eda_hypotheses) if eda_hypotheses else "표시할 가설이 없습니다."}</p>
+      <h3>Cautions</h3>
+      {_list_html(eda_cautions, "표시할 주의 사항이 없습니다.")}
+    </section>
+
+    <section>
       <h2>Analysis Insights</h2>
       <p>{html.escape(str(method or "분석 요약이 생성되지 않았습니다."))}</p>
       <h3>Key Findings</h3>
@@ -664,13 +718,19 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     </section>
 
     <section>
+      <h2>Key Insights &amp; Action Plan</h2>
+      <p>인사이트 에이전트가 SQL/EDA/분석 근거를 종합해 도출한 실행 제안입니다.</p>
+      <h3>Key Insights</h3>
+      {_list_html(key_insights, "표시할 핵심 인사이트가 없습니다.")}
+      <h3>Action Plan</h3>
+      {_list_html(action_plan, "제안된 실행 계획이 없습니다.")}
+      <h3>Limitations</h3>
+      {_list_html(insight_limitations, "표시할 제한 사항이 없습니다.")}
+    </section>
+
+    <section>
       <h2>Visualization</h2>
-      <div class="metric-grid">
-        {_metric_cards([("Chart type", str(chart_type)), ("X field", str(x_field)), ("Y field", str(y_field))])}
-      </div>
-      <p><strong>Title:</strong> {html.escape(str(chart_title))}</p>
-      {chart_body}
-      <p>이번 실행에서는 Vega-Lite 차트 스펙도 artifact로 저장되었습니다.</p>
+      {chart_gallery}
     </section>
 
     <section>

@@ -39,7 +39,6 @@ _ACTION_BY_AGENT: dict[AgentName, NextAction] = {
     "sql_agent": "call_sql_agent",
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
-    "report_agent": "call_report_agent",
     "insight_agent": "call_insight_agent",
 }
 _AGENT_BY_ACTION: dict[str, AgentName] = {
@@ -59,7 +58,7 @@ def build_step_summary(
         )
     )
     return StepSummary(
-        step="generate_report" if result.agent == "report_agent" else "execute_subagent",
+        step="execute_subagent",
         agent=result.agent,
         action=action,
         summary=result.summary,
@@ -565,8 +564,8 @@ def _commit_semantic_recovery(
         )
 
     attempts = dict(recovered.get("semantic_recovery_attempts", {}))
-    if result.agent == "report_agent" and int(attempts.get("report_agent", 0)) >= 1:
-        reason = "제한적 Report 후보가 Semantic 검증을 통과하지 못했습니다."
+    if result.agent == "insight_agent" and int(attempts.get("insight_agent", 0)) >= 1:
+        reason = "제한적 인사이트 후보가 Semantic 검증을 통과하지 못했습니다."
         recovered["limitations"] = _append_unique(recovered.get("limitations", []), reason)
         recovered = _append_recovery_event(
             recovered,
@@ -575,9 +574,9 @@ def _commit_semantic_recovery(
             reason,
             {
                 **metadata,
-                "agent": "report_agent",
-                "action": "call_report_agent",
-                "attempt": int(attempts.get("report_agent", 0)),
+                "agent": "insight_agent",
+                "action": "call_insight_agent",
+                "attempt": int(attempts.get("insight_agent", 0)),
             },
         )
         return _finish_semantic_recovery(
@@ -662,7 +661,7 @@ def _commit_semantic_recovery(
 
     fallback_reason = unsafe_reason or "실행 가능한 Semantic 복구 권고가 없습니다."
     recovered["limitations"] = _append_unique(recovered.get("limitations", []), fallback_reason)
-    return _schedule_limited_report_or_finish(
+    return _schedule_limited_insight_or_finish(
         recovered,
         record,
         backend_adapter,
@@ -705,7 +704,7 @@ def _resolve_recovery_action(
     return None, path, reasons, "Semantic 복구 권고를 실행 대상으로 변환할 수 없습니다."
 
 
-def _schedule_limited_report_or_finish(
+def _schedule_limited_insight_or_finish(
     state: SupervisorState,
     record: ValidationRecord,
     backend_adapter: Any | None,
@@ -734,9 +733,9 @@ def _schedule_limited_report_or_finish(
             correction_reasons=correction_reasons,
         )
 
-    report_attempt = int(attempts.get("report_agent", 0))
-    if report_attempt >= 1:
-        reason = "제한적 Report Semantic 복구 예산이 이미 소진되었습니다."
+    insight_attempt = int(attempts.get("insight_agent", 0))
+    if insight_attempt >= 1:
+        reason = "제한적 인사이트 Semantic 복구 예산이 이미 소진되었습니다."
         state["limitations"] = _append_unique(state.get("limitations", []), reason)
         state = _append_recovery_event(
             state,
@@ -746,9 +745,9 @@ def _schedule_limited_report_or_finish(
             {
                 "candidate_id": record.candidate_id,
                 "validation_id": record.validation_id,
-                "agent": "report_agent",
-                "action": "call_report_agent",
-                "attempt": report_attempt,
+                "agent": "insight_agent",
+                "action": "call_insight_agent",
+                "attempt": insight_attempt,
             },
         )
         return _finish_semantic_recovery(
@@ -762,20 +761,20 @@ def _schedule_limited_report_or_finish(
             correction_reasons=correction_reasons,
         )
 
-    attempts["report_agent"] = 1
+    attempts["insight_agent"] = 1
     state["semantic_recovery_attempts"] = attempts
-    state["next_action"] = "call_report_agent"
+    state["next_action"] = "call_insight_agent"
     state["terminal_state"] = "running"
     state["limitations"] = _append_unique(
         state.get("limitations", []),
-        "승인된 기존 근거만 사용해 제한적 Report fallback을 생성합니다.",
+        "승인된 기존 근거만 사용해 제한적 인사이트 fallback을 생성합니다.",
     )
     state = _record_recovery_audit(
         state,
         record,
         original_action=original_action,
         path=path,
-        actual_action="call_report_agent",
+        actual_action="call_insight_agent",
         attempt_before=0,
         attempt_after=1,
         fallback_reason=fallback_reason,
@@ -784,13 +783,13 @@ def _schedule_limited_report_or_finish(
     return _append_recovery_event(
         state,
         backend_adapter,
-        "semantic_recovery.limited_report",
-        "승인된 기존 근거로 제한적 Report를 예약했습니다.",
+        "semantic_recovery.limited_insight",
+        "승인된 기존 근거로 제한적 인사이트를 예약했습니다.",
         {
             "candidate_id": record.candidate_id,
             "validation_id": record.validation_id,
-            "agent": "report_agent",
-            "action": "call_report_agent",
+            "agent": "insight_agent",
+            "action": "call_insight_agent",
             "attempt": 1,
             "fallback_reason": fallback_reason,
         },
@@ -903,7 +902,7 @@ def _append_recovery_event(
 
 
 def _next_action(result: AgentCompactResult, record: ValidationRecord) -> NextAction:
-    if result.agent in {"report_agent", "insight_agent"}:
+    if result.agent == "insight_agent":
         return "finalize"
     semantic = next((check.details for check in record.checks if check.name == "semantic"), {})
     recommendation = str(semantic.get("recommended_next_action") or "")
@@ -918,10 +917,9 @@ def _semantic_action_allowed(agent: str, action: str) -> bool:
     if action in {"decide_next_action", "finalize", "fail"}:
         return True
     allowed = {
-        "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "report_agent": {"call_report_agent"},
+        "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
+        "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
+        "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
         "insight_agent": {"call_insight_agent"},
     }
     return action in allowed.get(agent, set())

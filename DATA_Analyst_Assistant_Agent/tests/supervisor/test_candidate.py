@@ -56,19 +56,6 @@ def test_build_step_summary_is_deterministic_and_deduplicates_artifact_ids() -> 
     }
 
 
-def test_build_step_summary_uses_report_step() -> None:
-    result = AgentCompactResult(
-        agent="report_agent",
-        status="success",
-        summary="보고서 완료",
-        artifact_ids=["report_1"],
-    )
-
-    summary = build_step_summary(result, "call_report_agent", "finalize")
-
-    assert summary.step == "generate_report"
-
-
 def _validated_state(
     result: AgentCompactResult,
     disposition: str,
@@ -83,7 +70,7 @@ def _validated_state(
         "sql_agent": "call_sql_agent",
         "eda_agent": "call_eda_agent",
         "analysis_agent": "call_analysis_agent",
-        "report_agent": "call_report_agent",
+        "insight_agent": "call_insight_agent",
     }[result.agent]
     staged = stage_candidate_result(state, result, {})
     pending = staged["pending_result"] or {}
@@ -230,16 +217,16 @@ def test_commit_semantic_recovery_quarantines_candidate_and_schedules_first_targ
 
 
 def test_commit_semantic_recovery_records_full_precondition_correction_path() -> None:
-    state = _semantic_recovery_state(recommendation="call_report_agent")
+    state = _semantic_recovery_state(recommendation="call_insight_agent")
 
     committed = commit_candidate(state, None)
 
     assert committed["next_action"] == "call_sql_agent"
     assert committed["semantic_recovery_attempts"] == {"sql_agent": 1}
     semantic_details = committed["validation_history"][-1]["checks"][-1]["details"]
-    assert semantic_details["original_recovery_action"] == "call_report_agent"
+    assert semantic_details["original_recovery_action"] == "call_insight_agent"
     assert semantic_details["precondition_path"] == [
-        "call_report_agent",
+        "call_insight_agent",
         "call_analysis_agent",
         "call_sql_agent",
     ]
@@ -250,14 +237,14 @@ def test_commit_semantic_recovery_records_full_precondition_correction_path() ->
         "attempt_before": 0,
         "attempt_after": 1,
     }
-    assert any("리포트" in limitation for limitation in committed["limitations"])
+    assert any("인사이트" in limitation for limitation in committed["limitations"])
     assert any(
         event["type"] == "semantic_recovery.precondition_adjusted"
         for event in committed["run_events"]
     )
 
 
-def test_commit_semantic_recovery_budget_exhaustion_uses_limited_report() -> None:
+def test_commit_semantic_recovery_budget_exhaustion_uses_limited_insight() -> None:
     state = _semantic_recovery_state(
         recommendation="call_sql_agent",
         accepted_evidence={"sql_agent": [{"artifact_id": "accepted_sql"}]},
@@ -266,18 +253,18 @@ def test_commit_semantic_recovery_budget_exhaustion_uses_limited_report() -> Non
 
     committed = commit_candidate(state, None)
 
-    assert committed["next_action"] == "call_report_agent"
+    assert committed["next_action"] == "call_insight_agent"
     assert committed["terminal_state"] == "running"
     assert committed["semantic_recovery_attempts"] == {
         "sql_agent": 1,
-        "report_agent": 1,
+        "insight_agent": 1,
     }
     assert any(
         event["type"] == "semantic_recovery.budget_exhausted"
         for event in committed["run_events"]
     )
-    assert committed["run_events"][-1]["type"] == "semantic_recovery.limited_report"
-    assert any("제한적 Report" in limitation for limitation in committed["limitations"])
+    assert committed["run_events"][-1]["type"] == "semantic_recovery.limited_insight"
+    assert any("제한적 인사이트" in limitation for limitation in committed["limitations"])
 
 
 def test_semantic_recovery_budget_is_counted_by_corrected_actual_target() -> None:
@@ -296,12 +283,12 @@ def test_semantic_recovery_budget_is_counted_by_corrected_actual_target() -> Non
     }
 
 
-def test_limited_report_budget_exhaustion_ends_with_recoverable_context() -> None:
+def test_limited_insight_budget_exhaustion_ends_with_recoverable_context() -> None:
     state = _semantic_recovery_state(
         recommendation=None,
         accepted_evidence={"sql_agent": [{"artifact_id": "accepted_sql"}]},
     )
-    state["semantic_recovery_attempts"] = {"report_agent": 1}
+    state["semantic_recovery_attempts"] = {"insight_agent": 1}
 
     committed = commit_candidate(state, None)
 
@@ -321,19 +308,19 @@ def test_commit_semantic_recovery_without_accepted_evidence_fails_terminally() -
     assert committed["failed_agents"] == []
 
 
-def test_limited_report_semantic_failure_ends_with_recoverable_context() -> None:
+def test_limited_insight_semantic_failure_ends_with_recoverable_context() -> None:
     state = _semantic_recovery_state(
-        agent="report_agent",
+        agent="insight_agent",
         recommendation=None,
         accepted_evidence={"analysis_agent": [{"artifact_id": "accepted_analysis"}]},
     )
-    state["semantic_recovery_attempts"] = {"report_agent": 1}
+    state["semantic_recovery_attempts"] = {"insight_agent": 1}
 
     committed = commit_candidate(state, None)
 
     assert committed["terminal_state"] == "failed_with_recoverable_context"
     assert committed["next_action"] == "finalize"
-    assert committed["semantic_recovery_attempts"] == {"report_agent": 1}
+    assert committed["semantic_recovery_attempts"] == {"insight_agent": 1}
 
 
 def test_semantic_warning_reason_is_added_to_limitations_once() -> None:

@@ -54,7 +54,7 @@ def _state(result: AgentCompactResult):
     return staged
 
 
-def _semantic_success(next_action: str = "call_report_agent") -> dict[str, object]:
+def _semantic_success(next_action: str = "") -> dict[str, object]:
     return {
         "semantic_valid": True,
         "severity": "info",
@@ -180,7 +180,7 @@ def test_success_without_artifacts_reaches_semantic_validation() -> None:
 
 
 def test_semantic_missing_evidence_marks_candidate_for_recovery() -> None:
-    model = SemanticModel({**_semantic_success(), "missing_evidence": ["analysis_table"]})
+    model = SemanticModel({**_semantic_success("call_sql_agent"), "missing_evidence": ["analysis_table"]})
     result = AgentCompactResult(
         agent="analysis_agent",
         status="success",
@@ -195,23 +195,7 @@ def test_semantic_missing_evidence_marks_candidate_for_recovery() -> None:
     ]
     assert record["checks"][-1]["passed"] is False
     assert record["outcome"]["disposition"] == "recover"
-    assert record["outcome"]["recovery_action"] == "call_report_agent"
-
-
-def test_report_without_artifact_id_stops_before_semantic_validation() -> None:
-    model = SemanticModel(_semantic_success("finalize"))
-    result = AgentCompactResult(
-        agent="report_agent",
-        status="success",
-        summary="리포트 완료",
-    )
-
-    updates = make_validate_candidate_node(model)(_state(result))
-
-    record = updates["pending_validation"]
-    assert [check["name"] for check in record["checks"]] == ["contract", "result"]
-    assert record["outcome"]["disposition"] == "reject"
-    assert model.calls == 0
+    assert record["outcome"]["recovery_action"] == "call_sql_agent"
 
 
 def test_semantic_warning_with_invalid_flag_is_accepted_with_limitations() -> None:
