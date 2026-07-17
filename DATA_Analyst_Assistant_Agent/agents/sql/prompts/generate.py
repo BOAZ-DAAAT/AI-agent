@@ -17,14 +17,36 @@ SQL 생성 컨텍스트(compact JSON):
 - 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
 - source는 실제 존재 테이블만 사용
 - 사용자 질문보다 확정된 mart_design을 우선 계약으로 사용
+- mart_design의 target_table, grain_columns, source_grains, deduplication_keys,
+  grain_strategy, column_plan, metric_support를 임의로 변경하지 말 것
+
+- source 테이블에는 schema/database prefix를 절대 붙이지 말 것
+- source 테이블은 customers, orders처럼 bare table name만 사용
+- raw_data.*, source.*, public.*, olist.*, 세션 DB명 prefix는 금지
+- schema prefix가 허용되는 것은 target_table의 {ALLOWED_MART_SCHEMA}.* 뿐
+
+- 데이터마트는 최종 리포트용 요약 결과가 아니라 재사용 가능한 기반 테이블로 작성
+- 기본적으로 가능한 한 원본 데이터의 행 수준 또는 mart_design에 선언된 공통 grain을 유지
+- 우선 조인, 정제, 표준화, 중복 제거, 필수 파생 컬럼 추가로 해결
+- preserve_common_grain이면 집계하지 않고 선언된 공통 grain을 보존
+- aggregate_to_common_grain이면 mart_design에 선언된 집계 계약만 사용
+- source_grains가 더 세밀한 원천은 deduplication_keys와
+  각 column_plan.aggregation_method에 따라 공통 grain으로 집계하거나 중복 제거
+- mart_design에 명시되지 않은 임의의 집계는 금지
+- 집계를 사용했다면 row-level 또는 공통 grain 보존이 부적절한 이유를 reasoning에 명시
+
+- mart_design.grain_columns가 최종 결과의 한 행을 유일하게 식별하도록 작성
 - 최종 SELECT에는 column_plan의 output_column만 선언된 순서와 alias로 정확히 출력
-- mart_design.grain_columns가 최종 한 행을 유일하게 만들도록 작성
-- source_grains가 더 세밀한 원천은 deduplication_keys와 각 column_plan.aggregation_method에 따라 공통 grain으로 집계 또는 중복 제거
-- preserve_common_grain이면 집계하지 않고 공통 grain을 보존하고, aggregate_to_common_grain이면 선언된 집계 계약만 사용
 - calculation_rule의 자연어 의미를 SQL로 구현하되 임의의 새 출력 컬럼을 추가하지 말 것
-- metric_support의 downstream_calculation이 후속 수행 가능하도록 required_mart_columns를 보존
-- 원자적 파생값은 포함할 수 있지만 비율, 순위, 최종 재구매 판정, 카테고리 요약 지표는 생성 금지
-- 질문 분석 결과의 required_columns와 business_keys는 원천 참조와 조인 조건에 사용하되 mart_design을 변경하지 말 것
+
+- metric_support의 downstream_calculation을 후속 단계에서 수행할 수 있도록
+  required_mart_columns를 보존
+- 질문 분석 결과의 required_columns와 business_keys는 원천 컬럼 참조와
+  조인 조건을 결정하는 데 사용하되 mart_design 자체를 변경하지 말 것
+
+- 재사용 가능한 원자적 파생값은 포함할 수 있음
+- 비율, 순위, 최종 재구매 판정, 카테고리별 요약 지표 등
+  최종 분석 또는 리포트 성격의 파생값은 생성하지 말 것
 - 모호한 기준은 reasoning에 명시
 - precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
 - postcheck_sql은 타겟 마트에 대한 단일 SELECT이며 정확히 한 행을 반환
