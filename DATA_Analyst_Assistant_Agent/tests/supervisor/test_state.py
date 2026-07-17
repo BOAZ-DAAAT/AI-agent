@@ -374,6 +374,33 @@ def test_analysis_plan_sql_defaults_are_empty() -> None:
     assert plan.source_sql == ""
 
 
+def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="고객별 RFM과 리뷰 점수를 결합해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {
+        "goal": "고객별 RFM 리뷰 결합 마트 생성",
+        "route_kind": "comprehensive",
+        "planner_mode": "llm",
+        "metric": "RFM 및 평균 리뷰 점수",
+        "dimension": "customer_unique_id",
+        "filters": ["Monetary 상위 25%", "평균 리뷰 점수 하위 25%"],
+        "requires_mart_review": True,
+    }
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.plan is not None
+    assert orchestration.plan.route_kind == "comprehensive"
+    assert orchestration.plan.metric == "RFM 및 평균 리뷰 점수"
+    assert orchestration.plan.dimension == "customer_unique_id"
+    assert orchestration.plan.filters == ["Monetary 상위 25%", "평균 리뷰 점수 하위 25%"]
+    assert orchestration.plan.requires_mart_review is True
+
+
 def test_to_orchestration_state_without_plan_preserves_failure_context() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",

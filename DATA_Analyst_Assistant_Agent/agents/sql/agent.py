@@ -32,6 +32,16 @@ class SQLAgent:
         app = build_app()
         catalog_summary = state.catalog_summary or {}
         retry_context = state.plan.retry_context if state.plan else None
+        supervisor_plan_context = {}
+        if state.plan is not None:
+            supervisor_plan_context = {
+                "goal": state.plan.goal,
+                "route_kind": state.plan.route_kind,
+                "metric": state.plan.metric,
+                "dimension": state.plan.dimension,
+                "filters": state.plan.filters,
+                "requires_mart_review": state.plan.requires_mart_review,
+            }
         clarification_request = ""
         if retry_context:
             feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")
@@ -50,13 +60,19 @@ class SQLAgent:
                     f"이전 {retry_step} 실패 원인: {retry_message}. "
                     f"문제가 된 SQL: {retry_query}"
                 ).strip()
+        planner_selection_reason = state.goal or ""
+        if supervisor_plan_context:
+            planner_selection_reason = (
+                f"{planner_selection_reason}\n\nSupervisor analysis_plan:\n"
+                f"{json.dumps(supervisor_plan_context, ensure_ascii=False, indent=2)}"
+            ).strip()
 
         return app.invoke(
             {
                 "user_question": state.user_query,
                 "required_db_schema": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "clarification_request": clarification_request,
-                "planner_selection_reason": state.goal or "",
+                "planner_selection_reason": planner_selection_reason,
                 "schema_text": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "integrity_text": "",
                 "integrity_dataset_name": state.datasource_id or "default",

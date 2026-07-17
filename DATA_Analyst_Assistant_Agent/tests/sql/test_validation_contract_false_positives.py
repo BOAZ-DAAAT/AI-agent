@@ -126,3 +126,49 @@ def test_present_required_aggregations_pass_for_comprehensive_route() -> None:
     findings = validate_sql_intent(plan, sql_draft)
 
     assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
+def test_count_distinct_contract_accepts_mysql_count_distinct_syntax() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": ["COUNT_DISTINCT", "SUM", "AVG", "MAX"],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm_with_reviews AS "
+            "SELECT c.customer_unique_id, "
+            "MAX(o.order_purchase_timestamp) AS last_order_purchase_timestamp, "
+            "COUNT(DISTINCT o.order_id) AS frequency_orders_per_customer, "
+            "SUM(op.payment_value) AS monetary_total_payment_value_per_customer, "
+            "AVG(r.review_score) AS average_review_score_per_customer "
+            "FROM orders o "
+            "JOIN customers c ON o.customer_id = c.customer_id "
+            "LEFT JOIN order_payments op ON o.order_id = op.order_id "
+            "LEFT JOIN order_reviews r ON o.order_id = r.order_id "
+            "GROUP BY c.customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
+def test_count_distinct_contract_still_flags_plain_count_only() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": ["COUNT_DISTINCT"],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm_with_reviews AS "
+            "SELECT customer_unique_id, COUNT(order_id) AS frequency_orders_per_customer "
+            "FROM orders GROUP BY customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert any(f["category"] == "intent_mismatch" for f in findings)

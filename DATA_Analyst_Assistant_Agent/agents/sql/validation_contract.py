@@ -21,6 +21,95 @@ def _normalized_upper_sql(sql: str) -> str:
     return _normalized_sql(sql).upper()
 
 
+_AGGREGATION_ALIASES = {
+    "COUNT_DISTINCT": "COUNT_DISTINCT",
+    "COUNTDISTINCT": "COUNT_DISTINCT",
+    "DISTINCT_COUNT": "COUNT_DISTINCT",
+    "COUNT DISTINCT": "COUNT_DISTINCT",
+    "DEDUP": "DEDUPLICATE",
+    "DEDUPLICATE": "DEDUPLICATE",
+    "ROW_NUMBER": "DEDUPLICATE",
+}
+
+
+def _canonical_aggregation(value: Any) -> str:
+    token = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    if not token:
+        return ""
+    return _AGGREGATION_ALIASES.get(token, token)
+
+
+def _sql_aggregation_features(sql: str) -> set[str]:
+    upper_sql = _normalized_upper_sql(sql)
+    features: set[str] = set()
+    for func in ("SUM", "COUNT", "AVG", "MIN", "MAX"):
+        if re.search(rf"\b{func}\s*\(", upper_sql):
+            features.add(func)
+    if re.search(r"\bCOUNT\s*\(\s*DISTINCT\b", upper_sql):
+        features.add("COUNT_DISTINCT")
+        features.add("COUNT")
+    if re.search(r"\bROW_NUMBER\s*\(", upper_sql) or re.search(r"\bSELECT\s+DISTINCT\b", upper_sql):
+        features.add("DEDUPLICATE")
+    if re.search(r"\bNTILE\s*\(", upper_sql):
+        features.add("NTILE")
+    return features
+
+
+def _has_required_aggregation(sql: str, aggregation: Any) -> bool:
+    required = _canonical_aggregation(aggregation)
+    if not required:
+        return True
+    if required in _sql_aggregation_features(sql):
+        return True
+    return required in _normalized_upper_sql(sql)
+
+
+def _normalized_mart_policy(plan: dict[str, Any], mart_design: dict[str, Any]) -> str:
+    raw_policy = (
+        (mart_design or {}).get("aggregation_policy")
+        or build_intent_contract(plan).get("mart_policy")
+        or ""
+    )
+    policy = str(raw_policy).strip().lower()
+    return {
+        "prefer_row_preserving": "prefer_row_preserving",
+        "row_preserving": "prefer_row_preserving",
+        "preserve_common_grain": "preserve_common_grain",
+        "aggregate_if_justified": "aggregate_if_justified",
+        "aggregate_to_common_grain": "aggregate_to_common_grain",
+    }.get(policy, policy)
+
+
+def _has_aggregation_justification(mart_design: dict[str, Any], sql_draft: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            (mart_design or {}).get("aggregation_rationale"),
+            (mart_design or {}).get("design_reasoning"),
+            (sql_draft or {}).get("reasoning"),
+        )
+    ).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    markers = (
+        "justify",
+        "because",
+        "exception",
+        "aggregate",
+        "deduplicate",
+        "latest",
+        "snapshot",
+        "예외",
+        "집계",
+        "중복",
+        "최신",
+        "스냅샷",
+        "원본",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 # TRIM(BOTH x FROM y) / EXTRACT(YEAR FROM col) / SUBSTRING(str FROM pos FOR len) 등은
 # ANSI SQL 함수 인자 문법으로 FROM을 쓴다 — 테이블 참조가 아니다. 이 함수 호출 구간을
 # 통째로 마스킹해 뒤따르는 테이블-참조 정규식이 인자 안의 FROM/컬럼명을 오인하지 않게 한다.
@@ -109,17 +198,17 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
 
 def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    sql = _normalized_upper_sql(sql_draft.get("sql") or "")
+    sql = sql_draft.get("sql") or ""
     contract = build_intent_contract(plan)
     # required_aggregations/required_tables는 datamart_creation(comprehensive)에도 그대로
     # 적용한다 — RFM처럼 "이 파생 집계 컬럼이 마트에 있어야 한다"는 요구를 semantic LLM
     # 판정에만 맡기지 않고 결정론적으로 먼저 걸러낸다. grouped_aggregate 전용 GROUP BY
     # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
-        if agg.upper() not in sql:
+        if not _has_required_aggregation(sql, agg):
             findings.append({"category": "intent_mismatch", "severity": "error", "retryable": True, "detail": f"질문 의도상 필요한 집계 함수 {agg} 가 SQL에 없습니다."})
     dimensions = [str(d) for d in contract.get("dimensions", []) if d]
-    if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and "GROUP BY" not in sql:
+    if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and "GROUP BY" not in _normalized_upper_sql(sql):
         findings.append({"category": "result_shape_mismatch", "severity": "error", "retryable": True, "detail": "그룹 집계 질문인데 GROUP BY가 없습니다."})
     required_tables = [str(t) for t in contract.get("required_tables", []) if t]
     source_tables = [str(t) for t in sql_draft.get("source_tables", []) if t]
@@ -163,12 +252,14 @@ def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, A
     has_aggregate_summary = _has_top_level_token(
         sql, ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(")
     )
-    policy = str((mart_design or {}).get("aggregation_policy") or "")
+    policy = _normalized_mart_policy(plan, mart_design)
     grain = str((mart_design or {}).get("grain") or "")
     if not grain.strip():
         findings.append({"category": "mart_grain_missing", "severity": "error", "retryable": True, "detail": "datamart 설계에 공통 분석 grain 설명이 없습니다."})
     if policy == "preserve_common_grain" and has_aggregate_summary:
         findings.append({"category": "mart_policy_mismatch", "severity": "error", "retryable": True, "detail": "preserve_common_grain 설계인데 SQL에 집계가 포함되었습니다. 설계 계약에 맞게 SQL을 다시 생성해야 합니다."})
+    if policy == "prefer_row_preserving" and has_aggregate_summary and not _has_aggregation_justification(mart_design, sql_draft):
+        findings.append({"category": "mart_summary_bias", "severity": "error", "retryable": True, "detail": "row-preserving datamart가 우선인데 SQL이 정당화 없이 요약 집계를 생성했습니다."})
     return findings
 
 
