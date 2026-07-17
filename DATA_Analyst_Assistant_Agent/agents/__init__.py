@@ -6,7 +6,6 @@ __all__ = [
     "AgentRuntime",
     "AnalysisAgent",
     "EDAAgent",
-    "ReportAgent",
     "SQLAgent",
 ]
 
@@ -14,7 +13,6 @@ _EXPORT_MAP = {
     "AgentRuntime": ("DATA_Analyst_Assistant_Agent.agents.common", "AgentRuntime"),
     "AnalysisAgent": ("DATA_Analyst_Assistant_Agent.agents.analysis.agent", "AnalysisAgent"),
     "EDAAgent": ("DATA_Analyst_Assistant_Agent.agents.eda.agent", "EDAAgent"),
-    "ReportAgent": ("DATA_Analyst_Assistant_Agent.agents.report.agent", "ReportAgent"),
     "SQLAgent": ("DATA_Analyst_Assistant_Agent.agents.sql.agent", "SQLAgent"),
 }
 

@@ -88,7 +88,6 @@ Analysis Agent는 SQL/EDA 근거를 바탕으로 필요한 분석을 설계·수
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -109,7 +108,6 @@ allowed=false인 경우 next_action은 필요한 대체 action, finalize, fail �
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -136,7 +134,6 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 
@@ -168,7 +165,11 @@ missing_evidence가 있거나 severity=error이면 복구가 필요합니다.
 severity=warning이고 missing_evidence가 없으면 semantic_valid=false여도 제한사항과 함께 사용할 수 있습니다.
 severity=info에서는 semantic_valid=true일 때만 통과하며, false이면 모순된 응답이므로 복구가 필요합니다.
 hard validation 결과를 성공으로 뒤집지 마세요. 형식 오류, fallback, retry 한도, terminal failure 같은 결정론적 검증은 이미 처리되었다고 가정하세요.
-사용자 쿼리와 analysis_plan 기준으로 직전 하위 에이전트 결과가 충분한 근거를 제공하는지 판단하세요.
+
+판단 기준은 "사용자 질문 전체에 대한 최종 답이 이미 나왔는가"가 아니라, 입력 JSON의 agent_capabilities에 정의된 해당 에이전트 자신의 역할(when_to_use/produces_artifacts) 범위 안에서 결과가 충분한가입니다.
+직전 하위 에이전트가 자기 역할을 다했다면, 사용자 질문에 아직 최종 답이 다 안 나왔더라도 그 자체는 부족 판정 사유가 아닙니다 — 그건 이후 단계(EDA/분석/리포트)가 이어받을 몫입니다.
+예: SQL 에이전트는 분석 가능한 마트/집계 결과를 만들면 충분하며, 임계치 계산·세그먼트 라벨링·비율 해석 같은 최종 집계·해석까지 SQL 단계에 요구하지 마세요.
+반대로 요청한 필터·grain·컬럼이 실제로 빠졌거나 에이전트 자신의 역할 범위 안에서도 명백한 결함이 있다면, 그건 여전히 부족 판정 사유입니다.
 recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확신이 낮거나 별도 권고가 없으면 빈 문자열로 두세요.
 
 허용 severity:
@@ -180,7 +181,6 @@ recommended_next_action은 다음 노드가 참고할 권고일 뿐이며, 확�
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 - 빈 문자열
@@ -208,7 +208,6 @@ STEP_SUMMARY_DECISION_PROMPT = """
 - call_sql_agent
 - call_eda_agent
 - call_analysis_agent
-- call_report_agent
 - finalize
 - fail
 - 빈 문자열
@@ -216,7 +215,7 @@ STEP_SUMMARY_DECISION_PROMPT = """
 반드시 JSON 객체만 반환하세요.
 허용 필드:
 - step: string
-- agent: "sql_agent", "eda_agent", "analysis_agent", "report_agent" 또는 null
+- agent: "sql_agent", "eda_agent", "analysis_agent" 또는 null
 - action: string
 - summary: string
 - artifact_ids: string 배열

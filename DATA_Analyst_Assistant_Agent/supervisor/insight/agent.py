@@ -1,12 +1,12 @@
-"""InsightAgent — evidence-to-answer 최종 해석자 (구 report agent 대체 예정).
+"""InsightGenerator — evidence-to-answer 최종 해석자 (구 report agent 대체 예정).
 
 상류 아티팩트(읽기 전용) → 증거팩 → bounded ReAct 루프 → 직답 문구 + 차트를
 final_report.md / insight_payload.json 아티팩트로 등록한다.
 
 배선 주의:
 - 기본 backend factory 에 workspace_storage 가 없어 save_workspace_file 은 쓰지 않는다
-  (register_artifact 직접 사용 — ReportAgent 의 알려진 함정 회피).
-- supervisor 스왑(tools.py 1줄) 전까지 기존 ReportAgent 와 병존한다.
+  (register_artifact 직접 사용 — ReportGenerator 의 알려진 함정 회피).
+- supervisor 스왑(tools.py 1줄) 전까지 기존 ReportGenerator 와 병존한다.
 """
 
 from __future__ import annotations
@@ -19,15 +19,15 @@ from typing import Any
 from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.insight.evidence import EvidencePack, build_evidence_pack
-from DATA_Analyst_Assistant_Agent.agents.insight.loop import run_insight_loop
-from DATA_Analyst_Assistant_Agent.agents.insight.schemas import ChartEntry, InsightResult
+from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import EvidencePack, build_evidence_pack
+from DATA_Analyst_Assistant_Agent.supervisor.insight.loop import run_insight_loop
+from DATA_Analyst_Assistant_Agent.supervisor.insight.schemas import ChartEntry, InsightResult
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
 
 _TOOL_NAME = "insight_agent.react_loop"
 
 
-class InsightAgent:
+class InsightGenerator:
     name = "insight_agent"
 
     def run(self, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:

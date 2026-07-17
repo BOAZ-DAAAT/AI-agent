@@ -37,7 +37,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
-from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
 
 @dataclass
@@ -53,7 +52,7 @@ class FakeModel:
 class FencedJsonModel:
     def invoke(self, messages):
         return FakeMessage(
-            '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+            '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
         )
 
 
@@ -90,10 +89,10 @@ def test_parse_decision_json_extracts_next_action() -> None:
 
 def test_parse_decision_json_extracts_fenced_json() -> None:
     decision = parse_decision_json(
-        '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+        '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
     )
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
     assert decision.reason == "분석 완료"
 
 
@@ -225,7 +224,7 @@ def test_decide_next_action_uses_model_fenced_json_when_available() -> None:
 
     decision = decide_next_action(state, model=FencedJsonModel())
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
 
 
 def test_decide_next_action_requires_model() -> None:
@@ -416,7 +415,6 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "call_sql_agent",
         "call_eda_agent",
         "call_analysis_agent",
-        "call_report_agent",
         "finalize",
         "fail",
     ]
@@ -425,7 +423,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "sql_agent",
         "eda_agent",
         "analysis_agent",
-        "report_agent",
+        "insight_agent",
     }
 
 
@@ -587,34 +585,6 @@ def test_finalization_context_includes_latest_validation_agent_failure_streak() 
     context = build_finalization_context(state)
 
     assert context["recent_failure_streak"] == analysis_streak
-
-
-def test_summarize_agent_step_is_compact() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql_result"],
-    )
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert summary.step == "execute_subagent"
-    assert summary.agent == "sql_agent"
-    assert summary.action == "call_sql_agent"
-    assert summary.artifact_ids == ["artifact_sql_result"]
-
-
-def test_summarize_agent_step_truncates_summary_to_1000_chars() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="가" * 1001,
-        artifact_ids=[],
-    )
-
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert len(summary.summary) == 1000
 
 
 def test_context_derives_legacy_payload_keys_from_validation_history() -> None:

@@ -81,13 +81,15 @@ ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     "call_sql_agent": "sql_agent",
     "call_eda_agent": "eda_agent",
     "call_analysis_agent": "analysis_agent",
-    "call_report_agent": "report_agent",
+    "call_insight_agent": "insight_agent",
 }
+
+_NODE_ONLY_AGENTS = {"insight_agent"}
 
 SUBAGENT_ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     action: agent
     for action, agent in ACTION_TO_AGENT.items()
-    if agent != "report_agent"
+    if agent not in _NODE_ONLY_AGENTS
 }
 
 TERMINAL_STATES = {item.value for item in SupervisorTerminalState}
@@ -398,9 +400,9 @@ def make_completion_guard_node():
                 "next_action": "finalize",
                 "current_step": "completion_guard",
             }
-        if decision.status == "report_required":
+        if decision.status == "insight_required":
             return {
-                "next_action": "call_report_agent",
+                "next_action": "call_insight_agent",
                 "current_step": "completion_guard",
             }
         return {
@@ -427,9 +429,9 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
             )
 
         action = state.get("next_action")
-        if action == "call_report_agent":
+        if action == "call_insight_agent":
             return {
-                "next_action": "call_report_agent",
+                "next_action": "call_insight_agent",
                 "current_step": "execute_subagent",
             }
 
@@ -493,50 +495,62 @@ def make_commit_candidate_node(backend_adapter: Any | None = None):
     return commit_candidate_node
 
 
-def make_generate_report_node(report_generator: Any):
-    def generate_report_node(state: SupervisorState) -> SupervisorState:
+class _InsightGeneratorAdapter:
+    """subagent_adapter가 노출하는 generate_insight()를 generate_insight_node가 기대하는
+    .generate() 인터페이스로 맞춰준다(호출 시그니처 통일용 얇은 어댑터)."""
+
+    def __init__(self, subagent_adapter: Any) -> None:
+        self._subagent_adapter = subagent_adapter
+        self.backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
+
+    def generate(self, state: SupervisorState) -> AgentCompactResult:
+        return self._subagent_adapter.generate_insight(state)
+
+
+def make_generate_insight_node(insight_generator: Any):
+    def generate_insight_node(state: SupervisorState) -> SupervisorState:
         evidence_ids = artifact_ids_by_agent(state)
         has_evidence = any(
             bool(evidence_ids.get(agent_name))
             for agent_name in ("sql_agent", "eda_agent", "analysis_agent")
         )
         if not has_evidence:
-            result = _failed_report_result(
-                "리포트를 생성하려면 SQL, EDA, 분석 중 하나 이상의 근거 아티팩트가 필요합니다."
+            result = _failed_insight_result(
+                "인사이트를 생성하려면 SQL, EDA, 분석 중 하나 이상의 근거 아티팩트가 필요합니다."
             )
         else:
             try:
-                result = report_generator.generate(state)
+                result = insight_generator.generate(state)
             except Exception as exc:
-                result = _failed_report_result(f"보고서 생성 또는 저장에 실패했습니다: {exc}")
+                result = _failed_insight_result(f"인사이트 생성 또는 저장에 실패했습니다: {exc}")
 
-        if result.agent != "report_agent":
-            result = _failed_report_result(
-                f"보고서 생성기가 잘못된 agent 결과를 반환했습니다: {result.agent}"
+        if result.agent != "insight_agent":
+            result = _failed_insight_result(
+                f"인사이트 생성기가 잘못된 agent 결과를 반환했습니다: {result.agent}"
             )
 
         updates: SupervisorState = {
             **stage_candidate_result(state, result, {}),
             "last_agent_result": result.model_dump(mode="json"),
             "terminal_state": "running",
-            "next_action": "call_report_agent",
-            "current_step": "generate_report",
+            "next_action": "call_insight_agent",
+            "current_step": "generate_insight",
         }
         _emit_run_event(
-            getattr(report_generator, "backend_adapter", None),
+            getattr(insight_generator, "backend_adapter", None),
             state,
             "result.staged",
-            "report_agent 후보 결과를 격리했습니다.",
+            "insight_agent 후보 결과를 격리했습니다.",
             metadata={"candidate_id": (updates.get("pending_result") or {}).get("candidate_id")},
         )
         return updates
 
-    return generate_report_node
+    return generate_insight_node
 
 
-def _failed_report_result(message: str) -> AgentCompactResult:
+def _failed_insight_result(message: str) -> AgentCompactResult:
     return AgentCompactResult(
-        agent="report_agent",
+        agent="insight_agent",
         status="failed",
         summary=message,
         retryable=False,
@@ -660,7 +674,7 @@ def _action_for_agent(agent: AgentName) -> NextAction:
         "sql_agent": "call_sql_agent",
         "eda_agent": "call_eda_agent",
         "analysis_agent": "call_analysis_agent",
-        "report_agent": "call_report_agent",
+        "insight_agent": "call_insight_agent",
     }[agent]
 
 
@@ -701,25 +715,12 @@ def make_resolve_candidate_node(backend_adapter: Any | None = None):
             {},
         )
         recommended_action = str(semantic_result.get("recommended_next_action") or "")
-        if result.agent == "report_agent":
+        if result.agent == "insight_agent":
             promoted["next_action"] = "finalize"
         elif _semantic_action_allowed(result.agent, recommended_action) and recommended_action:
             promoted["next_action"] = recommended_action
         else:
             promoted["next_action"] = "decide_next_action"
-        if result.agent == "report_agent":
-            summaries = list(promoted.get("step_summaries", []))
-            summaries.append(
-                StepSummary(
-                    step="generate_report",
-                    agent="report_agent",
-                    action="call_report_agent",
-                    summary=result.summary,
-                    artifact_ids=list(result.artifact_ids),
-                    next_action="finalize",
-                ).model_dump(mode="json")
-            )
-            promoted["step_summaries"] = summaries
         _emit_run_event(
             backend_adapter,
             state,
@@ -742,10 +743,10 @@ def _semantic_action_allowed(agent: str, action: str) -> bool:
     if action in {"decide_next_action", "finalize", "fail"}:
         return True
     allowed_by_agent = {
-        "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent", "call_report_agent"},
-        "report_agent": {"call_report_agent"},
+        "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
+        "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
+        "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
+        "insight_agent": {"call_insight_agent"},
     }
     return action in allowed_by_agent.get(agent, set())
 
@@ -837,16 +838,16 @@ def build_graph(
     model: Any | None = None,
     checkpointer: Any | None = None,
     *,
-    report_generator: Any | None = None,
+    insight_generator: Any | None = None,
 ):
-    if report_generator is None:
-        if hasattr(subagent_adapter, "generate"):
-            report_generator = subagent_adapter
+    if insight_generator is None:
+        if hasattr(subagent_adapter, "generate_insight"):
+            insight_generator = _InsightGeneratorAdapter(subagent_adapter)
         else:
             backend_adapter = getattr(subagent_adapter, "backend_adapter", subagent_adapter)
-            from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
+            from DATA_Analyst_Assistant_Agent.supervisor.insighting import SupervisorInsightGenerator
 
-            report_generator = SupervisorReportGenerator(backend_adapter)
+            insight_generator = SupervisorInsightGenerator(backend_adapter)
 
     graph = StateGraph(SupervisorState)
     backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
@@ -856,7 +857,7 @@ def build_graph(
     graph.add_node("decide_next_action", make_decide_next_action_node(model))
     graph.add_node("completion_guard", make_completion_guard_node())
     graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
-    graph.add_node("generate_report", make_generate_report_node(report_generator))
+    graph.add_node("generate_insight", make_generate_insight_node(insight_generator))
     graph.add_node("validate_candidate", make_validate_candidate_node(model))
     graph.add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
     graph.add_node("collect_analysis_review", make_collect_analysis_review_node())
@@ -880,7 +881,6 @@ def build_graph(
         _route_after_decide,
         {
             "execute_subagent": "execute_subagent",
-            "generate_report": "generate_report",
             "completion_guard": "completion_guard",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
@@ -893,7 +893,7 @@ def build_graph(
         {
             "decide_next_action": "decide_next_action",
             "execute_subagent": "execute_subagent",
-            "generate_report": "generate_report",
+            "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
@@ -903,7 +903,7 @@ def build_graph(
         "execute_subagent",
         _route_after_execute,
         {
-            "generate_report": "generate_report",
+            "generate_insight": "generate_insight",
             "validate_candidate": "validate_candidate",
             "completion_guard": "completion_guard",
             "finalize": "finalize",
@@ -916,7 +916,7 @@ def build_graph(
         {
             "decide_next_action": "decide_next_action",
             "execute_subagent": "execute_subagent",
-            "generate_report": "generate_report",
+            "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
@@ -926,11 +926,11 @@ def build_graph(
         "completion_guard",
         _route_after_completion_guard,
         {
-            "generate_report": "generate_report",
+            "generate_insight": "generate_insight",
             "finalize": "finalize",
         },
     )
-    graph.add_edge("generate_report", "validate_candidate")
+    graph.add_edge("generate_insight", "validate_candidate")
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -1049,8 +1049,6 @@ def _route_after_decide(state: SupervisorState) -> str:
         return "finalize"
 
     next_action = state.get("next_action")
-    if next_action == "call_report_agent":
-        return "generate_report"
     if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     if next_action in {"finalize", "fail"}:
@@ -1066,8 +1064,8 @@ def _route_after_execute(state: SupervisorState) -> str:
         return "validate_candidate"
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") == "call_report_agent":
-        return "generate_report"
+    if state.get("next_action") == "call_insight_agent":
+        return "generate_insight"
     return "completion_guard"
 
 
@@ -1079,8 +1077,8 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
         return "collect_analysis_review"
     if next_action == "decide_next_action":
         return "decide_next_action"
-    if next_action == "call_report_agent":
-        return "generate_report"
+    if next_action == "call_insight_agent":
+        return "generate_insight"
     if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     if next_action in {"finalize", "fail"}:
@@ -1128,8 +1126,8 @@ def _route_after_summarize(state: SupervisorState) -> str:
 
 
 def _route_after_completion_guard(state: SupervisorState) -> str:
-    if state.get("next_action") == "call_report_agent":
-        return "generate_report"
+    if state.get("next_action") == "call_insight_agent":
+        return "generate_insight"
     return "finalize"
 
 
