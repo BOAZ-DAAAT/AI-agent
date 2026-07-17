@@ -11,42 +11,71 @@ key/measure/time/count 컬럼을 확정해 컨텍스트를 갱신한다.
 
 from __future__ import annotations
 
-import json
+import re
 from typing import Optional
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns, usable_time_columns
-from DATA_Analyst_Assistant_Agent.agents.eda.prompts import classify_columns_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
+
+_TIME_NAME_RE = re.compile(
+    r"(^|_)(time|ts|dt|day|month|year)($|_)|(_at$)",
+    re.IGNORECASE,
+)
+
+
+def _candidate_time_columns(df: pd.DataFrame) -> list[str]:
+    candidates: list[str] = []
+    for col in df.columns:
+        dtype = str(df[col].dtype).lower()
+        name = str(col)
+        lowered = name.lower()
+        if (
+            "datetime" in dtype
+            or "date" in lowered
+            or "datetime" in lowered
+            or "timestamp" in lowered
+            or _TIME_NAME_RE.search(name)
+        ):
+            candidates.append(col)
+    return candidates
+
+
+def _safe_usable_time_columns(df: pd.DataFrame, candidate_cols: list[str]) -> tuple[list[str], str, str]:
+    try:
+        cols = usable_time_columns(df, candidate_cols)
+    except Exception as exc:  # noqa: BLE001
+        return [], "skipped_due_error", str(exc)
+    if cols:
+        return cols, "ok", ""
+    return [], "no_usable_time_columns", "No column was suitable for time-series charting."
 
 
 def _classify_columns(df: pd.DataFrame, measure_cols: list) -> dict:
-    """LLM이 컬럼명 + 샘플값을 보고 시간 컬럼 / 표본 수 컬럼을 의미 기반으로 분류."""
-    # 1차: dtype으로 확실한 시간 컬럼 추출
-    obvious_time = [c for c in df.columns if "datetime" in str(df[c].dtype)]
+    """Classify load-time columns without an LLM call."""
+    time_cols, time_status, time_reason = _safe_usable_time_columns(df, _candidate_time_columns(df))
+    return {
+        "time_columns": time_cols,
+        "time_detection_status": time_status,
+        "time_skip_reason": time_reason,
+        "count_column": _select_count_column(df, measure_cols or []),
+    }
 
-    candidate_cols = [c for c in df.columns if c not in (measure_cols or [])]
-    if not candidate_cols:
-        return {"time_columns": usable_time_columns(df, obvious_time), "count_column": ""}
 
-    sample = df[candidate_cols].head(3).to_dict(orient="list")
-    prompt = classify_columns_prompt(list(df.columns), measure_cols, sample)
-
-    try:
-        response = get_llm().invoke(prompt).content.strip()
-        result = safe_json_parse(response, {})
-        time_cols = list(set(obvious_time + result.get("time_columns", [])))
-        count_col = result.get("count_column", "")
-        time_cols = usable_time_columns(df, [c for c in time_cols if c in df.columns])
-        count_col = count_col if count_col in df.columns else ""
-    except Exception:
-        time_cols = usable_time_columns(df, obvious_time)
-        count_col = ""
-
-    return {"time_columns": time_cols, "count_column": count_col}
-
+def _select_count_column(df: pd.DataFrame, measure_cols: list) -> str:
+    measure_set = set(measure_cols or [])
+    markers = ("count", "cnt", "frequency", "qty", "quantity", "num_", "n_")
+    for col in df.columns:
+        lowered = str(col).lower()
+        if col in measure_set and any(marker in lowered for marker in markers):
+            return str(col)
+    for col in df.columns:
+        lowered = str(col).lower()
+        if any(marker in lowered for marker in markers):
+            return str(col)
+    return ""
 
 def _is_meaningless_id(df: pd.DataFrame, col: str) -> bool:
     """컬럼이 UUID/해시처럼 시각화에 무의미한 고유 ID인지 판별."""
@@ -86,8 +115,8 @@ def load_mart_node(state: EDAState) -> dict:
 
     # 입력계약(fixture/향후 SQL)이 컬럼 역할을 미리 채워뒀으면 LLM 분류를 건너뛴다(토큰 절감).
     if ctx.measure_cols and ctx.key_col:
-        obvious_time = [c for c in df.columns if "datetime" in str(df[c].dtype)]
-        ctx.time_cols = ctx.time_cols or obvious_time
+        time_cols, time_status, time_reason = _safe_usable_time_columns(df, _candidate_time_columns(df))
+        ctx.time_cols = ctx.time_cols or time_cols
         ctx.count_col = ctx.count_col or ""
         ctx.question_type = state.get("question_type", "") or ctx.question_type
         ctx.priority_metrics = []
@@ -95,6 +124,8 @@ def load_mart_node(state: EDAState) -> dict:
             "time_columns":    ctx.time_cols,
             "count_column":    ctx.count_col,
             "has_time_column": len(ctx.time_cols) > 0,
+            "time_detection_status": time_status if not ctx.time_cols else "ok",
+            "time_skip_reason": "" if ctx.time_cols else time_reason,
             "error_log":       [],
         }
 
@@ -133,5 +164,7 @@ def load_mart_node(state: EDAState) -> dict:
         "time_columns":    ctx.time_cols,
         "count_column":    ctx.count_col,
         "has_time_column": len(ctx.time_cols) > 0,
+        "time_detection_status": col_meta["time_detection_status"],
+        "time_skip_reason": col_meta["time_skip_reason"],
         "error_log":       [],
     }
