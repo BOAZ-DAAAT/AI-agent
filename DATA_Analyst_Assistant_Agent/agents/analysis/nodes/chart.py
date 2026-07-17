@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from typing import Any, Callable
 
@@ -10,7 +11,9 @@ from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 
 ChartArtifactLoader = Callable[[str], bytes]
-ChartReader = Callable[[dict[str, Any], bytes, dict[str, Any]], dict[str, Any] | str]
+# 배치 시그니처(#194) — chart_images 전체를 한 번에 받아 같은 순서의 결과 리스트를 반환한다.
+# (이전엔 차트 1개당 1번 호출하는 (dict, bytes, state) -> dict|str 시그니처였음)
+ChartReader = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[str, Any] | str]]
 
 
 def decide_chart_inspection(state: dict[str, Any], *, max_charts: int = 3) -> dict[str, Any]:
@@ -63,16 +66,20 @@ def read_chart_artifacts(state: dict[str, Any]) -> dict[str, Any]:
     visual_evidence: list[dict[str, Any]] = list(state.get("visual_evidence", []) or [])
     read_success = False
 
-    for item in state.get("chart_images", []) or []:
-        chart = item["chart"]
-        image_bytes = item["image_bytes"]
+    chart_images = state.get("chart_images", []) or []
+    if chart_images:
         try:
-            raw = reader(chart, image_bytes, state) if reader else _default_multimodal_chart_reader(chart, image_bytes, state)
-            evidence = _coerce_reader_output(chart, raw)
-            visual_evidence.append(evidence)
-            read_success = evidence.get("status") == "read_success" or read_success
+            raw_results = (reader(chart_images, state) if reader
+                           else _default_multimodal_chart_reader(chart_images, state))
+            for item, raw in zip(chart_images, raw_results):
+                evidence = _coerce_reader_output(item["chart"], raw)
+                visual_evidence.append(evidence)
+                read_success = evidence.get("status") == "read_success" or read_success
         except Exception as exc:  # noqa: BLE001
-            visual_evidence.append(_visual_status(chart, "reader_failed", f"{type(exc).__name__}: {exc}"))
+            # 배치 콜 자체가 실패하면 배치 전체를 실패로 기록한다(부분 성공을 가장하지 않음).
+            error_msg = f"{type(exc).__name__}: {exc}"
+            for item in chart_images:
+                visual_evidence.append(_visual_status(item["chart"], "reader_failed", error_msg))
 
     return {
         "visual_evidence": visual_evidence,
@@ -198,30 +205,58 @@ def _select_available_charts(
     return selected
 
 
-def _default_multimodal_chart_reader(chart: dict[str, Any], image_bytes: bytes, state: dict[str, Any]) -> dict[str, Any]:
+def _default_multimodal_chart_reader(
+    chart_images: list[dict[str, Any]], state: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """chart_images 전체를 한 콜에 묶어 멀티모달로 읽는다(#194 — 차트당 1콜이던 걸 배치화).
+
+    각 이미지 바로 앞에 chart_artifact_id를 텍스트로 붙여서 보내고, 응답도 그 id를 키로
+    쓰게 강제한다 — 여러 장이 한 응답에 섞여도 어느 요약이 어느 차트 것인지 매칭이 깨지지
+    않게 하기 위함.
+    """
     if not (os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")):
-        return _visual_status(chart, "reader_unavailable", "GPT multimodal chart reader is not configured.")
+        return [_visual_status(item["chart"], "reader_unavailable",
+                               "GPT multimodal chart reader is not configured.")
+                for item in chart_images]
 
     model = get_chat_model(model_env="CHART_READER_MODEL", default_model="gpt-5")
-    encoded = base64.b64encode(image_bytes).decode("ascii")
     prompt = (
-        "이 차트를 데이터 분석 근거로 읽어줘. "
+        "아래 차트들을 각각 데이터 분석 근거로 읽어줘. "
         "차트 유형, 축/범례, 눈에 띄는 패턴, 이상치/군집/꺾이는 지점, "
         "JSON 통계와 함께 사용할 때의 주의점을 한국어로 간결하게 정리해. "
-        "인과관계는 단정하지 마."
+        "인과관계는 단정하지 마. 각 차트 이미지 바로 앞에 그 식별자(chart_artifact_id)가 "
+        "텍스트로 붙어 있다. 반드시 그 식별자를 키로 쓴 JSON 객체 하나만 출력해라(설명 금지):\n"
+        '{"식별자1": "차트1 요약 텍스트", "식별자2": "차트2 요약 텍스트"}'
     )
-    response = model.invoke([
-        HumanMessage(content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
-        ])
-    ])
-    return {
-        **_chart_identity(chart),
-        "status": "read_success",
-        "multimodal_summary": str(getattr(response, "content", response)),
-        "cautions": ["visual interpretation was produced by a multimodal chart reader"],
-    }
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    ids: list[str] = []
+    for item in chart_images:
+        chart_id = str(item["chart"].get("artifact_id"))
+        ids.append(chart_id)
+        encoded = base64.b64encode(item["image_bytes"]).decode("ascii")
+        content.append({"type": "text", "text": f"[식별자: {chart_id}]"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}})
+
+    response = model.invoke([HumanMessage(content=content)])
+    raw_text = str(getattr(response, "content", response)).replace("```json", "").replace("```", "").strip()
+    parsed = json.loads(raw_text)
+    if not isinstance(parsed, dict):
+        raise ValueError("batch chart reader response is not a JSON object")
+
+    results: list[dict[str, Any]] = []
+    for item, chart_id in zip(chart_images, ids):
+        chart = item["chart"]
+        summary = parsed.get(chart_id)
+        if summary is None:
+            results.append(_visual_status(chart, "reader_failed", "batch response missing this chart's entry"))
+            continue
+        results.append({
+            **_chart_identity(chart),
+            "status": "read_success",
+            "multimodal_summary": str(summary),
+            "cautions": ["visual interpretation was produced by a multimodal chart reader"],
+        })
+    return results
 
 
 def _coerce_reader_output(chart: dict[str, Any], raw: dict[str, Any] | str) -> dict[str, Any]:

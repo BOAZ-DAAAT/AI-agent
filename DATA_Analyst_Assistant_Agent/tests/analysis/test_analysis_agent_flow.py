@@ -246,12 +246,15 @@ def test_agent_reads_chart_when_numeric_summary_loses_shape_information(adapter:
         loaded_artifacts.append(artifact_id)
         return adapter.read_artifact_bytes(artifact_id)
 
-    def reader(chart: dict, image_bytes: bytes, _state: dict) -> dict:
-        return {
-            "status": "read_success",
-            "multimodal_summary": f"{chart['filename']} read with {len(image_bytes)} bytes",
-            "cautions": [],
-        }
+    def reader(chart_images: list[dict], _state: dict) -> list[dict]:
+        return [
+            {
+                "status": "read_success",
+                "multimodal_summary": f"{item['chart']['filename']} read with {len(item['image_bytes'])} bytes",
+                "cautions": [],
+            }
+            for item in chart_images
+        ]
 
     envelope = AnalysisAgent().run(
         state,
