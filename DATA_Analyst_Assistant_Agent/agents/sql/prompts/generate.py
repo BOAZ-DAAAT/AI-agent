@@ -33,6 +33,10 @@ def generate_mart_prompt(state, feedback: str) -> str:
 - CREATE TABLE ... AS SELECT 또는 INSERT INTO ... SELECT 형태만 허용
 - 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
 - source는 실제 존재 테이블만 사용
+- source 테이블에는 schema/database prefix를 절대 붙이지 말 것
+- source 테이블은 customers, orders처럼 bare table name만 사용
+- raw_data.*, source.*, public.*, olist.*, 세션 DB명 prefix는 금지
+- schema prefix가 허용되는 것은 target_table의 {ALLOWED_MART_SCHEMA}.* 뿐
 - 데이터마트는 최종 리포트용 요약 결과보다 재사용 가능한 기반 테이블이어야 함
 - 가능한 한 원본 데이터의 행 수준 grain을 유지
 - 우선 조인, 정제, 표준화, 필수 파생 컬럼 추가로 해결
