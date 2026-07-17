@@ -809,6 +809,44 @@ def test_execute_subagent_runs_only_the_registered_action() -> None:
     assert result["terminal_state"] == "completed"
 
 
+def test_execute_subagent_emits_agent_lifecycle_events() -> None:
+    adapter = FakeSubAgentAdapter()
+    adapter.backend_adapter = RecordingBackendAdapter()
+    state = _state()
+    state["next_action"] = "call_sql_agent"
+    node = make_execute_subagent_node(adapter, None)
+
+    result = node(state)
+
+    assert adapter.calls == ["sql_agent"]
+    assert result["current_step"] == "execute_subagent"
+    event_pairs = [
+        (event["event_type"], event["node_name"])
+        for event in adapter.backend_adapter.events
+    ]
+    assert ("node.started", "sql_agent") in event_pairs
+    assert ("result.staged", "sql_agent") in event_pairs
+    assert ("node.completed", "sql_agent") in event_pairs
+
+
+def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> None:
+    adapter = ContractViolatingSubAgentAdapter()
+    adapter.backend_adapter = RecordingBackendAdapter()
+    state = _state()
+    state["next_action"] = "call_sql_agent"
+    node = make_execute_subagent_node(adapter, None)
+
+    result = node(state)
+
+    assert result["terminal_state"] == "failed_terminal"
+    event_pairs = [
+        (event["event_type"], event["node_name"])
+        for event in adapter.backend_adapter.events
+    ]
+    assert ("node.started", "sql_agent") in event_pairs
+    assert ("node.failed", "sql_agent") in event_pairs
+
+
 def test_execute_subagent_unsupported_action_fails_terminally() -> None:
     state = _state()
     state["next_action"] = "create_plan"
