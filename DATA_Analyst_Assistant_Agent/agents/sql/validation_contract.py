@@ -21,6 +21,28 @@ def _normalized_upper_sql(sql: str) -> str:
     return _normalized_sql(sql).upper()
 
 
+# TRIM(BOTH x FROM y) / EXTRACT(YEAR FROM col) / SUBSTRING(str FROM pos FOR len) 등은
+# ANSI SQL 함수 인자 문법으로 FROM을 쓴다 — 테이블 참조가 아니다. 이 함수 호출 구간을
+# 통째로 마스킹해 뒤따르는 테이블-참조 정규식이 인자 안의 FROM/컬럼명을 오인하지 않게 한다.
+_FROM_ARG_FUNCTION_START = re.compile(r"\b(?:trim|extract|substring|position|overlay)\s*\(")
+
+
+def _mask_from_arg_functions(sql_lower: str) -> str:
+    chars = list(sql_lower)
+    for match in _FROM_ARG_FUNCTION_START.finditer(sql_lower):
+        depth = 1
+        idx = match.end()
+        while idx < len(chars) and depth > 0:
+            if chars[idx] == "(":
+                depth += 1
+            elif chars[idx] == ")":
+                depth -= 1
+            idx += 1
+        for i in range(match.start(), min(idx, len(chars))):
+            chars[i] = " "
+    return "".join(chars)
+
+
 def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
     route_kind = require_route_kind(plan)
     contract = dict(plan.get("validation_contract") or {})
@@ -89,8 +111,10 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
     contract = build_intent_contract(plan)
-    if contract.get("expected_result_shape") == "datamart_creation":
-        return findings
+    # required_aggregations/required_tables는 datamart_creation(comprehensive)에도 그대로
+    # 적용한다 — RFM처럼 "이 파생 집계 컬럼이 마트에 있어야 한다"는 요구를 semantic LLM
+    # 판정에만 맡기지 않고 결정론적으로 먼저 걸러낸다. grouped_aggregate 전용 GROUP BY
+    # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
         if agg.upper() not in sql:
             findings.append({"category": "intent_mismatch", "severity": "error", "retryable": True, "detail": f"질문 의도상 필요한 집계 함수 {agg} 가 SQL에 없습니다."})
@@ -106,13 +130,39 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     return findings
 
 
+def _has_top_level_token(sql: str, tokens: tuple[str, ...]) -> bool:
+    """subquery/서브쿼리(괄호 안)에 갇힌 집계는 최종 마트 grain을 안 건드린다 — fan-out 방지용
+    자식테이블 사전집계(JOIN (SELECT ... GROUP BY ...))가 그 표준 패턴이다. 괄호 깊이 0(가장
+    바깥 SELECT)에 등장하는 토큰만 "마트 전체가 요약본"이라는 증거로 센다."""
+    depth = 0
+    depths: list[int] = []
+    for ch in sql:
+        depths.append(depth)
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+    for token in tokens:
+        start = 0
+        while True:
+            idx = sql.find(token, start)
+            if idx == -1:
+                break
+            if depths[idx] == 0:
+                return True
+            start = idx + 1
+    return False
+
+
 def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, Any], sql_draft: dict[str, Any]) -> list[dict[str, Any]]:
     contract = build_intent_contract(plan)
     if contract.get("expected_result_shape") != "datamart_creation":
         return []
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
-    has_aggregate_summary = any(token in sql for token in ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX("))
+    has_aggregate_summary = _has_top_level_token(
+        sql, ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(")
+    )
     policy = str((mart_design or {}).get("aggregation_policy") or "")
     grain = str((mart_design or {}).get("grain") or "")
     if not grain.strip():
@@ -144,7 +194,7 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
         bare_column_name = column_name.split(".")[-1]
         if not any(bare_column_name in cols for cols in available_columns.values()):
             findings.append({"category": "missing_column", "severity": "error", "retryable": False, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
-    sql_lower = sql.lower()
+    sql_lower = _mask_from_arg_functions(sql.lower())
     for ref in re.findall(r"(?:from|join|into|table)\s+([a-zA-Z_][a-zA-Z0-9_\\.]*)", sql_lower):
         bare_name = ref.split(".")[-1]
         if bare_name in cte_names:
