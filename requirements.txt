@@ -13,6 +13,7 @@ langgraph-checkpoint-sqlite
 langchain-core
 langchain-openai
 langchain-google-genai
+pinecone
 matplotlib
 seaborn
 scikit-learn
