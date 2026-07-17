@@ -443,10 +443,30 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 f"지원하지 않는 subagent action입니다: {action}",
             )
 
+        _emit_run_event(
+            getattr(subagent_adapter, "backend_adapter", None),
+            state,
+            "node.started",
+            f"{agent_name} 실행을 시작했습니다.",
+            node_name=agent_name,
+            metadata={"agent_name": agent_name, "action": action},
+        )
         try:
             tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
         except AgentContractError as exc:
             message = f"{agent_name} 결과의 에이전트 계약 검증에 실패했습니다: {exc}"
+            _emit_run_event(
+                getattr(subagent_adapter, "backend_adapter", None),
+                state,
+                "node.failed",
+                message,
+                node_name=agent_name,
+                metadata={
+                    "agent_name": agent_name,
+                    "action": action,
+                    "reason_code": "agent_contract_mismatch",
+                },
+            )
             failed_agents = list(state.get("failed_agents", []))
             if agent_name not in failed_agents:
                 failed_agents.append(agent_name)
@@ -481,7 +501,23 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
             state,
             "result.staged",
             f"{agent_name} 후보 결과를 격리했습니다.",
-            metadata={"candidate_id": (updates.get("pending_result") or {}).get("candidate_id")},
+            node_name=agent_name,
+            metadata={
+                "agent_name": agent_name,
+                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
+            },
+        )
+        _emit_run_event(
+            getattr(subagent_adapter, "backend_adapter", None),
+            state,
+            "node.completed",
+            f"{agent_name} 실행이 완료되었습니다.",
+            node_name=agent_name,
+            metadata={
+                "agent_name": agent_name,
+                "action": action,
+                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
+            },
         )
         return updates
 
@@ -509,6 +545,14 @@ class _InsightGeneratorAdapter:
 
 def make_generate_insight_node(insight_generator: Any):
     def generate_insight_node(state: SupervisorState) -> SupervisorState:
+        _emit_run_event(
+            getattr(insight_generator, "backend_adapter", None),
+            state,
+            "node.started",
+            "insight_agent 실행을 시작했습니다.",
+            node_name="insight_agent",
+            metadata={"agent_name": "insight_agent", "action": "call_insight_agent"},
+        )
         evidence_ids = artifact_ids_by_agent(state)
         has_evidence = any(
             bool(evidence_ids.get(agent_name))
@@ -541,7 +585,23 @@ def make_generate_insight_node(insight_generator: Any):
             state,
             "result.staged",
             "insight_agent 후보 결과를 격리했습니다.",
-            metadata={"candidate_id": (updates.get("pending_result") or {}).get("candidate_id")},
+            node_name="insight_agent",
+            metadata={
+                "agent_name": "insight_agent",
+                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
+            },
+        )
+        _emit_run_event(
+            getattr(insight_generator, "backend_adapter", None),
+            state,
+            "node.failed" if result.status == "failed" else "node.completed",
+            result.error or "insight_agent 실행이 완료되었습니다.",
+            node_name="insight_agent",
+            metadata={
+                "agent_name": "insight_agent",
+                "action": "call_insight_agent",
+                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
+            },
         )
         return updates
 
@@ -757,6 +817,7 @@ def _emit_run_event(
     event_type: str,
     message: str,
     *,
+    node_name: str = "supervisor",
     artifact_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -768,7 +829,7 @@ def _emit_run_event(
         run_id,
         event_type,
         message,
-        node_name="supervisor",
+        node_name=node_name,
         artifact_ids=artifact_ids,
         metadata=metadata,
     )
