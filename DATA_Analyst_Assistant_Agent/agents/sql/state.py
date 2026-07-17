@@ -230,6 +230,7 @@ class AgentState(TypedDict):
     error: str
     generation_source: str
     generation_failure_reason: str
+    generation_context_diagnostics: List[Dict[str, Any]]
     failed_statement_index: Optional[int]
     failed_statement_sql: str
     failed_sql_component: Optional[Literal["precheck", "main", "postcheck"]]

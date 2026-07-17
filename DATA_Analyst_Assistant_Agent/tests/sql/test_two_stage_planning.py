@@ -10,6 +10,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context, finalize_plan
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes import generate as generate_node
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes.retry import increase_retry
 from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app, route_after_retry
+from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import build_generation_context
 from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import generate_mart_prompt, generate_query_prompt
 from DATA_Analyst_Assistant_Agent.agents.sql.prompts.mart_design import mart_design_prompt
 from DATA_Analyst_Assistant_Agent.agents.sql.state import MartDesign, QuestionPlan
@@ -406,11 +407,13 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
     state = base_state(
         plan={
             **question_payload(),
+            "selected_join_tables": ["customers"],
             "required_columns": ["customers.customer_unique_id"],
             "business_keys": {"customers": "customers.customer_unique_id"},
         }
     )
-    query_prompt = generate_query_prompt(state, "")
+    context_result = build_generation_context(state, "simple", "")
+    query_prompt = generate_query_prompt(context_result.context_json)
     mart_prompt = mart_design_prompt(state)
 
     for prompt_text in (query_prompt, mart_prompt):
@@ -422,7 +425,8 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
 def test_mart_generation_prompt_contains_complete_design_and_postcheck_contract():
     state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
 
-    prompt_text = generate_mart_prompt(state, "")
+    context_result = build_generation_context(state, "comprehensive", "")
+    prompt_text = generate_mart_prompt(context_result.context_json)
 
     for expected in (
         "customer_unique_id × order_id × category",

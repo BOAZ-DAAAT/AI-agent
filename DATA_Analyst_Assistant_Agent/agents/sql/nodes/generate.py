@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
@@ -14,10 +15,25 @@ from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     try_llm_json,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
+from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import build_generation_context
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes.mart_design import (
     _mart_design_failure,
     validate_mart_design_state,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _with_context_diagnostics(
+    state: AgentState,
+    update: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    history = [*(state.get("generation_context_diagnostics") or []), diagnostics]
+    update["generation_context_diagnostics"] = history
+    logger.info("SQL generation context diagnostics", extra={"diagnostics": diagnostics})
+    return update
 
 
 def _generation_failure(
@@ -87,37 +103,60 @@ def generate_sql(state: AgentState):
         )
 
     feedback = retry_feedback_text(state)
-    prompt = (
-        prompts.generate_mart_prompt(state, feedback)
-        if route_kind == "comprehensive"
-        else prompts.generate_query_prompt(state, feedback)
-    )
-    response = try_llm_json(prompt)
-    if not response:
+    try:
+        context_result = build_generation_context(state, route_kind, feedback)
+    except Exception as exc:
         return _generation_failure(
             state,
-            reason_code="llm_empty_response",
-            detail="LLM이 SQL 초안을 반환하지 않았습니다.",
+            reason_code="generation_context_invalid",
+            detail=f"SQL 생성 컨텍스트를 구성하지 못했습니다: {type(exc).__name__}",
             retryable=True,
+        )
+    prompt = (
+        prompts.generate_mart_prompt(context_result.context_json)
+        if route_kind == "comprehensive"
+        else prompts.generate_query_prompt(context_result.context_json)
+    )
+    diagnostics = dict(context_result.diagnostics)
+    diagnostics["final_prompt_chars"] = len(prompt)
+    response = try_llm_json(prompt)
+    if not response:
+        return _with_context_diagnostics(
+            state,
+            _generation_failure(
+                state,
+                reason_code="llm_empty_response",
+                detail="LLM이 SQL 초안을 반환하지 않았습니다.",
+                retryable=True,
+            ),
+            diagnostics,
         )
 
     cleaned = response.strip().replace("```json", "").replace("```", "").strip()
     try:
         parsed = json.loads(cleaned)
     except Exception:
-        return _generation_failure(
+        return _with_context_diagnostics(
             state,
-            reason_code="llm_json_parse_failed",
-            detail="LLM SQL 응답을 JSON으로 파싱하지 못했습니다.",
-            retryable=True,
+            _generation_failure(
+                state,
+                reason_code="llm_json_parse_failed",
+                detail="LLM SQL 응답을 JSON으로 파싱하지 못했습니다.",
+                retryable=True,
+            ),
+            diagnostics,
         )
 
     if not isinstance(parsed, dict):
-        return _generation_failure(
+        return _with_context_diagnostics(
             state,
-            reason_code="llm_json_not_object",
-            detail="LLM SQL 응답이 JSON object가 아닙니다.",
-            retryable=True,
+            _generation_failure(
+                state,
+                reason_code="llm_json_not_object",
+                detail="LLM SQL 응답이 JSON object가 아닙니다.",
+                retryable=True,
+            ),
+            diagnostics,
         )
 
     try:
@@ -127,15 +166,23 @@ def generate_sql(state: AgentState):
             default_business_grain=(state.get("mart_design") or {}).get("grain") or state["plan"].get("grain"),
         )
     except ValueError as exc:
-        return _generation_failure(
+        return _with_context_diagnostics(
             state,
-            reason_code="sql_route_kind_mismatch",
-            detail=str(exc),
-            retryable=True,
+            _generation_failure(
+                state,
+                reason_code="sql_route_kind_mismatch",
+                detail=str(exc),
+                retryable=True,
+            ),
+            diagnostics,
         )
 
-    return {
-        "sql_draft": SQLDraft(**normalized).model_dump(),
-        "generation_source": "repair" if state.get("retry_count", 0) > 0 else "llm",
-        "generation_failure_reason": "",
-    }
+    return _with_context_diagnostics(
+        state,
+        {
+            "sql_draft": SQLDraft(**normalized).model_dump(),
+            "generation_source": "repair" if state.get("retry_count", 0) > 0 else "llm",
+            "generation_failure_reason": "",
+        },
+        diagnostics,
+    )

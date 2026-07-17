@@ -77,6 +77,7 @@ class SQLAgent:
                 "error": "",
                 "generation_source": "llm",
                 "generation_failure_reason": "",
+                "generation_context_diagnostics": [],
                 "failed_statement_index": None,
                 "failed_statement_sql": "",
                 "failed_sql_component": None,

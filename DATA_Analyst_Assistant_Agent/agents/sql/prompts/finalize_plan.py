@@ -25,6 +25,7 @@ def finalize_table_plan_prompt(state) -> str:
 - 제공된 후보 상세 스키마만 근거로 최종 테이블, 컬럼, 비즈니스 키를 결정
 - selected_join_tables와 required_columns는 각각 최소 1개 이상 작성
 - required_columns는 가능한 한 table.column 형식으로 작성
+- required_columns에는 필터, 조인 조건, 최종 출력에 필요한 모든 컬럼을 빠짐없이 포함
 - business_keys는 테이블별 대표 식별자를 기록하고 적절한 키가 없으면 빈 객체 허용
 - 후보 밖의 테이블을 탐색하거나 자동으로 추가하지 말 것
 - 반드시 JSON object만 출력
