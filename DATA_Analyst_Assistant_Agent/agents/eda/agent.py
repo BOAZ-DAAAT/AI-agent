@@ -147,7 +147,7 @@ class EDAAgent:
 
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.
-        set_context(EdaContext(df=df, question_type=state.route_kind or ""))
+        set_context(EdaContext(df=df, question_type=state.route_kind or "", user_question=state.user_query or ""))
         # 앞단이 넘긴 의미 힌트를 EDA로 전달(있으면 줍고 없으면 폴백). 앞단(오케스트레이터)은
         # "매출"/"월"/None 수준이라 대개 비어 옴 → 가설 노드가 priority_metrics로 폴백한다.
         plan = state.plan

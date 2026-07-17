@@ -17,6 +17,23 @@ except Exception:  # noqa: BLE001
         pass
 
 
+def _slim_stat_for_curation(stat: dict) -> dict:
+    """차트 큐레이션 프롬프트엔 statistical_metadata 전체가 아니라 실제로 쓰는 필드만 넘긴다.
+
+    _call_llm_remove의 큐레이션 가이드(질문직답/가설근거/종합비교/순위/클러스터)는
+    correlation_pairs(관계 차트 판단)·group_comparison(bar/heatmap 우선순위)·
+    clustering(cluster_chart_rule 근거)만 참조한다. 컬럼별 distribution 전체 블록·
+    cautions·analysis_constraints 등은 큐레이션 판단에 안 쓰이는데 토큰만 크게
+    차지해서(#194) 여기선 뺀다 — insight/hypothesis로 가는 원본 state는 안 건드림.
+    """
+    clustering = stat.get("clustering", {}) or {}
+    return {
+        "correlation_pairs": stat.get("correlation_pairs", {}),
+        "group_comparison":  stat.get("group_comparison", {}),
+        "clustering":        {k: v for k, v in clustering.items() if k != "cluster_labels"},
+    }
+
+
 def chart_selector_node(state: EDAState) -> dict:
     all_charts = sorted(glob.glob(os.path.join(visualize.OUTPUT_DIR, "*.png")))
     if not all_charts:
@@ -30,7 +47,7 @@ def chart_selector_node(state: EDAState) -> dict:
         "relationship": state.get("relationship_result", ""),
         "time":         state.get("time_result", ""),
     }
-    stat = state.get("statistical_metadata", {})
+    stat = _slim_stat_for_curation(state.get("statistical_metadata", {}))
 
     def _run(ar, st):
         return run_chart_selector_skill(
@@ -48,8 +65,7 @@ def chart_selector_node(state: EDAState) -> dict:
     except RateLimitError:
         truncated = {k: (v[:300] + "...") if isinstance(v, str) and len(v) > 300 else v
                      for k, v in analysis_results.items()}
-        clustering = stat.get("clustering", {})
-        slim_stat = {"clustering": {k: v for k, v in clustering.items() if k != "cluster_labels"}}
+        slim_stat = {"clustering": stat.get("clustering", {})}
         key_charts, captions, visual_debug = _run(truncated, slim_stat)
 
     # key/ 폴더 초기화 후 선별 차트 복사

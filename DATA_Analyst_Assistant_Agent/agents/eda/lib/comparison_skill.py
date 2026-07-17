@@ -14,12 +14,27 @@ from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import (
 )
 
 
+_WORST_FRAMING_KEYWORDS = ("낮은", "저조", "최하위", "나쁜", "부진", "최저", "worst", "lowest", "bottom")
+
+
+def _wants_worst_ranking(user_question: str) -> bool:
+    """질문이 '저조/최하위' 같은 하위권 프레이밍을 명시했는지 (LLM 없이 키워드로 판단).
+
+    bar_bottom은 top과 달리 질문이 하위권을 직접 묻지 않는 한 chart_selector가
+    거의 항상 버린다(#194 실측: 4/4 폐기). 기본은 top_only로 안 만들고,
+    질문이 명시적으로 하위권을 물을 때만 bottom도 생성한다.
+    """
+    q = (user_question or "").casefold()
+    return any(kw in q for kw in _WORST_FRAMING_KEYWORDS)
+
+
 def run_comparison_skill(
     df: pd.DataFrame,
     key_col: str = None,
     measure_cols: list = None,
     question_type: str = "",
     priority_metrics: list = None,
+    user_question: str = "",
 ) -> dict:
     """
     그룹 간 비교 분석 skill.
@@ -47,7 +62,8 @@ def run_comparison_skill(
         # 함수"로 인한 과잉생성 컷(#166). 각 함수의 key_col/자체 게이트 로직은 그대로 둔다.
         numeric_pool = _get_numeric_cols(df, measure_cols, allow_flags=False)
         capped = select_capped_metrics(numeric_pool, priority_metrics, max_n=COMPARISON_FAMILY_CAP)
-        result["top_n_barplot"]  = plot_top_n_barplot(df, key_col=key_col, measure_cols=capped)
+        top_only = not _wants_worst_ranking(user_question)
+        result["top_n_barplot"]  = plot_top_n_barplot(df, key_col=key_col, measure_cols=capped, top_only=top_only)
         result["mean_ci"]        = plot_mean_ci_comparison(df, key_col=key_col, measure_cols=capped)
         result["segment_profile"] = plot_segment_flag_profiles(df, measure_cols=capped)
         result["heatmap_matrix"] = plot_heatmap_matrix(df, key_col=key_col, measure_cols=capped)

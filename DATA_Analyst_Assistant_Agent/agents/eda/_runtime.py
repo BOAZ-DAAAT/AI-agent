@@ -52,6 +52,7 @@ class EdaContext:
     count_col: Optional[str] = None
     target_col: Optional[str] = None                    # 분석 대상(결과변수) — 계약/플래너가 채움
     question_type: str = ""
+    user_question: str = ""                              # 질문 프레이밍 신호(예: '저조/최하위') 판단용
     priority_metrics: list = field(default_factory=list)
     chart_requests: list = field(default_factory=list)  # skill이 발행한 차트 주문서 누적(중복제거됨)
 
