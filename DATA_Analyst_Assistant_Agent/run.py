@@ -24,7 +24,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     SupervisorRunResult,
     SupervisorTerminalState,
 )
-from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
+from DATA_Analyst_Assistant_Agent.shared.config import integrity_result_filename, sql_metadata_dir
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -49,7 +49,7 @@ def _normalize_env_aliases() -> None:
 def _ensure_sql_agent_metadata() -> None:
     data_dir = sql_metadata_dir()
     schema_path = data_dir / "db_schema.json"
-    integrity_path = data_dir / "db_integrity_result.json"
+    integrity_path = data_dir / integrity_result_filename()
     if schema_path.exists() and integrity_path.exists():
         return
 
