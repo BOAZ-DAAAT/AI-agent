@@ -193,7 +193,7 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
         if not _has_required_aggregation(features, agg):
-            findings.append({"category": "intent_mismatch", "severity": "error", "retryable": True, "detail": f"질문 의도상 필요한 집계 함수 {agg} 가 SQL에 없습니다."})
+            findings.append({"category": "intent_mismatch", "severity": "warning", "retryable": True, "detail": f"Required aggregation hint {agg} was not explicitly detected in SQL."})
     dimensions = [str(d) for d in contract.get("dimensions", []) if d]
     if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and not features.top_level_group_by:
         findings.append({"category": "result_shape_mismatch", "severity": "error", "retryable": True, "detail": "그룹 집계 질문인데 GROUP BY가 없습니다."})
@@ -367,9 +367,10 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def retry_feedback_from_findings(findings: list[dict[str, Any]]) -> str:
-    if not findings:
+    error_findings = [item for item in findings if item.get("severity") == "error"]
+    if not error_findings:
         return ""
-    return "검증 실패 유형을 반영해 SQL을 다시 작성하세요. " + " / ".join(str(item.get("detail", "")) for item in findings[:3])
+    return "Rewrite SQL to address validation errors. " + " / ".join(str(item.get("detail", "")) for item in error_findings[:3])
 
 
 def _extract_cte_names(sql: str) -> set[str]:

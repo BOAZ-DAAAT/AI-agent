@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
+    summarize_validation,
     validate_datamart_reusability,
     validate_sql_identifiers,
     validate_sql_intent,
@@ -125,7 +126,7 @@ def test_top_level_group_by_still_flagged_when_policy_preserves_grain() -> None:
 # ── required_aggregations 계약이 comprehensive(datamart_creation)에도 적용된다 (RFM류 파생값 누락) ──
 
 
-def test_missing_required_aggregation_is_caught_for_comprehensive_route() -> None:
+def test_missing_required_aggregation_is_warning_for_comprehensive_route() -> None:
     plan = {
         "route_kind": "comprehensive",
         "required_aggregations": ["SUM", "COUNT", "MAX"],
@@ -138,8 +139,12 @@ def test_missing_required_aggregation_is_caught_for_comprehensive_route() -> Non
 
     findings = validate_sql_intent(plan, sql_draft)
 
-    categories = {f["category"] for f in findings}
-    assert "intent_mismatch" in categories
+    intent_findings = [f for f in findings if f["category"] == "intent_mismatch"]
+    assert intent_findings
+    assert {f["severity"] for f in intent_findings} == {"warning"}
+    summary = summarize_validation(findings)
+    assert summary["result"] == "valid"
+    assert summary["feedback"] == ""
 
 
 def test_present_required_aggregations_pass_for_comprehensive_route() -> None:
@@ -216,7 +221,7 @@ def test_required_aggregation_expressions_are_matched_by_function_semantics() ->
     assert not any(f["category"] == "intent_mismatch" for f in findings)
 
 
-def test_count_distinct_contract_still_flags_plain_count_only() -> None:
+def test_count_distinct_contract_warns_for_plain_count_only() -> None:
     plan = {
         "route_kind": "comprehensive",
         "required_aggregations": ["COUNT_DISTINCT"],
@@ -232,4 +237,5 @@ def test_count_distinct_contract_still_flags_plain_count_only() -> None:
 
     findings = validate_sql_intent(plan, sql_draft)
 
-    assert any(f["category"] == "intent_mismatch" for f in findings)
+    assert any(f["category"] == "intent_mismatch" and f["severity"] == "warning" for f in findings)
+    assert summarize_validation(findings)["result"] == "valid"
