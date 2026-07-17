@@ -34,13 +34,22 @@ class SQLAgent:
         retry_context = state.plan.retry_context if state.plan else None
         clarification_request = ""
         if retry_context:
-            retry_message = retry_context.get("message") or ""
-            retry_query = retry_context.get("query") or ""
-            retry_step = retry_context.get("step") or state.current_step
-            clarification_request = (
-                f"이전 {retry_step} 실패 원인: {retry_message}. "
-                f"문제가 된 SQL: {retry_query}"
-            ).strip()
+            feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")
+            if isinstance(feedback, dict) and (feedback.get("reason") or feedback.get("missing_evidence")):
+                reason = feedback.get("reason") or ""
+                missing = feedback.get("missing_evidence") or []
+                missing_text = (
+                    f" 누락된 근거: {', '.join(str(item) for item in missing)}." if missing else ""
+                )
+                clarification_request = f"이전 시도가 검증에 실패했습니다: {reason}.{missing_text}".strip()
+            else:
+                retry_message = retry_context.get("message") or ""
+                retry_query = retry_context.get("query") or ""
+                retry_step = retry_context.get("step") or state.current_step
+                clarification_request = (
+                    f"이전 {retry_step} 실패 원인: {retry_message}. "
+                    f"문제가 된 SQL: {retry_query}"
+                ).strip()
 
         return app.invoke(
             {

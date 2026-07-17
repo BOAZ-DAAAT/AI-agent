@@ -691,6 +691,94 @@ def test_to_orchestration_state_exposes_analysis_last_failure_in_plan_and_state(
     assert orchestration.plan.retry_context == expected
 
 
+def test_to_orchestration_state_exposes_agent_feedback_from_validation_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="상위 20% 고객군과 일반 고객군의 만족도 분포 차이를 검정해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {"goal": "고객 세그먼트별 만족도 분포 비교"}
+    state["validation_history"] = [
+        {
+            "candidate_id": "cand_1",
+            "validation_id": "val_1",
+            "agent": "eda_agent",
+            "outcome": {
+                "disposition": "recover",
+                "reason": "그룹별 분포 비교 없이 컬럼 나열만 반복함",
+                "reason_code": "semantic_validation_failed",
+            },
+            "checks": [
+                {
+                    "name": "semantic",
+                    "passed": False,
+                    "findings": [],
+                    "details": {"missing_evidence": ["상위20% vs 일반군 기술통계", "유의성 검정 결과"]},
+                }
+            ],
+        },
+        {
+            "candidate_id": "cand_2",
+            "validation_id": "val_2",
+            "agent": "sql_agent",
+            "outcome": {
+                "disposition": "accept",
+                "reason": "정합성 통과",
+                "reason_code": "none",
+            },
+            "checks": [],
+        },
+    ]
+
+    orchestration = to_orchestration_state(state)
+
+    expected_feedback = {
+        "eda_agent": {
+            "reason": "그룹별 분포 비교 없이 컬럼 나열만 반복함",
+            "missing_evidence": ["상위20% vs 일반군 기술통계", "유의성 검정 결과"],
+            "source": "semantic",
+        }
+    }
+    assert orchestration.retry_context["agent_feedback"] == expected_feedback
+    assert orchestration.plan is not None
+    assert orchestration.plan.retry_context["agent_feedback"] == expected_feedback
+    # accept 판정은 재시도 사유가 아니므로 피드백에 섞이면 안 된다
+    assert "sql_agent" not in orchestration.retry_context["agent_feedback"]
+
+
+def test_to_orchestration_state_agent_feedback_keeps_latest_record_per_agent() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="고객 단위 RFM 세그먼트를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {"goal": "고객 단위 RFM"}
+    state["validation_history"] = [
+        {
+            "candidate_id": "cand_1",
+            "validation_id": "val_1",
+            "agent": "sql_agent",
+            "outcome": {"disposition": "recover", "reason": "1차: 주문 단위로 생성됨", "reason_code": "x"},
+            "checks": [{"name": "semantic", "passed": False, "findings": [], "details": {"missing_evidence": []}}],
+        },
+        {
+            "candidate_id": "cand_2",
+            "validation_id": "val_2",
+            "agent": "sql_agent",
+            "outcome": {"disposition": "reject", "reason": "2차: 여전히 주문 단위", "reason_code": "y"},
+            "checks": [],
+        },
+    ]
+
+    orchestration = to_orchestration_state(state)
+
+    feedback = orchestration.retry_context["agent_feedback"]["sql_agent"]
+    assert feedback["reason"] == "2차: 여전히 주문 단위"
+    assert feedback["source"] == "hard_failure"
+
+
 def test_success_promotion_clears_only_matching_agent_failure_streak() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",
