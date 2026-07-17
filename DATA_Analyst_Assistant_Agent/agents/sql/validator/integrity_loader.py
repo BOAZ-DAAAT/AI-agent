@@ -5,12 +5,12 @@ from typing import Any, Iterable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
+from DATA_Analyst_Assistant_Agent.shared.config import integrity_result_filename, sql_metadata_dir
 
 DATA_DIR = sql_metadata_dir()
 
 SCHEMA_JSON_PATH = DATA_DIR / "db_schema.json"
-INTEGRITY_JSON_PATH = DATA_DIR / "db_integrity_result.json"
+INTEGRITY_JSON_PATH = DATA_DIR / integrity_result_filename()
 
 _ISSUE_STATUSES = {"FAIL", "FAILED", "ERROR", "WARNING", "WARN", "ACTION_REQUIRED", "STALE"}
 _FAIL_STATUSES = {"FAIL", "FAILED", "ERROR", "ACTION_REQUIRED"}  # fail_only 모드: 실패만
