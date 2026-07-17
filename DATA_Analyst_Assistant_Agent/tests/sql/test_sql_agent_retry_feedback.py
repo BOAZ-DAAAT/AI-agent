@@ -82,3 +82,17 @@ def test_sql_agent_clarification_empty_without_retry_context(monkeypatch) -> Non
 
     assert fake_app.invoked_with is not None
     assert fake_app.invoked_with["clarification_request"] == ""
+
+
+def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
+    finding = SQLAgent._validation_finding(
+        {
+            "category": "intent_mismatch",
+            "severity": "warning",
+            "retryable": True,
+            "detail": "Required aggregation hint NTILE was not explicitly detected in SQL.",
+        }
+    )
+
+    assert finding.disposition == "limitation"
+    assert finding.retryable is True

@@ -26,6 +26,11 @@ SQL 생성 컨텍스트(compact JSON):
 - 원자적 파생값은 포함할 수 있지만 비율, 순위, 최종 재구매 판정, 카테고리 요약 지표는 생성 금지
 - 질문 분석 결과의 required_columns와 business_keys는 원천 참조와 조인 조건에 사용하되 mart_design을 변경하지 말 것
 - 모호한 기준은 reasoning에 명시
+- Treat integrity_failures/GE failures as data quality guidance, not as automatic table or column bans.
+- Apply an integrity failure only when it is directly related to selected_tables, required_columns, joins, filters, output columns, grain, or aggregation. Ignore unrelated failures.
+- PK/FK/uniqueness failures should guide fanout prevention, pre-aggregation, deduplication, grain checks, and postcheck design; they do not by themselves prohibit using the table.
+- Type/datetime failures should guide CAST or explicit conversion only when the affected column is used in a filter, join, ordering, or calculation.
+- Do not invent schema objects to satisfy integrity failures; use only provided source tables and columns.
 - precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
 - postcheck_sql은 타겟 마트에 대한 단일 SELECT이며 정확히 한 행을 반환
 - postcheck_sql은 전체 행 수 AS row_count, grain_columns 기준 2행 이상인 grain 그룹 수 AS duplicate_grain_count, grain 컬럼 중 하나라도 NULL인 행 수 AS null_grain_count를 모두 제공

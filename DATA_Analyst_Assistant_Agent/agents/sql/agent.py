@@ -319,7 +319,7 @@ class SQLAgent:
     def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
         severity = str(item.get("severity") or "info")
         retryable = bool(item.get("retryable", False))
-        if retryable:
+        if retryable and severity == "error":
             disposition = "retry_required"
         elif severity == "error":
             disposition = "blocking"
