@@ -630,6 +630,23 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             "reason_code": str(analysis_failure.get("reason_code") or "none"),
             "failure_reason": str(analysis_failure.get("failure_reason") or ""),
         }
+    _agent_feedback: dict[str, dict[str, Any]] = {}
+    for record in state.get("validation_history", []):
+        agent = str(record.get("agent") or "")
+        outcome = record.get("outcome") or {}
+        if not agent or outcome.get("disposition") not in {"recover", "reject"}:
+            continue
+        semantic_check = next(
+            (c for c in record.get("checks", []) if c.get("name") == "semantic"), None
+        )
+        details = (semantic_check or {}).get("details") or {}
+        _agent_feedback[agent] = {
+            "reason": str(outcome.get("reason") or ""),
+            "missing_evidence": list(details.get("missing_evidence") or []),
+            "source": "semantic" if semantic_check else "hard_failure",
+        }
+    if _agent_feedback:
+        _retry_context["agent_feedback"] = _agent_feedback
     plan: AnalysisPlan | None = None
     if plan_payload:
         source_sql = str(plan_payload.get("source_sql") or generated_sql) if generated_sql else ""

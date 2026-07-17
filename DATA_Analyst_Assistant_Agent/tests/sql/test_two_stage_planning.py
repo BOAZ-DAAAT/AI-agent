@@ -595,6 +595,7 @@ def test_mart_design_failure_retries_only_design_stage(monkeypatch):
                     route_kind="comprehensive",
                     target_metrics=["매출", "재구매율"],
                     candidate_tables=["customers", "orders", "order_items"],
+                    required_aggregations=["SUM"],
                 ), ensure_ascii=False))
             if "MySQL 물리 테이블 계획자" in prompt_text:
                 calls["final"] += 1

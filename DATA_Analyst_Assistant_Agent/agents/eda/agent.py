@@ -156,6 +156,16 @@ class EDAAgent:
         # GE 정합성 스코핑용 원천 테이블 + grain 교차검증용 선언 grain(있으면 줍고 없으면 폴백).
         plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
         plan_business_grain = (plan.business_grain if plan and plan.business_grain else "") or ""
+        # 수퍼바이저가 직전 시도를 부실 판정했으면(semantic/hard 실패), EDA 자체 재시도 루프
+        # (validator.py → validation_feedback)가 읽는 자리에 초기값으로 심어 재사용한다.
+        retry_context = plan.retry_context if plan and plan.retry_context else {}
+        eda_feedback = (retry_context.get("agent_feedback") or {}).get("eda_agent")
+        initial_validation_feedback = ""
+        if isinstance(eda_feedback, dict):
+            reason = eda_feedback.get("reason") or ""
+            missing = eda_feedback.get("missing_evidence") or []
+            missing_text = f" 누락된 근거: {', '.join(str(item) for item in missing)}." if missing else ""
+            initial_validation_feedback = f"{reason}{missing_text}".strip()
         try:
             from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import clear_output_dirs
             clear_output_dirs()  # 이전 런 누적 PNG 정리(run_eda_only도 이 경로를 타므로 규칙 동일)
@@ -170,6 +180,7 @@ class EDAAgent:
                     "plan_dimension": plan_dimension,
                     "plan_source_tables": plan_source_tables,
                     "plan_business_grain": plan_business_grain,
+                    "validation_feedback": initial_validation_feedback,
                     "error_log": [],
                 }
             )
