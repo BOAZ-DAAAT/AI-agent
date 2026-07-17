@@ -2,32 +2,15 @@
 
 from __future__ import annotations
 
-import json
-
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA
 
 
-def generate_mart_prompt(state, feedback: str) -> str:
+def generate_mart_prompt(generation_context_json: str) -> str:
     return f"""
 너는 MySQL SQL 작성기다. 데이터마트 생성 SQL을 작성한다.
 
-사용자 질문:
-{state['user_question']}
-
-질문 분석 결과:
-{json.dumps(state['plan'], ensure_ascii=False, indent=2)}
-
-마트 설계 결과:
-{json.dumps(state.get('mart_design', {}), ensure_ascii=False, indent=2)}
-
-스키마 JSON:
-{state['schema_text']}
-
-정합성 점검 JSON:
-{state['integrity_text']}
-
-이전 피드백:
-{feedback if feedback else "없음"}
+SQL 생성 컨텍스트(compact JSON):
+{generation_context_json}
 
 규칙:
 - CREATE TABLE ... AS SELECT 형태만 허용
@@ -68,24 +51,12 @@ def generate_mart_prompt(state, feedback: str) -> str:
 """
 
 
-def generate_query_prompt(state, feedback: str) -> str:
+def generate_query_prompt(generation_context_json: str) -> str:
     return f"""
 너는 MySQL SQL 작성기다. 조회 SQL을 작성한다.
 
-사용자 질문:
-{state['user_question']}
-
-질문 분석 결과:
-{json.dumps(state['plan'], ensure_ascii=False, indent=2)}
-
-스키마 JSON:
-{state['schema_text']}
-
-정합성 점검 JSON:
-{state['integrity_text']}
-
-이전 피드백:
-{feedback if feedback else "없음"}
+SQL 생성 컨텍스트(compact JSON):
+{generation_context_json}
 
 규칙:
  - MySQL SELECT SQL만 생성

@@ -218,15 +218,15 @@ def validate_result_shape(plan: dict[str, Any], sql_draft: dict[str, Any], sql_r
         if aliases and first_row_mapping and not any(alias in first_row_mapping for alias in aliases):
             findings.append({"category": "result_shape_mismatch", "severity": "warning", "retryable": True, "detail": f"기대 alias {aliases} 가 결과 컬럼에 없습니다."})
         if first_row is None:
-            findings.append({"category": "empty_result", "severity": "error", "retryable": True, "detail": "단일 집계 결과가 비어 있습니다."})
+            findings.append({"category": "empty_result", "severity": "error", "retryable": False, "detail": "단일 집계 결과가 비어 있습니다."})
     if expected == "grouped_aggregate" and row_count <= 0:
-        findings.append({"category": "empty_result", "severity": "error", "retryable": True, "detail": "그룹 집계 결과가 비어 있습니다."})
+        findings.append({"category": "empty_result", "severity": "error", "retryable": False, "detail": "그룹 집계 결과가 비어 있습니다."})
     if expected == "datamart_creation":
         target_table = sql_draft.get("target_table")
         if not target_table:
-            findings.append({"category": "postcheck_failed", "severity": "error", "retryable": True, "detail": "datamart 생성인데 target_table 이 없습니다."})
+            findings.append({"category": "postcheck_failed", "severity": "error", "retryable": False, "detail": "datamart 생성인데 target_table 이 없습니다."})
         if postcheck_result is None or postcheck_result == []:
-            findings.append({"category": "postcheck_failed", "severity": "warning", "retryable": True, "detail": "datamart postcheck 결과가 없습니다."})
+            findings.append({"category": "postcheck_failed", "severity": "warning", "retryable": False, "detail": "datamart postcheck 결과가 없습니다."})
     return findings
 
 
@@ -244,13 +244,20 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
-    priority = {"sql_generation_failed": 0, "mysql_dialect_error": 1, "missing_table": 2, "missing_column": 3, "intent_mismatch": 4, "result_shape_mismatch": 5, "invalid_join_plan": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_grain_missing": 9, "execution_error": 10}
-    ranked_findings = sorted(findings, key=lambda item: priority.get(str(item.get("category")), 99))
+    priority = {"sql_generation_failed": 0, "mysql_dialect_error": 1, "missing_table": 2, "missing_column": 3, "intent_mismatch": 4, "result_shape_mismatch": 5, "invalid_join_plan": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_policy_mismatch": 9, "mart_grain_missing": 10, "execution_error": 11, "empty_result": 12}
+    ranked_findings = sorted(
+        findings,
+        key=lambda item: (
+            0 if item.get("severity") == "error" else 1,
+            priority.get(str(item.get("category")), 99),
+        ),
+    )
     primary = ranked_findings[0]
     category = primary.get("category", "validation_failed")
     suggested_action = primary.get("suggested_action") or {
         "sql_generation_failed": "regenerate_sql",
         "mysql_dialect_error": "rewrite_mysql_dialect",
+        "route_kind_mismatch": "repair_sql_type",
         "missing_table": "reselect_table",
         "missing_column": "reselect_column",
         "intent_mismatch": "rewrite_for_metric",
@@ -258,6 +265,7 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "invalid_join_plan": "rebuild_join_plan",
         "postcheck_failed": "repair_postcheck",
         "mart_summary_bias": "rewrite_row_preserving_mart",
+        "mart_policy_mismatch": "rewrite_for_mart_policy",
         "mart_grain_missing": "clarify_mart_grain",
     }.get(category, "fix_sql")
     return {

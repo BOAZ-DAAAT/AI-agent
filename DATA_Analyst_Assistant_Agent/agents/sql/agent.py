@@ -69,6 +69,7 @@ class SQLAgent:
                 "plan": {},
                 "mart_design": {},
                 "sql_draft": {},
+                "previous_sql_draft": {},
                 "sql_result": None,
                 "statement_results": [],
                 "row_count": 0,
@@ -85,8 +86,11 @@ class SQLAgent:
                 "error": "",
                 "generation_source": "llm",
                 "generation_failure_reason": "",
+                "generation_context_diagnostics": [],
                 "failed_statement_index": None,
                 "failed_statement_sql": "",
+                "failed_sql_component": None,
+                "execution_error_info": {},
                 "final_answer": "",
             }
         )
@@ -130,6 +134,8 @@ class SQLAgent:
             "generation_failure_reason": result.get("generation_failure_reason") or "",
             "failed_statement_index": result.get("failed_statement_index"),
             "failed_statement_sql": result.get("failed_statement_sql") or "",
+            "failed_sql_component": result.get("failed_sql_component"),
+            "execution_error_info": result.get("execution_error_info") or {},
             "final_answer": result.get("final_answer") or "",
             "source": "main/sql_agent/lang graph",
         }
