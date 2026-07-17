@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
+    summarize_validation,
     validate_datamart_reusability,
     validate_sql_identifiers,
     validate_sql_intent,
@@ -55,6 +56,41 @@ def test_genuine_missing_table_reference_is_still_caught() -> None:
     assert any(f["category"] == "missing_table" and "not_a_real_table" in f["detail"] for f in findings)
 
 
+def test_cte_names_are_not_mistaken_for_missing_schema_tables() -> None:
+    plan = {"route_kind": "comprehensive"}
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_order_rfm_base AS "
+            "WITH payments_agg AS ("
+            "  SELECT order_id, SUM(payment_value) AS order_gross_revenue "
+            "  FROM order_payments GROUP BY order_id"
+            "), "
+            "global_stats AS ("
+            "  SELECT MAX(order_purchase_timestamp) AS max_order_purchase_timestamp FROM orders"
+            "), "
+            "ntile_probe AS ("
+            "  SELECT MAX(tile) AS any_ntile_value FROM ("
+            "    SELECT NTILE(4) OVER (ORDER BY order_purchase_timestamp) AS tile FROM orders"
+            "  ) t"
+            ") "
+            "SELECT o.order_id, p.order_gross_revenue "
+            "FROM orders o "
+            "JOIN payments_agg p ON o.order_id = p.order_id "
+            "CROSS JOIN global_stats gs "
+            "CROSS JOIN ntile_probe np"
+        ),
+        "source_tables": ["orders", "order_payments"],
+    }
+    schema_text = _schema_text(
+        orders=["order_id", "order_purchase_timestamp"],
+        order_payments=["order_id", "payment_value"],
+    )
+
+    findings = validate_sql_identifiers(plan, sql_draft, schema_text)
+
+    assert findings == []
+
+
 # ── 서브쿼리 사전집계(fan-out 방지 JOIN)를 마트 전체 요약으로 오인하지 않는다 ──
 
 
@@ -90,7 +126,7 @@ def test_top_level_group_by_still_flagged_when_policy_preserves_grain() -> None:
 # ── required_aggregations 계약이 comprehensive(datamart_creation)에도 적용된다 (RFM류 파생값 누락) ──
 
 
-def test_missing_required_aggregation_is_caught_for_comprehensive_route() -> None:
+def test_missing_required_aggregation_is_warning_for_comprehensive_route() -> None:
     plan = {
         "route_kind": "comprehensive",
         "required_aggregations": ["SUM", "COUNT", "MAX"],
@@ -103,8 +139,12 @@ def test_missing_required_aggregation_is_caught_for_comprehensive_route() -> Non
 
     findings = validate_sql_intent(plan, sql_draft)
 
-    categories = {f["category"] for f in findings}
-    assert "intent_mismatch" in categories
+    intent_findings = [f for f in findings if f["category"] == "intent_mismatch"]
+    assert intent_findings
+    assert {f["severity"] for f in intent_findings} == {"warning"}
+    summary = summarize_validation(findings)
+    assert summary["result"] == "valid"
+    assert summary["feedback"] == ""
 
 
 def test_present_required_aggregations_pass_for_comprehensive_route() -> None:
@@ -126,3 +166,76 @@ def test_present_required_aggregations_pass_for_comprehensive_route() -> None:
     findings = validate_sql_intent(plan, sql_draft)
 
     assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
+def test_count_distinct_contract_accepts_mysql_count_distinct_syntax() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": ["COUNT_DISTINCT", "SUM", "AVG", "MAX"],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm_with_reviews AS "
+            "SELECT c.customer_unique_id, "
+            "MAX(o.order_purchase_timestamp) AS last_order_purchase_timestamp, "
+            "COUNT(DISTINCT o.order_id) AS frequency_orders_per_customer, "
+            "SUM(op.payment_value) AS monetary_total_payment_value_per_customer, "
+            "AVG(r.review_score) AS average_review_score_per_customer "
+            "FROM orders o "
+            "JOIN customers c ON o.customer_id = c.customer_id "
+            "LEFT JOIN order_payments op ON o.order_id = op.order_id "
+            "LEFT JOIN order_reviews r ON o.order_id = r.order_id "
+            "GROUP BY c.customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
+def test_required_aggregation_expressions_are_matched_by_function_semantics() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": [
+            "COUNT(DISTINCT order_id)",
+            "SUM(payment_value)",
+            "MAX(order_purchase_timestamp)",
+        ],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm AS "
+            "SELECT customer_unique_id, "
+            "COUNT(DISTINCT order_id) AS frequency_orders, "
+            "SUM(payment_value) AS monetary_value, "
+            "MAX(order_purchase_timestamp) AS last_purchase_at "
+            "FROM orders GROUP BY customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert not any(f["category"] == "intent_mismatch" for f in findings)
+
+
+def test_count_distinct_contract_warns_for_plain_count_only() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": ["COUNT_DISTINCT"],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_rfm_with_reviews AS "
+            "SELECT customer_unique_id, COUNT(order_id) AS frequency_orders_per_customer "
+            "FROM orders GROUP BY customer_unique_id"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert any(f["category"] == "intent_mismatch" and f["severity"] == "warning" for f in findings)
+    assert summarize_validation(findings)["result"] == "valid"

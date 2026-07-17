@@ -10,6 +10,12 @@ def plan_prompt(state) -> str:
 사용자 질문:
 {state['user_question']}
 
+Supervisor 계획/재시도 맥락:
+{state.get('planner_selection_reason') or '없음'}
+
+이전 검증/재시도 피드백:
+{state.get('clarification_request') or '없음'}
+
 스키마 JSON:
 {state['schema_text']}
 

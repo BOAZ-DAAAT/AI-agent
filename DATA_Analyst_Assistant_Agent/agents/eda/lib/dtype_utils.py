@@ -55,7 +55,10 @@ def usable_time_columns(df: pd.DataFrame, candidate_cols: list[str]) -> list[str
         s = pd.to_datetime(df[col], errors="coerce").dropna()
         if s.empty or n_rows == 0:
             continue
-        distinct_days = s.dt.floor("D").nunique()
+        # Avoid dt.floor("D") here: on some Windows/Python 3.13 pandas builds it can
+        # crash the interpreter for object-origin datetimes. String day buckets are
+        # slower but safe, and load_mart only needs a small suitability check.
+        distinct_days = s.dt.strftime("%Y-%m-%d").nunique()
         if distinct_days < _MIN_TIME_BUCKETS or distinct_days > n_rows * _MAX_BUCKET_RATIO:
             continue
         out.append(col)
