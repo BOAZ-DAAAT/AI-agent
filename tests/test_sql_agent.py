@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import types
@@ -17,6 +18,7 @@ from data_agent_backend.models.artifacts import ArtifactType
 from data_agent_backend.models.common import BackendError
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, run_sql_self_check
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
+from DATA_Analyst_Assistant_Agent.agents.sql import _runtime as sql_runtime
 from DATA_Analyst_Assistant_Agent.agents.sql import planner as planner_module
 from DATA_Analyst_Assistant_Agent.agents.sql.planner import build_sql_plan, SQLPlan
 from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
@@ -121,6 +123,43 @@ class TestSQLStatementSplit:
             "SELECT 'a;b' AS value;",
             "SELECT 2;",
         ]
+
+
+class TestSQLRuntimeEngineCache:
+    def test_engine_cache_refreshes_when_db_name_changes(self, monkeypatch):
+        class FakeEngine:
+            def __init__(self, db_name: str) -> None:
+                self.db_name = db_name
+                self.disposed = False
+
+            def dispose(self) -> None:
+                self.disposed = True
+
+        created: list[FakeEngine] = []
+
+        def fake_get_db_engine():
+            engine = FakeEngine(os.getenv("DB_NAME", ""))
+            created.append(engine)
+            return engine
+
+        monkeypatch.setattr(sql_runtime, "_engine", None)
+        monkeypatch.setattr(sql_runtime, "_engine_cache_key", None)
+        monkeypatch.setattr(sql_runtime, "get_db_engine", fake_get_db_engine)
+        monkeypatch.setenv("DB_HOST", "127.0.0.1")
+        monkeypatch.setenv("DB_PORT", "3306")
+        monkeypatch.setenv("DB_USER", "root")
+        monkeypatch.setenv("DB_PASSWORD", "")
+
+        monkeypatch.setenv("DB_NAME", "session_a")
+        first = sql_runtime.get_engine()
+        assert sql_runtime.get_engine() is first
+
+        monkeypatch.setenv("DB_NAME", "session_b")
+        second = sql_runtime.get_engine()
+
+        assert second is not first
+        assert first.disposed is True
+        assert [engine.db_name for engine in created] == ["session_a", "session_b"]
 
 
 # ── planner tests ──

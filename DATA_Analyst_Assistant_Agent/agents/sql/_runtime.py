@@ -7,7 +7,7 @@
 [동작 보존 핵심] 기존 모듈은 import 시 `engine = get_db_engine()`,
 `llm = get_chat_model()` 를 즉시 생성했다. 이를 최초 호출 시 1회 생성하는
 메모이즈 접근자로 바꿔 import 부작용(즉시 DB 연결/LLM 생성)을 제거한다.
-"엔진 1개 / LLM 1개" 동작은 그대로 유지된다.
+엔진은 현재 DB 접속 환경값별로 재사용하고, 세션 DB가 바뀌면 새로 만든다.
 """
 
 from __future__ import annotations
@@ -35,13 +35,40 @@ MYSQL_DIALECT_NAME = "MySQL 8.x"
 # 메모이즈 싱글톤 접근자
 # -----------------------------
 _engine = None
+_engine_cache_key = None
 _llm = None
 
 
+def _current_engine_cache_key() -> tuple[str, str, str, str, str]:
+    return (
+        os.getenv("DB_HOST", ""),
+        os.getenv("DB_PORT", "3306"),
+        os.getenv("DB_USER", ""),
+        os.getenv("DB_PASSWORD", ""),
+        os.getenv("DB_NAME", ""),
+    )
+
+
+def reset_engine_cache() -> None:
+    global _engine, _engine_cache_key
+    if _engine is not None:
+        dispose = getattr(_engine, "dispose", None)
+        if callable(dispose):
+            dispose()
+    _engine = None
+    _engine_cache_key = None
+
+
 def get_engine():
-    global _engine
-    if _engine is None:
+    global _engine, _engine_cache_key
+    cache_key = _current_engine_cache_key()
+    if _engine is not None and _engine_cache_key == cache_key:
+        return _engine
+    if _engine is not None:
+        reset_engine_cache()
+    if _engine is None or _engine_cache_key != cache_key:
         _engine = get_db_engine()
+        _engine_cache_key = cache_key if _engine is not None else None
     return _engine
 
 

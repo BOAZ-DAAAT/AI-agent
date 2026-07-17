@@ -84,6 +84,8 @@ def build_session_catalog_summary(session: SessionResponse) -> dict[str, object]
 
 @contextmanager
 def bind_session_database(session: SessionResponse) -> Iterator[None]:
+    from DATA_Analyst_Assistant_Agent.agents.sql._runtime import reset_engine_cache
+
     with _SESSION_ENV_LOCK:
         keys = {
             "MYSQL_HOST": StorageMySQL.HOST,
@@ -100,6 +102,7 @@ def bind_session_database(session: SessionResponse) -> Iterator[None]:
         previous = {key: os.environ.get(key) for key in keys}
         try:
             os.environ.update(keys)
+            reset_engine_cache()
             yield
         finally:
             for key, value in previous.items():
@@ -107,6 +110,7 @@ def bind_session_database(session: SessionResponse) -> Iterator[None]:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+            reset_engine_cache()
 
 
 def launch_agent_run(
