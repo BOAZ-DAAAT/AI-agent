@@ -29,6 +29,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     parse_decision_json_as,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
+    CLARIFY_DECISION_PROMPT,
     DECIDE_NEXT_ACTION_PROMPT,
     EXECUTION_GUARD_DECISION_PROMPT,
     RESULT_VALIDATION_DECISION_PROMPT,
@@ -36,7 +37,6 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     STEP_SUMMARY_DECISION_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
-from DATA_Analyst_Assistant_Agent.supervisor.summarizer import summarize_agent_step
 
 
 @dataclass
@@ -52,7 +52,7 @@ class FakeModel:
 class FencedJsonModel:
     def invoke(self, messages):
         return FakeMessage(
-            '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+            '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
         )
 
 
@@ -89,10 +89,10 @@ def test_parse_decision_json_extracts_next_action() -> None:
 
 def test_parse_decision_json_extracts_fenced_json() -> None:
     decision = parse_decision_json(
-        '판단 결과입니다.\n```json\n{"next_action":"call_report_agent","reason":"분석 완료"}\n```'
+        '판단 결과입니다.\n```json\n{"next_action":"call_analysis_agent","reason":"분석 완료"}\n```'
     )
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
     assert decision.reason == "분석 완료"
 
 
@@ -224,7 +224,7 @@ def test_decide_next_action_uses_model_fenced_json_when_available() -> None:
 
     decision = decide_next_action(state, model=FencedJsonModel())
 
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_analysis_agent"
 
 
 def test_decide_next_action_requires_model() -> None:
@@ -408,14 +408,13 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
     assert len(model.messages) == 2
     assert model.messages[0]["role"] == "system"
     assert model.messages[1]["role"] == "user"
-    assert len(model.messages[1]["content"]) <= 12000
+    assert len(model.messages[1]["content"]) <= 12500
     snapshot = json.loads(model.messages[1]["content"])
     assert snapshot["query"] == "월별 매출 추이를 분석해줘"
     assert snapshot["available_next_actions"] == [
         "call_sql_agent",
         "call_eda_agent",
         "call_analysis_agent",
-        "call_report_agent",
         "finalize",
         "fail",
     ]
@@ -424,7 +423,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "sql_agent",
         "eda_agent",
         "analysis_agent",
-        "report_agent",
+        "insight_agent",
     }
 
 
@@ -432,6 +431,18 @@ def test_prompts_expose_redecision_action_only_to_internal_transition_models() -
     assert "decide_next_action" not in DECIDE_NEXT_ACTION_PROMPT
     assert '"next_action":"decide_next_action"' in RESULT_VALIDATION_DECISION_PROMPT
     assert '"next_action":"decide_next_action"' in STEP_SUMMARY_DECISION_PROMPT
+
+
+def test_clarification_prompt_limits_questions_to_user_owned_ambiguity() -> None:
+    assert "사용자 답변 없이는 실행 방향이나 분석 범위를 확정할 수 없을 때만" in CLARIFY_DECISION_PROMPT
+    assert "데이터/스키마 탐색" in CLARIFY_DECISION_PROMPT
+    assert "하위 에이전트의 휴리스틱" in CLARIFY_DECISION_PROMPT
+    assert "사용할 데이터소스, 테이블, 컬럼, 조인 경로" in CLARIFY_DECISION_PROMPT
+    assert "결과에 기준·가정·한계를 명시" in CLARIFY_DECISION_PROMPT
+    assert '"needs_clarification":false' in CLARIFY_DECISION_PROMPT
+    assert '"needs_clarification":true' in CLARIFY_DECISION_PROMPT
+    assert "RFM과 평균 리뷰점수" in CLARIFY_DECISION_PROMPT
+    assert "최근 매출 추이" in CLARIFY_DECISION_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -527,7 +538,24 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "eda_agent",
         "analysis_agent",
     ]
-    assert all(len(json.dumps(context, ensure_ascii=False)) <= 12000 for context in contexts)
+    assert all(len(json.dumps(context, ensure_ascii=False)) <= 12500 for context in contexts)
+
+
+def test_next_action_context_preserves_capability_role_boundary_text() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+
+    context = build_next_action_context(state)
+    capabilities = {item["agent"]: item for item in context["agent_capabilities"]}
+
+    assert "가설 후보" in capabilities["eda_agent"]["description"]
+    assert "분석 방향" in capabilities["eda_agent"]["when_to_use"]
+    assert "비즈니스 인사이트" in " ".join(capabilities["sql_agent"]["avoid_when"])
+    assert "통계 검정" in capabilities["analysis_agent"]["description"]
 
 
 def test_finalization_context_includes_latest_validation_agent_failure_streak() -> None:
@@ -557,34 +585,6 @@ def test_finalization_context_includes_latest_validation_agent_failure_streak() 
     context = build_finalization_context(state)
 
     assert context["recent_failure_streak"] == analysis_streak
-
-
-def test_summarize_agent_step_is_compact() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="SQL 완료",
-        artifact_ids=["artifact_sql_result"],
-    )
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert summary.step == "execute_subagent"
-    assert summary.agent == "sql_agent"
-    assert summary.action == "call_sql_agent"
-    assert summary.artifact_ids == ["artifact_sql_result"]
-
-
-def test_summarize_agent_step_truncates_summary_to_1000_chars() -> None:
-    result = AgentCompactResult(
-        agent="sql_agent",
-        status="success",
-        summary="가" * 1001,
-        artifact_ids=[],
-    )
-
-    summary = summarize_agent_step("execute_subagent", result, next_action="call_eda_agent")
-
-    assert len(summary.summary) == 1000
 
 
 def test_context_derives_legacy_payload_keys_from_validation_history() -> None:

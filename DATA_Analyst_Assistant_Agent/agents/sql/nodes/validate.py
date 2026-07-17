@@ -14,13 +14,27 @@ def validate_sql_and_result(state: AgentState):
         summary = summarize_validation(existing_findings)
         return {"validation": summary, "validation_findings": existing_findings, "retry_hint": summary.get("retry_hint", {}), "feedback": summary.get("feedback", "")}
     if state.get("error"):
+        error_info = dict(state.get("execution_error_info") or {})
         statement_index = state.get("failed_statement_index")
         statement_sql = (state.get("failed_statement_sql") or "").strip()
-        prefix = f"{statement_index + 1}번 statement 실행 오류" if statement_index is not None else "SQL 실행 오류"
+        component = state.get("failed_sql_component") or error_info.get("component") or "main"
+        prefix = f"{statement_index + 1}번 statement 실행 오류" if statement_index is not None else f"{component} SQL 실행 오류"
         detail = f"{prefix}: {state['error']}"
         if statement_sql:
             detail += f" | 실패 SQL: {statement_sql}"
-        findings = existing_findings + [{"category": "execution_error", "severity": "error", "retryable": True, "detail": detail}]
+        classification = str(error_info.get("classification") or "unknown")
+        category = "missing_table" if classification == "missing_table" else "execution_error"
+        retryable = classification == "repairable_sql" and bool(error_info.get("retryable"))
+        finding = {
+            "category": category,
+            "severity": "error",
+            "retryable": retryable,
+            "detail": detail,
+            "code": error_info.get("error_code") or classification,
+            "suggested_action": "repair_sql" if retryable else "stop_and_surface_error",
+            "details": error_info,
+        }
+        findings = existing_findings + [finding]
         summary = summarize_validation(findings)
         if not summary.get("feedback"):
             summary["feedback"] = f"실행 오류를 해결하도록 SQL을 다시 작성하세요. 실패 원인: {state['error']}."

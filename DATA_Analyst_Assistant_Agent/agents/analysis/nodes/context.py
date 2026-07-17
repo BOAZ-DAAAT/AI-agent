@@ -4,7 +4,11 @@ from typing import Any
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext, AnalysisSelectionResponse
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
+    AnalysisContext,
+    AnalysisSelectionResponse,
+    ReviewRequest,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 
@@ -16,6 +20,7 @@ def build_analysis_context(
     question_type: str | None = None,
     sample_limit: int = 5,
     selection_response: AnalysisSelectionResponse | None = None,
+    review_request: ReviewRequest | None = None,
 ) -> AnalysisContext:
     """Expose only task-relevant data and a small sample to an optional LLM planner."""
 
@@ -69,6 +74,17 @@ def build_analysis_context(
             "reason_code": str(last_failure_payload.get("reason_code") or "none"),
             "failure_reason": str(last_failure_payload.get("failure_reason") or ""),
         }
+    elif isinstance((retry_context.get("agent_feedback") or {}).get("analysis_agent"), dict):
+        # 하드 실패(failure_streaks) 기록이 없을 때만 semantic 검증 피드백으로 폴백한다
+        # (하드 실패가 더 구체적이므로 우선). missing_evidence를 reason_code 없이 텍스트로 합친다.
+        feedback = retry_context["agent_feedback"]["analysis_agent"]
+        reason = str(feedback.get("reason") or "")
+        missing = feedback.get("missing_evidence") or []
+        missing_text = f" 누락된 근거: {', '.join(str(item) for item in missing)}." if missing else ""
+        last_failure = {
+            "reason_code": "semantic_validation_failed",
+            "failure_reason": f"{reason}{missing_text}".strip(),
+        }
     return AnalysisContext(
         user_question=state.user_query,
         goal=state.goal or (plan.goal if plan else state.user_query),
@@ -90,6 +106,7 @@ def build_analysis_context(
         known_data_quality_issues=known_data_quality_issues,
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
         last_failure=last_failure,
+        review_request=review_request,
         selection_response=selection_response,
     )
 

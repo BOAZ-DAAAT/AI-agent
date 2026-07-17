@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import extract_schema_json, schema_tables
+from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
+    extract_schema_json,
+    normalize_sql_draft_columns,
+    require_route_kind,
+    schema_tables,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 
@@ -16,14 +21,39 @@ def _normalized_upper_sql(sql: str) -> str:
     return _normalized_sql(sql).upper()
 
 
+# TRIM(BOTH x FROM y) / EXTRACT(YEAR FROM col) / SUBSTRING(str FROM pos FOR len) 등은
+# ANSI SQL 함수 인자 문법으로 FROM을 쓴다 — 테이블 참조가 아니다. 이 함수 호출 구간을
+# 통째로 마스킹해 뒤따르는 테이블-참조 정규식이 인자 안의 FROM/컬럼명을 오인하지 않게 한다.
+_FROM_ARG_FUNCTION_START = re.compile(r"\b(?:trim|extract|substring|position|overlay)\s*\(")
+
+
+def _mask_from_arg_functions(sql_lower: str) -> str:
+    chars = list(sql_lower)
+    for match in _FROM_ARG_FUNCTION_START.finditer(sql_lower):
+        depth = 1
+        idx = match.end()
+        while idx < len(chars) and depth > 0:
+            if chars[idx] == "(":
+                depth += 1
+            elif chars[idx] == ")":
+                depth -= 1
+            idx += 1
+        for i in range(match.start(), min(idx, len(chars))):
+            chars[i] = " "
+    return "".join(chars)
+
+
 def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    route_kind = require_route_kind(plan)
     contract = dict(plan.get("validation_contract") or {})
-    contract.setdefault("expected_result_shape", plan.get("expected_result_shape") or "table_preview")
+    contract["expected_result_shape"] = (
+        "datamart_creation" if route_kind == "comprehensive" else "table_preview"
+    )
     contract.setdefault("required_columns", list(plan.get("required_columns") or []))
     contract.setdefault("required_aggregations", list(plan.get("required_aggregations") or []))
-    contract.setdefault("required_tables", list(plan.get("selected_join_tables") or plan.get("relevant_tables") or []))
+    contract.setdefault("required_tables", list(plan.get("selected_join_tables") or []))
     contract.setdefault("dimensions", list(plan.get("dimensions") or []))
-    contract.setdefault("target_metric", plan.get("target_metric") or "")
+    contract.setdefault("target_metrics", list(plan.get("target_metrics") or []))
     contract.setdefault("expected_aliases", [])
     contract.setdefault("target_table", None)
     return contract
@@ -33,7 +63,7 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
     findings: list[dict[str, Any]] = []
     sql = sql_draft.get("sql") or ""
     statements = split_sql_statements(sql)
-    route_kind = plan.get("route_kind") or ("comprehensive" if plan.get("task_type") == "data_mart_build" else "simple")
+    route_kind = require_route_kind(plan)
     sql_type = sql_draft.get("sql_type", "select")
     for index, statement in enumerate(statements):
         dialect_issue = mysql_dialect_error(statement)
@@ -56,15 +86,24 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
                     "retryable": True,
                     "detail": f"simple 경로의 {index + 1}번 statement는 SELECT/WITH로 시작해야 합니다.",
                 })
-    if route_kind == "comprehensive" and sql_type == "select":
-        findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "comprehensive 경로에서는 datamart 생성 SQL이 필요합니다."})
-    if route_kind == "comprehensive" and len(statements) > 1:
-        findings.append({
-            "category": "route_kind_mismatch",
-            "severity": "error",
-            "retryable": True,
-            "detail": "comprehensive 경로에서는 단일 datamart 생성 statement만 허용됩니다.",
-        })
+    if route_kind == "comprehensive":
+        if sql_type != "create_table_as":
+            findings.append({"category": "route_kind_mismatch", "severity": "error", "retryable": True, "detail": "comprehensive 경로에서는 create_table_as SQL만 허용됩니다."})
+        if len(statements) != 1:
+            findings.append({
+                "category": "route_kind_mismatch",
+                "severity": "error",
+                "retryable": True,
+                "detail": "comprehensive 경로에서는 단일 datamart 생성 statement만 허용됩니다.",
+            })
+        first_statement = _normalized_upper_sql(statements[0]) if statements else ""
+        if not re.match(r"^CREATE\s+TABLE\s+.+?\s+AS\s+(?:WITH\b|SELECT\b)", first_statement, re.DOTALL):
+            findings.append({
+                "category": "route_kind_mismatch",
+                "severity": "error",
+                "retryable": True,
+                "detail": "comprehensive 경로의 SQL은 CREATE TABLE ... AS SELECT 형식이어야 합니다.",
+            })
     return findings
 
 
@@ -72,8 +111,10 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
     contract = build_intent_contract(plan)
-    if contract.get("expected_result_shape") == "datamart_creation":
-        return findings
+    # required_aggregations/required_tables는 datamart_creation(comprehensive)에도 그대로
+    # 적용한다 — RFM처럼 "이 파생 집계 컬럼이 마트에 있어야 한다"는 요구를 semantic LLM
+    # 판정에만 맡기지 않고 결정론적으로 먼저 걸러낸다. grouped_aggregate 전용 GROUP BY
+    # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
         if agg.upper() not in sql:
             findings.append({"category": "intent_mismatch", "severity": "error", "retryable": True, "detail": f"질문 의도상 필요한 집계 함수 {agg} 가 SQL에 없습니다."})
@@ -89,27 +130,50 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     return findings
 
 
+def _has_top_level_token(sql: str, tokens: tuple[str, ...]) -> bool:
+    """subquery/서브쿼리(괄호 안)에 갇힌 집계는 최종 마트 grain을 안 건드린다 — fan-out 방지용
+    자식테이블 사전집계(JOIN (SELECT ... GROUP BY ...))가 그 표준 패턴이다. 괄호 깊이 0(가장
+    바깥 SELECT)에 등장하는 토큰만 "마트 전체가 요약본"이라는 증거로 센다."""
+    depth = 0
+    depths: list[int] = []
+    for ch in sql:
+        depths.append(depth)
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+    for token in tokens:
+        start = 0
+        while True:
+            idx = sql.find(token, start)
+            if idx == -1:
+                break
+            if depths[idx] == 0:
+                return True
+            start = idx + 1
+    return False
+
+
 def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, Any], sql_draft: dict[str, Any]) -> list[dict[str, Any]]:
     contract = build_intent_contract(plan)
     if contract.get("expected_result_shape") != "datamart_creation":
         return []
     findings: list[dict[str, Any]] = []
     sql = _normalized_upper_sql(sql_draft.get("sql") or "")
-    has_aggregate_summary = any(token in sql for token in ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX("))
-    if not has_aggregate_summary:
-        return findings
-    policy = str((mart_design or {}).get("aggregation_policy") or contract.get("mart_policy") or "prefer_row_preserving")
-    rationale = " ".join(str(value or "") for value in ((mart_design or {}).get("aggregation_rationale"), (mart_design or {}).get("design_reasoning"), sql_draft.get("reasoning")))
-    has_justification = any(token in rationale for token in ("원본 행", "행 수준", "row-level", "row level", "불가피", "정당화", "예외"))
-    base_grain = str((mart_design or {}).get("base_grain") or (mart_design or {}).get("grain") or "")
-    if policy == "prefer_row_preserving" and not has_justification:
-        findings.append({"category": "mart_summary_bias", "severity": "error", "retryable": True, "detail": "datamart가 재사용 가능한 기반 테이블보다 질문 전용 요약 결과에 가깝습니다. 원본 행 수준 유지 전략 또는 집계 정당화가 필요합니다."})
-    elif not base_grain.strip():
-        findings.append({"category": "mart_grain_missing", "severity": "warning", "retryable": True, "detail": "datamart 설계에 base grain 설명이 없습니다."})
+    has_aggregate_summary = _has_top_level_token(
+        sql, ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(")
+    )
+    policy = str((mart_design or {}).get("aggregation_policy") or "")
+    grain = str((mart_design or {}).get("grain") or "")
+    if not grain.strip():
+        findings.append({"category": "mart_grain_missing", "severity": "error", "retryable": True, "detail": "datamart 설계에 공통 분석 grain 설명이 없습니다."})
+    if policy == "preserve_common_grain" and has_aggregate_summary:
+        findings.append({"category": "mart_policy_mismatch", "severity": "error", "retryable": True, "detail": "preserve_common_grain 설계인데 SQL에 집계가 포함되었습니다. 설계 계약에 맞게 SQL을 다시 생성해야 합니다."})
     return findings
 
 
 def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], schema_text: str) -> list[dict[str, Any]]:
+    sql_draft = normalize_sql_draft_columns(sql_draft)
     schema_json = extract_schema_json(schema_text)
     tables = schema_tables(schema_json) if schema_json else {}
     findings: list[dict[str, Any]] = []
@@ -125,18 +189,18 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
     for table_name in candidate_tables:
         bare_name = table_name.split(".")[-1]
         if bare_name not in available_tables and table_name not in available_tables:
-            findings.append({"category": "missing_table", "severity": "error", "retryable": True, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
-    for column_name in [str(c) for c in sql_draft.get("columns_used", []) if c]:
+            findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
+    for column_name in [str(c) for c in sql_draft.get("source_column_refs", []) if c]:
         bare_column_name = column_name.split(".")[-1]
         if not any(bare_column_name in cols for cols in available_columns.values()):
-            findings.append({"category": "missing_column", "severity": "error", "retryable": True, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
-    sql_lower = sql.lower()
+            findings.append({"category": "missing_column", "severity": "error", "retryable": False, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
+    sql_lower = _mask_from_arg_functions(sql.lower())
     for ref in re.findall(r"(?:from|join|into|table)\s+([a-zA-Z_][a-zA-Z0-9_\\.]*)", sql_lower):
         bare_name = ref.split(".")[-1]
         if bare_name in cte_names:
             continue
         if bare_name not in available_tables and not ref.startswith("analytics."):
-            findings.append({"category": "missing_table", "severity": "error", "retryable": True, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
+            findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
     return _dedupe_findings(findings)
 
 
@@ -154,15 +218,15 @@ def validate_result_shape(plan: dict[str, Any], sql_draft: dict[str, Any], sql_r
         if aliases and first_row_mapping and not any(alias in first_row_mapping for alias in aliases):
             findings.append({"category": "result_shape_mismatch", "severity": "warning", "retryable": True, "detail": f"기대 alias {aliases} 가 결과 컬럼에 없습니다."})
         if first_row is None:
-            findings.append({"category": "empty_result", "severity": "error", "retryable": True, "detail": "단일 집계 결과가 비어 있습니다."})
+            findings.append({"category": "empty_result", "severity": "error", "retryable": False, "detail": "단일 집계 결과가 비어 있습니다."})
     if expected == "grouped_aggregate" and row_count <= 0:
-        findings.append({"category": "empty_result", "severity": "error", "retryable": True, "detail": "그룹 집계 결과가 비어 있습니다."})
+        findings.append({"category": "empty_result", "severity": "error", "retryable": False, "detail": "그룹 집계 결과가 비어 있습니다."})
     if expected == "datamart_creation":
         target_table = sql_draft.get("target_table")
         if not target_table:
-            findings.append({"category": "postcheck_failed", "severity": "error", "retryable": True, "detail": "datamart 생성인데 target_table 이 없습니다."})
+            findings.append({"category": "postcheck_failed", "severity": "error", "retryable": False, "detail": "datamart 생성인데 target_table 이 없습니다."})
         if postcheck_result is None or postcheck_result == []:
-            findings.append({"category": "postcheck_failed", "severity": "warning", "retryable": True, "detail": "datamart postcheck 결과가 없습니다."})
+            findings.append({"category": "postcheck_failed", "severity": "warning", "retryable": False, "detail": "datamart postcheck 결과가 없습니다."})
     return findings
 
 
@@ -180,11 +244,20 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
-    priority = {"mysql_dialect_error": 0, "missing_table": 1, "missing_column": 2, "intent_mismatch": 3, "result_shape_mismatch": 4, "invalid_join_plan": 5, "postcheck_failed": 6, "mart_summary_bias": 7, "mart_grain_missing": 8, "execution_error": 9}
-    ranked_findings = sorted(findings, key=lambda item: priority.get(str(item.get("category")), 99))
-    category = ranked_findings[0].get("category", "validation_failed")
-    suggested_action = {
+    priority = {"sql_generation_failed": 0, "mysql_dialect_error": 1, "missing_table": 2, "missing_column": 3, "intent_mismatch": 4, "result_shape_mismatch": 5, "invalid_join_plan": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_policy_mismatch": 9, "mart_grain_missing": 10, "execution_error": 11, "empty_result": 12}
+    ranked_findings = sorted(
+        findings,
+        key=lambda item: (
+            0 if item.get("severity") == "error" else 1,
+            priority.get(str(item.get("category")), 99),
+        ),
+    )
+    primary = ranked_findings[0]
+    category = primary.get("category", "validation_failed")
+    suggested_action = primary.get("suggested_action") or {
+        "sql_generation_failed": "regenerate_sql",
         "mysql_dialect_error": "rewrite_mysql_dialect",
+        "route_kind_mismatch": "repair_sql_type",
         "missing_table": "reselect_table",
         "missing_column": "reselect_column",
         "intent_mismatch": "rewrite_for_metric",
@@ -192,13 +265,20 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "invalid_join_plan": "rebuild_join_plan",
         "postcheck_failed": "repair_postcheck",
         "mart_summary_bias": "rewrite_row_preserving_mart",
+        "mart_policy_mismatch": "rewrite_for_mart_policy",
         "mart_grain_missing": "clarify_mart_grain",
     }.get(category, "fix_sql")
     return {
-        "retryable": any(item.get("retryable", False) for item in findings),
+        "retryable": bool(primary.get("retryable", False)),
         "suggested_action": suggested_action,
         "reason_code": category,
-        "details": {"categories": [item.get("category") for item in ranked_findings], "messages": [item.get("detail") for item in ranked_findings]},
+        "details": {
+            "categories": [item.get("category") for item in ranked_findings],
+            "messages": [item.get("detail") for item in ranked_findings],
+            "primary_code": primary.get("code") or category,
+            "generation_reason_code": (primary.get("code") or category) if category == "sql_generation_failed" else None,
+            "primary_details": dict(primary.get("details") or {}),
+        },
     }
 
 

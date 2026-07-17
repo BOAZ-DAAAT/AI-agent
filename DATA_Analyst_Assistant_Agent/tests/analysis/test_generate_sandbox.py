@@ -14,6 +14,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisIntent,
     AnalysisSelectionResponse,
     GeneratedAnalysisCode,
+    ReviewRequest,
 )
 
 
@@ -152,6 +153,58 @@ def test_generate_prompt_includes_free_text_selection_as_a_binding_constraint() 
     assert "Compare medians, not totals." in model.messages[1].content
 
 
+def test_generate_prompt_includes_full_selected_option_as_binding_constraint() -> None:
+    request = ReviewRequest.model_validate(
+        {
+            "question": "대표값은?",
+            "proposal": "대표값 선택",
+            "options": [
+                {
+                    "id": "mean",
+                    "label": "평균",
+                    "method": "산술 평균",
+                    "impact": "평균을 보고합니다.",
+                    "recommended": False,
+                },
+                {
+                    "id": "median",
+                    "label": "중앙값",
+                    "method": "50% 분위수",
+                    "assumptions": ["순서 통계량 사용 가능"],
+                    "advantages": ["극단값에 강건함"],
+                    "limitations": ["합계와 직접 연결되지 않음"],
+                    "impact": "중앙값과 IQR을 보고합니다.",
+                    "recommended": True,
+                },
+            ],
+            "recommended_option_id": "median",
+        }
+    )
+    context = AnalysisContext(
+        user_question="매출 분석",
+        goal="매출 분석",
+        route_kind="simple",
+        columns=["amount"],
+        review_request=request,
+        selection_response=AnalysisSelectionResponse(selected_option_id="median"),
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="매출 분석"), context, model=model)
+
+    prompt = model.messages[1].content
+    for expected in (
+        "median",
+        "중앙값",
+        "50% 분위수",
+        "순서 통계량 사용 가능",
+        "극단값에 강건함",
+        "합계와 직접 연결되지 않음",
+        "중앙값과 IQR을 보고합니다.",
+    ):
+        assert expected in prompt
+
+
 def test_generate_prompt_exposes_eda_candidates_without_requiring_all_of_them() -> None:
     context = AnalysisContext(
         user_question="compare category revenue",
@@ -172,6 +225,23 @@ def test_generate_prompt_exposes_eda_candidates_without_requiring_all_of_them() 
     assert "EDA exploratory candidates" in human_prompt
     assert "Category B revenue is higher than category A." in human_prompt
     assert "Do not test or report every EDA candidate by default" in human_prompt
+
+
+def test_generate_prompt_specifies_result_contract_shapes() -> None:
+    context = AnalysisContext(
+        user_question="compare price bands",
+        goal="compare price bands",
+        route_kind="simple",
+        columns=["price_band", "review_score"],
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="compare price bands"), context, model=model)
+
+    system_prompt = model.messages[0].content
+    assert "title (str), columns (list[str]), rows (list[dict])" in system_prompt
+    assert "do not use `name`" in system_prompt
+    assert "The `n` value MUST be an integer sample" in system_prompt
 
 
 def test_selection_response_requires_one_choice_or_free_text() -> None:

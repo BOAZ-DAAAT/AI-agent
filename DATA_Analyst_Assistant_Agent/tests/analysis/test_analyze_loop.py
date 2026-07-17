@@ -78,6 +78,14 @@ _REVIEW_CODE = GeneratedAnalysisCode(
     ),
 )
 _BAD_CODE = GeneratedAnalysisCode(rationale="broken", code="result = df['missing'].sum()")
+_BAD_CONTRACT_CODE = GeneratedAnalysisCode(
+    rationale="bad result contract",
+    code=(
+        "result = {'summary': 'bad rows', 'findings': ['bad rows'], "
+        "'statistics': {'n': len(df)}, 'limitations': [], "
+        "'evidence_tables': [{'title': 'bad', 'rows': 'not rows'}]}\n"
+    ),
+)
 
 
 def test_execution_failure_reflects_then_passes() -> None:
@@ -100,6 +108,18 @@ def test_critic_failure_reflects_then_passes() -> None:
     assert outcome.status == "passed"
     assert outcome.attempts == 2
     assert outcome.error_history[0]["stage"] == "critic"
+
+
+def test_fatal_result_contract_failure_reflects_then_passes_before_critic() -> None:
+    gen = _FakeModel([_BAD_CONTRACT_CODE, _GOOD_CODE])
+    crit = _FakeModel([CodeCritique(verdict="pass")])
+
+    outcome = run_analysis(_intent(), _context(), _df(), code_generator_model=gen, critic_model=crit)
+
+    assert outcome.status == "passed"
+    assert outcome.attempts == 2
+    assert outcome.error_history[0]["stage"] == "result_contract"
+    assert "evidence_tables" in outcome.error_history[0]["error"]
 
 
 def test_progress_callback_reports_completed_stages() -> None:

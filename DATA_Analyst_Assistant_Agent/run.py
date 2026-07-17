@@ -18,7 +18,12 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 from dotenv import load_dotenv
 
 from DATA_Analyst_Assistant_Agent import BackendAdapter, SupervisorAgent
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState, SupervisorRunResult, SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    OrchestrationState,
+    SupervisorInterruptPayload,
+    SupervisorRunResult,
+    SupervisorTerminalState,
+)
 from DATA_Analyst_Assistant_Agent.shared.config import sql_metadata_dir
 
 
@@ -117,7 +122,14 @@ def _shell_command(parts: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def _resume_command(args: argparse.Namespace, *, thread_id: str, resume_kind: str) -> str:
+def _resume_command(
+    args: argparse.Namespace,
+    *,
+    thread_id: str,
+    resume_kind: str,
+    approval_id: str | None = None,
+    selection_value: str | None = None,
+) -> str:
     parts = [
         sys.executable,
         "-m",
@@ -129,6 +141,16 @@ def _resume_command(args: argparse.Namespace, *, thread_id: str, resume_kind: st
         parts.extend(["--resume-answer", "..."])
     elif resume_kind == "approval":
         parts.append("--approve")
+    elif resume_kind in {"analysis_option", "analysis_free_text"}:
+        if not approval_id:
+            raise ValueError("analysis review resume command에는 approval_id가 필요합니다.")
+        parts.extend(["--resume-approval-id", approval_id])
+        parts.extend(
+            [
+                "--resume-option-id" if resume_kind == "analysis_option" else "--resume-free-text",
+                selection_value or "...",
+            ]
+        )
     else:
         raise ValueError(f"지원하지 않는 resume_kind입니다: {resume_kind}")
 
@@ -157,7 +179,13 @@ def _approval_resume_metadata(state: OrchestrationState, args: argparse.Namespac
 
 
 def _should_run_interactively(args: argparse.Namespace) -> bool:
-    if args.json or args.resume_answer is not None or args.resume_approved:
+    if (
+        args.json
+        or args.resume_answer is not None
+        or args.resume_approved
+        or getattr(args, "resume_option_id", None) is not None
+        or getattr(args, "resume_free_text", None) is not None
+    ):
         return False
     if args.interactive is not None:
         return bool(args.interactive)
@@ -168,12 +196,57 @@ def _interrupt_summary(result: SupervisorRunResult, args: argparse.Namespace) ->
     if result.interrupt is None:
         return {"kind": result.kind}
     payload = result.interrupt
-    return {
+    summary = {
         "kind": result.kind,
         "interrupt": payload.model_dump(mode="json"),
-        "resume_payload": {"answer": "..."},
-        "resume_command": _resume_command(args, thread_id=payload.thread_id, resume_kind="clarification"),
     }
+    if payload.type == "clarification":
+        summary.update(
+            {
+                "resume_payload": {"answer": "..."},
+                "resume_command": _resume_command(
+                    args, thread_id=payload.thread_id, resume_kind="clarification"
+                ),
+            }
+        )
+        return summary
+    review_request = payload.review_request or {}
+    option_ids = [str(option.get("id") or "") for option in review_request.get("options", [])]
+    option_id = str(review_request.get("recommended_option_id") or "")
+    if option_id not in option_ids:
+        option_id = next((item for item in option_ids if item), "...")
+    summary.update(
+        {
+            "resume_payload": {
+                "approval_id": payload.approval_id,
+                "selected_option_id": option_id,
+            },
+            "resume_command": _resume_command(
+                args,
+                thread_id=payload.thread_id,
+                resume_kind="analysis_option",
+                approval_id=payload.approval_id,
+                selection_value=option_id,
+            ),
+        }
+    )
+    if bool(review_request.get("allow_free_text")):
+        summary.update(
+            {
+                "free_text_resume_payload": {
+                    "approval_id": payload.approval_id,
+                    "free_text": "...",
+                },
+                "free_text_resume_command": _resume_command(
+                    args,
+                    thread_id=payload.thread_id,
+                    resume_kind="analysis_free_text",
+                    approval_id=payload.approval_id,
+                    selection_value="...",
+                ),
+            }
+        )
+    return summary
 
 
 def _print_interrupt_summary(result: SupervisorRunResult, args: argparse.Namespace) -> None:
@@ -188,6 +261,28 @@ def _print_interrupt_summary(result: SupervisorRunResult, args: argparse.Namespa
     print(f"thread_id:  {payload.thread_id}")
     print(f"node:       {payload.node}")
     print(f"question:   {payload.question}")
+    if payload.type == "analysis_review":
+        review_request = payload.review_request or {}
+        print(f"approval_id: {payload.approval_id}")
+        print("\noptions:")
+        for option in review_request.get("options", []):
+            print(f"- {option.get('id')}: {option.get('label')}")
+            print(f"  method: {option.get('method')}")
+            print(f"  assumptions: {option.get('assumptions', [])}")
+            print(f"  advantages: {option.get('advantages', [])}")
+            print(f"  limitations: {option.get('limitations', [])}")
+            print(f"  impact: {option.get('impact')}")
+        metadata = _interrupt_summary(result, args)
+        print("\nresume payload:")
+        print(json.dumps(metadata["resume_payload"], ensure_ascii=False, indent=2))
+        print("\nresume command:")
+        print(metadata["resume_command"])
+        if "free_text_resume_payload" in metadata:
+            print("\nfree text resume payload:")
+            print(json.dumps(metadata["free_text_resume_payload"], ensure_ascii=False, indent=2))
+            print("\nfree text resume command:")
+            print(metadata["free_text_resume_command"])
+        return
     print("\nresume payload:")
     print(json.dumps({"answer": "..."}, ensure_ascii=False, indent=2))
     print("\nresume command:")
@@ -462,23 +557,55 @@ def _list_html(items: list[Any], fallback: str) -> str:
     return "<ul>" + "".join(f"<li>{html.escape(str(item))}</li>" for item in items) + "</ul>"
 
 
-def _metric_cards(cards: list[tuple[str, str]]) -> str:
-    return "".join(
-        f'<div class="metric-card"><div class="metric-value">{html.escape(value)}</div><div class="metric-label">{html.escape(label)}</div></div>'
-        for label, value in cards
-    )
+def _artifact_index(artifacts: dict[str, list[dict[str, Any]]]) -> dict[str, tuple[str, dict[str, Any]]]:
+    """artifact_id → (agent_name, item). eda/insight의 key_charts/charts가 참조하는
+    차트 아티팩트id로 실제 파일을 찾기 위한 용도(어느 agent 버킷에 있는지 몰라도 찾게)."""
+    index: dict[str, tuple[str, dict[str, Any]]] = {}
+    for agent_name, items in artifacts.items():
+        for item in items:
+            artifact_id = str(item.get("artifact_id") or "")
+            if artifact_id:
+                index[artifact_id] = (agent_name, item)
+    return index
+
+
+def _chart_gallery_html(
+    chart_refs: list[Any],
+    artifact_index: dict[str, tuple[str, dict[str, Any]]],
+    *,
+    caption_key: str,
+) -> str:
+    figures = []
+    for ref in chart_refs or []:
+        if not isinstance(ref, dict):
+            continue
+        artifact_id = str(ref.get("artifact_id") or "")
+        agent_name, item = artifact_index.get(artifact_id, (None, None))
+        if not item or not item.get("local_path"):
+            continue
+        image_path = f"artifacts/{agent_name}/{artifact_id}_{Path(item['local_path']).name}"
+        caption = html.escape(str(ref.get(caption_key) or ""))
+        figures.append(
+            f'<figure><img src="{html.escape(image_path)}" alt="{caption}" loading="lazy">'
+            f"<figcaption>{caption}</figcaption></figure>"
+        )
+    if not figures:
+        return ""
+    return f'<div class="chart-gallery">{"".join(figures)}</div>'
 
 
 def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, Any]]]) -> str:
     sql_item = _first_artifact(artifacts, "sql_agent", "sql_result")
     sql_plan = _artifact_json(_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result"))
+    eda = _artifact_json(_first_artifact(artifacts, "eda_agent", "eda_summary"))
     analysis = _artifact_json(_first_artifact(artifacts, "analysis_agent", "analysis_result"))
+    insight = _artifact_json(_first_artifact(artifacts, "insight_agent", "insight_payload"))
     columns, rows = _read_csv_artifact(sql_item)
+    artifact_index = _artifact_index(artifacts)
 
-    final_answer = str(sql_plan.get("final_answer") or sql_plan.get("preview", {}).get("final_answer") or "")
-    if not final_answer:
-        preview = (_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result") or {}).get("preview", {})
-        final_answer = str(preview.get("final_answer") or "")
+    # 인사이트가 있으면(파이프라인이 정상 종료됐다면 항상 있음) 그게 진짜 최종 답변이다.
+    # SQL의 final_answer는 인사이트가 없을 때(예: 실패/중단된 실행)에만 보조로 쓴다.
+    final_answer = str(insight.get("answer") or "") or str(sql_plan.get("final_answer") or "")
 
     artifact_rows = []
     for agent_name, items in artifacts.items():
@@ -492,17 +619,30 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
                 "</tr>"
             )
 
-    chart_preview = {}
-    encoding = chart_preview.get("encoding", {}) if isinstance(chart_preview, dict) else {}
-    x_field = ((encoding.get("x") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
-    y_field = ((encoding.get("y") or {}).get("field") if isinstance(encoding, dict) else "") or "unknown"
-    chart_type = "not_generated"
-    chart_title = "Visualization artifact not generated"
-    chart_body = "<p>Visualization is disabled as a separate agent in the current flow.</p>"
+    eda_final_summary = str(eda.get("final_summary") or "")
+    eda_hypotheses = str(eda.get("hypotheses") or "")
+    eda_cautions = eda.get("cautions") or []
 
-    key_findings = analysis.get("key_findings") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("key_findings") or []
-    limitations = analysis.get("limitations") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("limitations") or []
-    method = analysis.get("method_summary") or (_first_artifact(artifacts, "analysis_agent") or {}).get("preview", {}).get("method_summary") or ""
+    # 필드명 확인: analysis_result의 실제 요약 필드는 method_summary가 아니라
+    # executive_summary다(agents/analysis/agent.py::_public_result_payload).
+    key_findings = analysis.get("key_findings") or []
+    limitations = analysis.get("limitations") or []
+    method = str(analysis.get("executive_summary") or "")
+
+    key_insights = insight.get("key_insights") or []
+    action_plan = insight.get("action_plan") or []
+    insight_limitations = insight.get("limitations") or []
+
+    # 차트는 EDA/인사이트가 실제로 등록한 이미지를 그대로 보여준다(하드코딩 placeholder 없음).
+    chart_gallery = _chart_gallery_html(eda.get("key_charts") or [], artifact_index, caption_key="caption")
+    chart_gallery += _chart_gallery_html(insight.get("charts") or [], artifact_index, caption_key="title")
+    if not chart_gallery:
+        # 등록된 차트 아티팩트가 하나도 없으면, SQL 결과 표에서라도 간단한 추세 차트를 시도한다.
+        numeric_columns = [c for c in columns if any(_coerce_float(row.get(c)) is not None for row in rows)]
+        if columns and numeric_columns:
+            chart_gallery = _chart_svg(columns, rows, columns[0], numeric_columns[0])
+        else:
+            chart_gallery = "<p>표시할 차트 아티팩트가 없습니다.</p>"
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -526,11 +666,11 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     .table-wrap {{ overflow-x: auto; }}
     .badge {{ display: inline-block; background: #e8f0fe; color: #174ea6; border-radius: 999px; padding: 3px 10px; font-size: 12px; }}
     .bullet {{ margin-left: 12px; }}
-    .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }}
-    .metric-card {{ background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }}
-    .metric-value {{ font-size: 19px; font-weight: 700; color: #111827; }}
-    .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 4px; }}
     .chart-wrap {{ overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; margin-top: 14px; padding: 10px; }}
+    .chart-gallery {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 14px; }}
+    .chart-gallery figure {{ margin: 0; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; background: #fff; }}
+    .chart-gallery img {{ width: 100%; height: auto; border-radius: 4px; }}
+    .chart-gallery figcaption {{ font-size: 12px; color: #6b7280; margin-top: 6px; }}
     svg {{ width: 100%; min-width: 680px; height: auto; }}
     .axis {{ stroke: #9ca3af; stroke-width: 1; }}
     .grid {{ stroke: #e5e7eb; stroke-width: 1; }}
@@ -560,6 +700,15 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     </section>
 
     <section>
+      <h2>EDA Findings</h2>
+      <p>{html.escape(eda_final_summary or "EDA 요약이 생성되지 않았습니다(이 경로에서는 EDA가 생략됐을 수 있습니다).")}</p>
+      <h3>Hypotheses</h3>
+      <p>{html.escape(eda_hypotheses) if eda_hypotheses else "표시할 가설이 없습니다."}</p>
+      <h3>Cautions</h3>
+      {_list_html(eda_cautions, "표시할 주의 사항이 없습니다.")}
+    </section>
+
+    <section>
       <h2>Analysis Insights</h2>
       <p>{html.escape(str(method or "분석 요약이 생성되지 않았습니다."))}</p>
       <h3>Key Findings</h3>
@@ -569,13 +718,19 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     </section>
 
     <section>
+      <h2>Key Insights &amp; Action Plan</h2>
+      <p>인사이트 에이전트가 SQL/EDA/분석 근거를 종합해 도출한 실행 제안입니다.</p>
+      <h3>Key Insights</h3>
+      {_list_html(key_insights, "표시할 핵심 인사이트가 없습니다.")}
+      <h3>Action Plan</h3>
+      {_list_html(action_plan, "제안된 실행 계획이 없습니다.")}
+      <h3>Limitations</h3>
+      {_list_html(insight_limitations, "표시할 제한 사항이 없습니다.")}
+    </section>
+
+    <section>
       <h2>Visualization</h2>
-      <div class="metric-grid">
-        {_metric_cards([("Chart type", str(chart_type)), ("X field", str(x_field)), ("Y field", str(y_field))])}
-      </div>
-      <p><strong>Title:</strong> {html.escape(str(chart_title))}</p>
-      {chart_body}
-      <p>이번 실행에서는 Vega-Lite 차트 스펙도 artifact로 저장되었습니다.</p>
+      {chart_gallery}
     </section>
 
     <section>
@@ -755,6 +910,11 @@ def _handle_interactive_result(
             if result.interrupt is None:
                 raise RuntimeError("interrupt 결과에 payload가 없습니다.")
             _print_interrupt_summary(result, args)
+            if result.interrupt.type == "analysis_review":
+                resume_payload = _interactive_analysis_review_payload(result.interrupt)
+                result = supervisor.resume(result.interrupt.thread_id, resume_payload)
+                query_for_summary = "[resume analysis review]"
+                continue
             answer = input("\n답변: ").strip()
             if not answer:
                 raise SystemExit("답변이 비어 있습니다.")
@@ -777,6 +937,34 @@ def _handle_interactive_result(
 
         _handle_result(adapter, result, args, query_for_summary=query_for_summary)
         return
+
+
+def _interactive_analysis_review_payload(
+    payload: SupervisorInterruptPayload,
+) -> dict[str, str]:
+    review_request = payload.review_request or {}
+    option_ids = {
+        str(option.get("id") or "")
+        for option in review_request.get("options", [])
+        if option.get("id")
+    }
+    allow_free_text = bool(review_request.get("allow_free_text"))
+    while True:
+        answer = input("\noption ID 또는 의견: ").strip()
+        if not answer:
+            print("입력이 비어 있습니다. 다시 입력해 주세요.")
+            continue
+        if answer in option_ids:
+            return {
+                "approval_id": str(payload.approval_id or ""),
+                "selected_option_id": answer,
+            }
+        if allow_free_text:
+            return {
+                "approval_id": str(payload.approval_id or ""),
+                "free_text": answer,
+            }
+        print("허용된 option ID를 입력해 주세요.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -807,6 +995,21 @@ def build_parser() -> argparse.ArgumentParser:
         dest="resume_approved",
         action="store_true",
         help="Resume a pending approval state. Use the same --thread-id from the waiting run.",
+    )
+    parser.add_argument(
+        "--resume-option-id",
+        default=None,
+        help="Analysis review에서 선택할 option ID.",
+    )
+    parser.add_argument(
+        "--resume-free-text",
+        default=None,
+        help="Analysis review에 제출할 자유 의견.",
+    )
+    parser.add_argument(
+        "--resume-approval-id",
+        default=None,
+        help="Analysis review interrupt의 approval ID.",
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary.")
     parser.add_argument("--show-sql", action="store_true", help="Print generated SQL in text output.")
@@ -846,18 +1049,49 @@ def main() -> None:
             raise SystemExit("--resume-answer cannot be empty.")
 
     resume_approved = bool(args.resume_approved)
-    is_resume_mode = resume_answer is not None or resume_approved
-    if resume_answer is not None and resume_approved:
-        raise SystemExit("--resume-answer and --approve cannot be used together.")
+    resume_option_id = (
+        str(args.resume_option_id).strip() if args.resume_option_id is not None else None
+    )
+    resume_free_text = (
+        str(args.resume_free_text).strip() if args.resume_free_text is not None else None
+    )
+    resume_approval_id = (
+        str(args.resume_approval_id).strip() if args.resume_approval_id is not None else None
+    )
+    if resume_option_id == "":
+        raise SystemExit("--resume-option-id cannot be empty.")
+    if resume_free_text == "":
+        raise SystemExit("--resume-free-text cannot be empty.")
+    resume_modes = [
+        resume_answer is not None,
+        resume_approved,
+        resume_option_id is not None,
+        resume_free_text is not None,
+    ]
+    is_resume_mode = any(resume_modes)
+    if sum(resume_modes) > 1:
+        raise SystemExit(
+            "--resume-answer, --approve, --resume-option-id, --resume-free-text cannot be used together."
+        )
+    if resume_option_id is not None or resume_free_text is not None:
+        if not resume_approval_id:
+            raise SystemExit("--resume-approval-id is required for analysis review resume.")
+    elif resume_approval_id is not None:
+        raise SystemExit(
+            "--resume-approval-id is only allowed with --resume-option-id or --resume-free-text."
+        )
     if args.interactive is True and args.json:
         raise SystemExit("--interactive cannot be used with --json.")
     if is_resume_mode:
         if not args.thread_id:
-            raise SystemExit("--thread-id is required when using --resume-answer or --approve.")
+            raise SystemExit(
+                "--thread-id is required when using --resume-answer, --approve, "
+                "--resume-option-id, or --resume-free-text."
+            )
         if args.query:
-            raise SystemExit("--resume-answer/--approve cannot be used with a positional query.")
+            raise SystemExit("resume options cannot be used with a positional query.")
         if args.datasource_id is not None:
-            raise SystemExit("--resume-answer/--approve cannot be used with --datasource-id.")
+            raise SystemExit("resume options cannot be used with --datasource-id.")
 
     load_dotenv(args.dotenv)
     _normalize_env_aliases()
@@ -872,6 +1106,20 @@ def main() -> None:
     if resume_approved:
         result = supervisor.resume(args.thread_id, {"approved": True})
         _handle_result(adapter, result, args, query_for_summary="[resume approved]")
+        return
+    if resume_option_id is not None:
+        result = supervisor.resume(
+            args.thread_id,
+            {"approval_id": resume_approval_id, "selected_option_id": resume_option_id},
+        )
+        _handle_result(adapter, result, args, query_for_summary="[resume analysis option]")
+        return
+    if resume_free_text is not None:
+        result = supervisor.resume(
+            args.thread_id,
+            {"approval_id": resume_approval_id, "free_text": resume_free_text},
+        )
+        _handle_result(adapter, result, args, query_for_summary="[resume analysis free text]")
         return
 
     query = args.query or input("Query: ").strip()

@@ -18,7 +18,10 @@ from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.supervisor.checkpoint import open_sqlite_checkpointer
 from DATA_Analyst_Assistant_Agent.supervisor.graph import build_graph
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
-from DATA_Analyst_Assistant_Agent.supervisor.reporting import SupervisorReportGenerator
+from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
+    AnalysisReviewResumePayload,
+    validate_analysis_review_resume,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
@@ -79,32 +82,131 @@ class SupervisorAgent:
             raise
 
     def resume(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
-        if "answer" in resume_payload:
-            return self._resume_clarification(thread_id, resume_payload)
-        if resume_payload.get("approved") is not True:
-            raise ValueError("resume payload는 {'answer': '...'} 또는 {'approved': True} 형식이어야 합니다.")
-
         config = {"configurable": {"thread_id": thread_id}}
         with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
             graph = self._build_runtime_graph(checkpointer)
-            checkpoint_values = self._checkpoint_values_from_graph(graph, config)
-            if checkpoint_values is None:
-                result = graph.invoke(Command(resume=resume_payload), config)
-            else:
+            snapshot = graph.get_state(config) if hasattr(graph, "get_state") else None
+            checkpoint_values = getattr(snapshot, "values", None)
+            if snapshot is None:
+                normalized_payload, resumed_from = self._validated_unchecked_resume(resume_payload)
+                result = graph.invoke(Command(resume=normalized_payload), config)
+            elif isinstance(checkpoint_values, dict):
                 run_id = self._current_run_id_from_values(checkpoint_values)
                 if not run_id:
                     raise ValueError(f"thread_id={thread_id!r}에 해당하는 checkpoint를 찾지 못했습니다.")
-                if not isinstance(checkpoint_values.get("pending_approval"), dict):
-                    raise ValueError(f"thread_id={thread_id!r}는 승인 대기 상태가 아닙니다.")
-                self.adapter.update_run_status(
-                    run_id,
-                    RunStatus.running,
-                    metadata={"resumed_from": "approval"},
-                )
-                result = self._resume_synthetic_approval(graph, config, resume_payload, checkpoint_values)
-                if result is None:
-                    raise ValueError(f"thread_id={thread_id!r}의 승인 대기 상태를 재개할 수 없습니다.")
+                interrupts = self._interrupt_payloads_from_snapshot(snapshot)
+                if len(interrupts) > 1:
+                    raise ValueError("활성 interrupt는 정확히 하나여야 합니다.")
+                if interrupts:
+                    interrupt_payload = interrupts[0]
+                    if interrupt_payload.run_id != run_id or interrupt_payload.thread_id != thread_id:
+                        raise ValueError("활성 interrupt와 checkpoint 식별자가 일치하지 않습니다.")
+                    if interrupt_payload.type == "clarification":
+                        pending_approval = checkpoint_values.get("pending_approval")
+                        if (
+                            interrupt_payload.node != "collect_clarification"
+                            or checkpoint_values.get("next_action") == "collect_analysis_review"
+                            or (
+                                isinstance(pending_approval, dict)
+                                and pending_approval.get("review_request") is not None
+                            )
+                        ):
+                            raise ValueError("clarification interrupt와 checkpoint state가 불일치합니다.")
+                        normalized_payload = {
+                            "answer": self._validated_clarification_answer(resume_payload)
+                        }
+                        resumed_from = "clarification"
+                    else:
+                        normalized_payload = self._validated_analysis_review_resume(
+                            resume_payload,
+                            interrupt_payload,
+                            checkpoint_values,
+                        )
+                        resumed_from = "analysis_review"
+                    self.adapter.update_run_status(
+                        run_id,
+                        RunStatus.running,
+                        metadata={"resumed_from": resumed_from},
+                    )
+                    result = graph.invoke(Command(resume=normalized_payload), config)
+                else:
+                    if set(resume_payload) != {"approved"} or resume_payload.get("approved") is not True:
+                        raise ValueError("일반 승인 resume payload는 정확히 {'approved': True}여야 합니다.")
+                    pending_approval = checkpoint_values.get("pending_approval")
+                    if not isinstance(pending_approval, dict):
+                        raise ValueError(f"thread_id={thread_id!r}는 승인 대기 상태가 아닙니다.")
+                    if pending_approval.get("review_request") is not None:
+                        raise ValueError("analysis review interrupt가 없는 구조화 승인은 재개할 수 없습니다.")
+                    resumed_from = "approval"
+                    self.adapter.update_run_status(
+                        run_id,
+                        RunStatus.running,
+                        metadata={"resumed_from": resumed_from},
+                    )
+                    result = self._resume_synthetic_approval(
+                        graph,
+                        config,
+                        {"approved": True},
+                        checkpoint_values,
+                    )
+                    if result is None:
+                        raise ValueError(f"thread_id={thread_id!r}의 승인 대기 상태를 재개할 수 없습니다.")
+            else:
+                raise ValueError(f"thread_id={thread_id!r}에 해당하는 checkpoint를 찾지 못했습니다.")
         return self._update_run_status_from_resume_result(result)
+
+    @classmethod
+    def _validated_unchecked_resume(
+        cls,
+        resume_payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        if set(resume_payload) == {"answer"}:
+            return {"answer": cls._validated_clarification_answer(resume_payload)}, "clarification"
+        if set(resume_payload) == {"approved"} and resume_payload.get("approved") is True:
+            return {"approved": True}, "approval"
+        raise ValueError(
+            "resume payload는 {'answer': '...'}, {'approved': True}, 또는 활성 analysis review 형식이어야 합니다."
+        )
+
+    def _validated_analysis_review_resume(
+        self,
+        resume_payload: dict[str, Any],
+        interrupt_payload: SupervisorInterruptPayload,
+        checkpoint_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        pending_approval = checkpoint_values.get("pending_approval")
+        pending_result = checkpoint_values.get("pending_result")
+        if interrupt_payload.node != "collect_analysis_review":
+            raise ValueError("analysis review interrupt와 checkpoint state가 불일치합니다.")
+        if not isinstance(pending_approval, dict) or not isinstance(pending_result, dict):
+            raise ValueError("analysis review 대기 상태가 손상되었습니다.")
+        if pending_approval.get("approval_id") != interrupt_payload.approval_id:
+            raise ValueError("analysis review approval_id가 interrupt와 일치하지 않습니다.")
+        if pending_approval.get("review_request") != interrupt_payload.review_request:
+            raise ValueError("analysis review request가 interrupt와 checkpoint에서 다릅니다.")
+        normalized = AnalysisReviewResumePayload.model_validate(resume_payload)
+        decision = validate_analysis_review_resume(
+            normalized,
+            pending_approval=pending_approval,
+            pending_candidate_id=str(pending_result.get("candidate_id") or ""),
+            review_request=interrupt_payload.review_request or {},
+        )
+        expected_hashes = dict(pending_approval.get("content_hashes") or {})
+        candidate_hashes = dict(pending_result.get("content_hashes") or {})
+        if not expected_hashes or expected_hashes != candidate_hashes:
+            raise ValueError("analysis review 대상의 content hash가 유효하지 않습니다.")
+        for artifact_id, expected_hash in expected_hashes.items():
+            try:
+                artifact = self.adapter.get_artifact(artifact_id)
+            except Exception as exc:
+                raise ValueError("analysis review 대상의 content hash를 확인할 수 없습니다.") from exc
+            if str(getattr(artifact, "content_hash", "") or "") != str(expected_hash):
+                raise ValueError("analysis review 대상의 content hash가 변경되었습니다.")
+        return AnalysisReviewResumePayload(
+            approval_id=decision.approval_id,
+            selected_option_id=decision.selection_response.selected_option_id,
+            free_text=decision.selection_response.free_text,
+        ).model_dump(mode="json", exclude_none=True)
 
     def _resume_clarification(self, thread_id: str, resume_payload: dict[str, Any]) -> Any:
         answer = self._validated_clarification_answer(resume_payload)
@@ -240,8 +342,7 @@ class SupervisorAgent:
             ) or "finalize",
             "run_events": events,
         }
-        agent_name = str((pending_result.get("result") or {}).get("agent") or "")
-        anchor = "generate_report" if agent_name == "report_agent" else "execute_subagent"
+        anchor = "execute_subagent"
         updates["current_step"] = anchor
         returned_config = graph.update_state(config, updates, as_node=anchor)
         return graph.invoke(None, returned_config or config)
@@ -252,7 +353,6 @@ class SupervisorAgent:
             "sql_agent": "call_sql_agent",
             "eda_agent": "call_eda_agent",
             "analysis_agent": "call_analysis_agent",
-            "report_agent": "call_report_agent",
         }.get(str(agent_name))
 
     def _update_run_status_from_resume_result(self, result: Any) -> Any:
@@ -286,7 +386,6 @@ class SupervisorAgent:
     def _build_runtime_graph(self, checkpointer: Any):
         return build_graph(
             SubAgentAdapter(backend_adapter=self.adapter),
-            report_generator=SupervisorReportGenerator(self.adapter),
             model=self._decision_model(),
             checkpointer=checkpointer,
         )
@@ -352,12 +451,25 @@ class SupervisorAgent:
         interrupts = output.get("__interrupt__") or ()
         if not interrupts:
             return None
+        if len(interrupts) != 1:
+            raise ValueError("활성 interrupt는 정확히 하나여야 합니다.")
         first_interrupt = interrupts[0]
         raw_payload = getattr(first_interrupt, "value", first_interrupt)
         return SupervisorInterruptPayload.model_validate(raw_payload)
 
     @staticmethod
+    def _interrupt_payloads_from_snapshot(snapshot: Any) -> list[SupervisorInterruptPayload]:
+        payloads: list[SupervisorInterruptPayload] = []
+        for task in getattr(snapshot, "tasks", ()) or ():
+            for item in getattr(task, "interrupts", ()) or ():
+                raw_payload = getattr(item, "value", item)
+                payloads.append(SupervisorInterruptPayload.model_validate(raw_payload))
+        return payloads
+
+    @staticmethod
     def _validated_clarification_answer(resume_payload: dict[str, Any]) -> str:
+        if set(resume_payload) != {"answer"}:
+            raise ValueError("clarification resume payload는 정확히 {'answer': '...'}여야 합니다.")
         answer = str(resume_payload.get("answer") or "").strip()
         if not answer:
             raise ValueError("clarification resume payload의 answer는 비어 있을 수 없습니다.")

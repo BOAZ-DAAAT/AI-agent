@@ -34,13 +34,22 @@ class SQLAgent:
         retry_context = state.plan.retry_context if state.plan else None
         clarification_request = ""
         if retry_context:
-            retry_message = retry_context.get("message") or ""
-            retry_query = retry_context.get("query") or ""
-            retry_step = retry_context.get("step") or state.current_step
-            clarification_request = (
-                f"이전 {retry_step} 실패 원인: {retry_message}. "
-                f"문제가 된 SQL: {retry_query}"
-            ).strip()
+            feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")
+            if isinstance(feedback, dict) and (feedback.get("reason") or feedback.get("missing_evidence")):
+                reason = feedback.get("reason") or ""
+                missing = feedback.get("missing_evidence") or []
+                missing_text = (
+                    f" 누락된 근거: {', '.join(str(item) for item in missing)}." if missing else ""
+                )
+                clarification_request = f"이전 시도가 검증에 실패했습니다: {reason}.{missing_text}".strip()
+            else:
+                retry_message = retry_context.get("message") or ""
+                retry_query = retry_context.get("query") or ""
+                retry_step = retry_context.get("step") or state.current_step
+                clarification_request = (
+                    f"이전 {retry_step} 실패 원인: {retry_message}. "
+                    f"문제가 된 SQL: {retry_query}"
+                ).strip()
 
         return app.invoke(
             {
@@ -53,9 +62,14 @@ class SQLAgent:
                 "integrity_dataset_name": state.datasource_id or "default",
                 "integrity_preplan": {},
                 "integrity_refresh": {},
+                "schema_refresh": {},
+                "question_plan": {},
+                "final_table_plan": {},
+                "planning_stages": {},
                 "plan": {},
                 "mart_design": {},
                 "sql_draft": {},
+                "previous_sql_draft": {},
                 "sql_result": None,
                 "statement_results": [],
                 "row_count": 0,
@@ -71,9 +85,12 @@ class SQLAgent:
                 "feedback": "",
                 "error": "",
                 "generation_source": "llm",
-                "fallback_reason": "",
+                "generation_failure_reason": "",
+                "generation_context_diagnostics": [],
                 "failed_statement_index": None,
                 "failed_statement_sql": "",
+                "failed_sql_component": None,
+                "execution_error_info": {},
                 "final_answer": "",
             }
         )
@@ -105,14 +122,20 @@ class SQLAgent:
 
         plan_payload = {
             "plan": result.get("plan") or {},
+            "planning_stages": result.get("planning_stages") or {
+                "question_plan": result.get("question_plan") or {},
+                "final_table_plan": result.get("final_table_plan") or {},
+            },
             "mart_design": result.get("mart_design") or {},
             "sql_draft": sql_draft,
             "statement_results": result.get("statement_results") or [],
             "validation": result.get("validation") or {},
             "generation_source": result.get("generation_source") or "llm",
-            "fallback_reason": result.get("fallback_reason") or "",
+            "generation_failure_reason": result.get("generation_failure_reason") or "",
             "failed_statement_index": result.get("failed_statement_index"),
             "failed_statement_sql": result.get("failed_statement_sql") or "",
+            "failed_sql_component": result.get("failed_sql_component"),
+            "execution_error_info": result.get("execution_error_info") or {},
             "final_answer": result.get("final_answer") or "",
             "source": "main/sql_agent/lang graph",
         }
@@ -230,14 +253,23 @@ class SQLAgent:
                 detail=f"row_count={result_row_count}.",
             ),
         ]
-        fallback_used = bool(result.get("generation_source") in {"fallback", "hard_fallback"} and result.get("retry_count", 0) > 0)
-        if result.get("generation_source") in {"fallback", "hard_fallback"}:
+        fallback_used = False
+        if result.get("generation_source") == "failed":
             checks.append(
                 LocalCheck(
                     name="main_sql_agent_generation_source",
-                    passed=not fallback_used,
-                    severity="warning" if fallback_used else "info",
-                    detail=f"generation_source={result.get('generation_source')} reason={result.get('fallback_reason') or 'none'}",
+                    passed=False,
+                    severity="error",
+                    detail=f"generation_source=failed reason={result.get('generation_failure_reason') or 'none'}",
+                )
+            )
+        elif result.get("generation_source") == "repair":
+            checks.append(
+                LocalCheck(
+                    name="main_sql_agent_generation_source",
+                    passed=True,
+                    severity="info",
+                    detail="generation_source=repair",
                 )
             )
         if validation.get("result") == "invalid":

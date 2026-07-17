@@ -1,4 +1,5 @@
 import os
+import glob
 import json
 import re
 import pandas as pd
@@ -9,7 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import categorical_object_columns, usable_time_columns
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "all")
 KEY_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs", "key")
@@ -25,6 +26,17 @@ def set_output_dirs(grain_dir: str):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(KEY_DIR,    exist_ok=True)
 
+
+def clear_output_dirs():
+    """이전 런이 outputs/all·key에 남긴 PNG를 지운다 — 런마다 무한 누적되는 것 방지.
+
+    app.invoke() 시작 전, 런당 1회만 호출한다(모듈 import 시나 plot 함수 내부에서 호출하면
+    다른 런/테스트가 같은 프로세스에서 동시에 그린 파일까지 지울 수 있어 위험하다).
+    """
+    for d in (OUTPUT_DIR, KEY_DIR):
+        for f in glob.glob(os.path.join(d, "*.png")):
+            os.remove(f)
+
 # ─────────────────────────────
 # 공통 스타일 설정
 # ─────────────────────────────
@@ -34,6 +46,26 @@ PALETTE_ACCENT = "#DD8452"
 PALETTE_NEG    = "#C44E52"
 PALETTE_POS    = "#55A868"
 PALETTE_SEQ    = "Blues"
+PALETTE_SOFT   = "#8DA0CB"
+GRID_COLOR     = "#D8DEE9"
+TEXT_MUTED     = "#5B6574"
+FACE_COLOR     = "#F8FAFC"
+
+sns.set_theme(
+    style="whitegrid",
+    context="notebook",
+    rc={
+        "axes.facecolor": "#FFFFFF",
+        "figure.facecolor": FACE_COLOR,
+        "grid.color": GRID_COLOR,
+        "grid.linewidth": 0.7,
+        "axes.edgecolor": "#D5DBE3",
+        "axes.labelcolor": "#1F2937",
+        "xtick.color": "#374151",
+        "ytick.color": "#374151",
+        "font.family": ["DejaVu Sans", "sans-serif"],
+    },
+)
 
 
 # ─────────────────────────────
@@ -42,6 +74,12 @@ PALETTE_SEQ    = "Blues"
 #   플래그는 '그룹별 비율'(집계 차트의 mean)로만 의미가 있다.
 # ─────────────────────────────
 _ID_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|seq|sequential|idx|index)($|_)", re.IGNORECASE)
+# r_quartile/f_quartile/m_quartile처럼 연속값을 몇 구간으로 나눠 만든 순서형 파생 컬럼 —
+# dtype은 수치형이라 통과되지만 산점도로 그리면 몇 개 수평 줄로 눌려 보여 정보량이 낮고,
+# 대개 원본 컬럼(예: monetary_value)에서 파생돼 사실상 중복 정보다(#166 실측 피드백).
+_ORDINAL_BUCKET_NAME_RE = re.compile(
+    r"(_quartile|_quantile|_decile|_percentile|_tier|_bucket|_bin|_grade|_rank)$", re.IGNORECASE
+)
 _KEY_MAX_CARDINALITY = 50            # 이보다 범주가 많으면 차트 라벨 축으로 부적합(ID급)
 _MAX_PLOT_POINTS = 8000              # raw 포인트 차트(violin·scatter·box) 렌더 샘플 상한 — 96k행 렌더 폭증 방지
 
@@ -73,10 +111,12 @@ def _is_id_like_numeric(col: str, s: pd.Series) -> bool:
 
 
 def _valid_cat_col(df: pd.DataFrame, col, max_card: int = _KEY_MAX_CARDINALITY):
-    """차트 라벨 축으로 쓸 범주 컬럼 검증 — 없거나 고카디널리티(고객ID 96k 등)면 None."""
+    """차트 라벨 축으로 쓸 범주 컬럼 검증 — 없거나 고카디널리티(고객ID 96k 등)거나
+    상수(스냅샷 anchor_date처럼 그룹이 1개뿐)면 None."""
     if not col or col not in df.columns:
         return None
-    if df[col].nunique(dropna=True) > max_card:
+    n = df[col].nunique(dropna=True)
+    if n > max_card or n < 2:
         return None
     return col
 
@@ -89,6 +129,22 @@ def _pick_key_col(df: pd.DataFrame, key_col=None, max_card: int = _KEY_MAX_CARDI
     for c in categorical_object_columns(df):
         if _valid_cat_col(df, c, max_card):
             return c
+    return None
+
+
+# 집계 마트(고객 단위 RFM 등)는 범주형 컬럼이 없어 _pick_key_col이 None을 반환하기 쉽다.
+# 이 경우 0/1 세그먼트 플래그를 그룹 키로 쓴다 — 우선순위: 복합 세그먼트 > 단일 세그먼트 > 기타 flag.
+_FLAG_KEY_PRIORITY = ("is_high_value_low_satisfaction", "is_high_value", "is_low_satisfaction")
+
+
+def _pick_flag_key_col(df: pd.DataFrame):
+    """범주형 그룹 키가 없을 때 쓸 0/1 플래그 컬럼을 우선순위대로 고른다. 없으면 None."""
+    for col in _FLAG_KEY_PRIORITY:
+        if col in df.columns and _is_binary_flag(df[col].dropna()) and df[col].nunique(dropna=True) >= 2:
+            return col
+    for col in df.columns:
+        if str(col).lower().startswith("is_") and _is_binary_flag(df[col].dropna()) and df[col].nunique(dropna=True) >= 2:
+            return col
     return None
 
 
@@ -135,16 +191,88 @@ def _normalize_with_direction(sub: pd.DataFrame, numeric_cols: list) -> pd.DataF
             normalized[col] = 1 - normalized[col]
     return normalized
 
-def _apply_style(ax, title, xlabel="", ylabel=""):
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
+def _pretty_label(label: str) -> str:
+    return str(label).replace("_", " ").strip()
+
+
+def _ellipsize(value, max_len: int = 18) -> str:
+    text = str(value)
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _flag_group_label(flag_col: str, value) -> str:
+    """0/1 플래그를 그룹 키로 쓸 때, 값 대신 사람이 읽을 라벨을 만든다.
+
+    is_high_value_low_satisfaction 같은 flag는 그룹핑 후 값이 그냥 0/1로 남아 축 라벨이
+    "0", "1"로만 보인다(#166 실측 피드백 — 어떤 그룹 비교인지 안 읽힘). 컬럼명에서 뜻을
+    뽑아 1=해당 세그먼트, 0=Rest로 표기한다.
+    """
+    name = _pretty_label(re.sub(r"^is_", "", str(flag_col)))
+    try:
+        is_positive = float(value) == 1.0
+    except (TypeError, ValueError):
+        return str(value)
+    return name.capitalize() if is_positive else "Rest"
+
+
+_BADGE_POSITIONS = {
+    "upper right": (0.99, 0.98, "right", "top"),
+    "upper left":  (0.01, 0.98, "left",  "top"),
+    "lower right": (0.99, 0.02, "right", "bottom"),
+    "lower left":  (0.01, 0.02, "left",  "bottom"),
+}
+
+
+def _add_stat_badge(ax, lines: list[str], loc: str = "upper right"):
+    if not lines:
+        return
+    x, y, ha, va = _BADGE_POSITIONS.get(loc, _BADGE_POSITIONS["upper right"])
+    ax.text(
+        x,
+        y,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        ha=ha,
+        va=va,
+        fontsize=8,
+        color=TEXT_MUTED,
+        bbox={
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#FFFFFF",
+            "edgecolor": "#D9E2EC",
+            "alpha": 0.96,
+        },
+    )
+
+
+def _apply_style(ax, title, xlabel="", ylabel="", subtitle: str = "", grid_axis: str = "y"):
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=18, loc="left")
+    if subtitle:
+        ax.text(0.0, 1.005, subtitle, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=9, color=TEXT_MUTED)
     if xlabel:
-        ax.set_xlabel(xlabel, fontsize=10)
+        ax.set_xlabel(_pretty_label(xlabel), fontsize=10)
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_ylabel(_pretty_label(ylabel), fontsize=10)
     ax.tick_params(axis="both", labelsize=9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.6)
+    ax.spines["left"].set_color("#D5DBE3")
+    ax.spines["bottom"].set_color("#D5DBE3")
+    ax.grid(axis=grid_axis, linestyle="--", linewidth=0.7, alpha=0.5)
+    if grid_axis == "y":
+        ax.grid(axis="x", visible=False)
+    elif grid_axis == "x":
+        ax.grid(axis="y", visible=False)
+
+
+def _format_category_ticks(ax, rotation: int = 30, max_len: int = 18, axis: str = "x"):
+    if axis == "x":
+        labels = [_ellipsize(t.get_text(), max_len) for t in ax.get_xticklabels()]
+        ax.set_xticklabels(labels, rotation=rotation, ha="right", fontsize=8.5)
+    else:
+        labels = [_ellipsize(t.get_text(), max_len) for t in ax.get_yticklabels()]
+        ax.set_yticklabels(labels, fontsize=8.5)
 
 
 # ─────────────────────────────
@@ -170,19 +298,74 @@ def plot_distributions(df: pd.DataFrame, measure_cols: list = None) -> dict:
         log_x = stats[col]["skewness"] > 2 and float(s.min()) >= 0
         plot_s = np.log1p(s) if log_x else s
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.hist(plot_s, bins=25, color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.85)
+        sns.histplot(plot_s, bins=28, kde=True, stat="count",
+                     color=PALETTE_MAIN, edgecolor="white", linewidth=0.6, alpha=0.72, ax=ax)
         mean_v = np.log1p(float(s.mean())) if log_x else float(s.mean())
         med_v = np.log1p(float(s.median())) if log_x else float(s.median())
         ax.axvline(mean_v, color=PALETTE_ACCENT, linestyle="--", linewidth=1.4, label=f"mean={stats[col]['mean']}")
         ax.axvline(med_v,  color=PALETTE_NEG,    linestyle=":",  linewidth=1.4, label=f"median={stats[col]['median']}")
         ax.legend(fontsize=8, frameon=False)
-        _apply_style(ax, f"Distribution: {col}" + (" (log1p)" if log_x else ""),
-                     xlabel=(f"log1p({col})" if log_x else col), ylabel="Count")
+        _apply_style(
+            ax,
+            f"Distribution: {_pretty_label(col)}" + (" (log1p)" if log_x else ""),
+            xlabel=(f"log1p({col})" if log_x else col),
+            ylabel="Count",
+            subtitle="Histogram with density overlay for shape and tail inspection",
+        )
+        _add_stat_badge(ax, [
+            f"median {stats[col]['median']:.2f}",
+            f"IQR {(float(s.quantile(0.75)) - float(s.quantile(0.25))):.2f}",
+            f"skew {stats[col]['skewness']:.2f}",
+        ])
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"dist_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
         plt.close(fig)
         paths.append(path)
+    return {"chart_paths": paths, "stats": stats}
+
+
+def plot_ecdfs(df: pd.DataFrame, measure_cols: list = None) -> dict:
+    """수치형 컬럼 ECDF. 분위수와 꼬리 분포를 빠르게 보여준다."""
+    paths = []
+    stats = {}
+    for col in _get_numeric_cols(df, measure_cols, allow_flags=False):
+        s = df[col].dropna()
+        if len(s) < 5:
+            continue
+        log_x = float(s.skew()) > 2 and float(s.min()) >= 0
+        plot_s = np.log1p(s) if log_x else s
+        q50 = float(np.log1p(s.quantile(0.5))) if log_x else float(s.quantile(0.5))
+        q90 = float(np.log1p(s.quantile(0.9))) if log_x else float(s.quantile(0.9))
+        q99 = float(np.log1p(s.quantile(0.99))) if log_x else float(s.quantile(0.99))
+        fig, ax = plt.subplots(figsize=(7, 4.2))
+        sns.ecdfplot(plot_s, ax=ax, color=PALETTE_MAIN, linewidth=2.2)
+        ax.axvline(q50, color=PALETTE_ACCENT, linestyle="--", linewidth=1.2)
+        ax.axvline(q90, color=PALETTE_POS, linestyle=":", linewidth=1.2)
+        ax.axvline(q99, color=PALETTE_NEG, linestyle=":", linewidth=1.2)
+        _apply_style(
+            ax,
+            f"ECDF: {_pretty_label(col)}" + (" (log1p)" if log_x else ""),
+            xlabel=(f"log1p({col})" if log_x else col),
+            ylabel="Cumulative share",
+            subtitle="Percentile curve to expose concentration and long-tail behavior",
+        )
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+        _add_stat_badge(ax, [
+            f"p50 {float(s.quantile(0.5)):.2f}",
+            f"p90 {float(s.quantile(0.9)):.2f}",
+            f"p99 {float(s.quantile(0.99)):.2f}",
+        ])
+        fig.tight_layout()
+        path = os.path.join(OUTPUT_DIR, f"ecdf_{col}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=120)
+        plt.close(fig)
+        paths.append(path)
+        stats[col] = {
+            "p50": round(float(s.quantile(0.5)), 4),
+            "p90": round(float(s.quantile(0.9)), 4),
+            "p99": round(float(s.quantile(0.99)), 4),
+        }
     return {"chart_paths": paths, "stats": stats}
 
 
@@ -205,7 +388,7 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
         fig, ax = plt.subplots(figsize=(5, 5))
         s_plot = _plot_sample(np.log1p(s) if log_y else s)
         bp = ax.boxplot(
-            s_plot, vert=True, patch_artist=True,
+            s_plot, orientation="vertical", patch_artist=True,
             boxprops=dict(facecolor=PALETTE_MAIN, alpha=0.6, linewidth=1.2),
             medianprops=dict(color=PALETTE_ACCENT, linewidth=2),
             whiskerprops=dict(linewidth=1.2),
@@ -213,9 +396,18 @@ def plot_boxplots(df: pd.DataFrame, measure_cols: list = None) -> dict:
             flierprops=dict(marker="o", color=PALETTE_NEG, alpha=0.5, markersize=4),
         )
         ax.set_xticks([])
-        _apply_style(ax, f"Boxplot: {col}" + (" (log1p)" if log_y else ""),
-                     ylabel=(f"log1p({col})" if log_y else col))
+        _apply_style(
+            ax,
+            f"Boxplot: {_pretty_label(col)}" + (" (log1p)" if log_y else ""),
+            ylabel=(f"log1p({col})" if log_y else col),
+            subtitle="Median, spread and outlier fences at a glance",
+        )
         ax.grid(axis="x", visible=False)
+        _add_stat_badge(ax, [
+            f"Q1 {stats[col]['q1']:.2f}",
+            f"median {stats[col]['median']:.2f}",
+            f"Q3 {stats[col]['q3']:.2f}",
+        ])
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"box_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -246,7 +438,7 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
         log_y = stats[col]["skewness"] > 2 and float(s.min()) >= 0  # 왜도 처방 소비
         fig, ax = plt.subplots(figsize=(5, 6))
         parts = ax.violinplot(_plot_sample(np.log1p(s) if log_y else s).values,
-                              vert=True, showmedians=True, showextrema=True)
+                              orientation="vertical", showmedians=True, showextrema=True)
         parts["cmedians"].set_color(PALETTE_ACCENT)
         parts["cmedians"].set_linewidth(2)
         for pc in parts["bodies"]:
@@ -254,8 +446,17 @@ def plot_violins(df: pd.DataFrame, measure_cols: list = None) -> dict:
             pc.set_alpha(0.6)
             pc.set_edgecolor("white")
         ax.set_xticks([])
-        _apply_style(ax, f"Violin: {col}" + (" (log1p)" if log_y else ""),
-                     ylabel=(f"log1p({col})" if log_y else col))
+        _apply_style(
+            ax,
+            f"Violin: {_pretty_label(col)}" + (" (log1p)" if log_y else ""),
+            ylabel=(f"log1p({col})" if log_y else col),
+            subtitle="Shape-aware distribution view with density width",
+        )
+        _add_stat_badge(ax, [
+            f"median {stats[col]['median']:.2f}",
+            f"IQR {stats[col]['iqr']:.2f}",
+            f"std {stats[col]['std']:.2f}",
+        ])
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"violin_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -287,7 +488,14 @@ def plot_category_distribution(df: pd.DataFrame, top_n: int = 20,
         for bar, val in zip(bars, vc.values):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(vc.values) * 0.01,
                     f"{val:,}", ha="center", va="bottom", fontsize=7.5)
-        _apply_style(ax, f"Category Distribution: {col}", ylabel="Count")
+        _apply_style(
+            ax,
+            f"Category Distribution: {_pretty_label(col)}",
+            ylabel="Count",
+            subtitle="Top categories ranked by observed frequency",
+        )
+        _format_category_ticks(ax, rotation=35, max_len=16)
+        _add_stat_badge(ax, [f"categories {int(df[col].nunique())}", f"top1 share {float(vc.iloc[0] / max(len(df[col].dropna()), 1)):.1%}"])
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"catdist_{col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -327,7 +535,7 @@ def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, m
                 continue
             fig, ax = plt.subplots(figsize=(9, 5))
             vals  = subset[metric].values
-            names = subset[key_col].values
+            names = [_ellipsize(v, 18) for v in subset[key_col].values]
             max_val = max(vals.max(), 1e-9)  # 0 나눔 방지
             bars  = ax.barh(range(len(names)), vals, color=color, alpha=0.82, edgecolor="white")
             ax.set_yticks(range(len(names)))
@@ -337,10 +545,17 @@ def plot_top_n_barplot(df: pd.DataFrame, top_n: int = 10, key_col: str = None, m
                 label_val = abs(val) if abs(val) > 1e-9 else 0.0  # -0.000 방지
                 ax.text(bar.get_width() + max_val * 0.01, bar.get_y() + bar.get_height() / 2,
                         f"{label_val:.3f}", va="center", fontsize=8)
-            _apply_style(ax, f"{label.upper()} {top_n}: {metric}", xlabel=metric)
+            _apply_style(
+                ax,
+                f"{label.upper()} {top_n}: {_pretty_label(metric)}",
+                xlabel=metric,
+                subtitle="Group mean ranking for the selected metric",
+                grid_axis="x",
+            )
             ax.grid(axis="x", linestyle="--", linewidth=0.5, alpha=0.6)
             ax.grid(axis="y", visible=False)
             ax.spines["left"].set_visible(False)
+            _add_stat_badge(ax, [f"groups {len(subset)}", f"range {float(vals.min()):.2f} - {float(vals.max()):.2f}"])
             fig.tight_layout()
             path = os.path.join(OUTPUT_DIR, f"bar_{label}_{metric}.png")
             fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -570,12 +785,17 @@ def plot_grouped_bar(df: pd.DataFrame, key_col: str = None, measure_cols: list =
                label=col, color=color, alpha=0.82, edgecolor="white")
 
     ax.set_xticks(x)
-    ax.set_xticklabels([str(c)[:16] for c in plot_df.index], rotation=35, ha="right", fontsize=8)
+    ax.set_xticklabels([_ellipsize(c, 16) for c in plot_df.index], rotation=35, ha="right", fontsize=8)
     ax.set_ylabel("Normalized Score (0–1)", fontsize=9)
     ax.legend(fontsize=9, frameon=False, loc="upper right")
     inverted = [c for c in numeric_cols if _is_lower_better(c)]
     inv_note = f"  ↓better: {', '.join(inverted)}" if inverted else ""
-    _apply_style(ax, f"Grouped Bar: Top {top_n} by {numeric_cols[0]} (Normalized{inv_note})")
+    _apply_style(
+        ax,
+        f"Grouped Bar: Top {top_n} by {_pretty_label(numeric_cols[0])} (Normalized{inv_note})",
+        subtitle="Multi-metric category comparison on a unified 0-1 scale",
+    )
+    _add_stat_badge(ax, [f"groups {len(plot_df)}", f"metrics {len(numeric_cols)}"])
     fig.tight_layout()
     path = os.path.join(OUTPUT_DIR, "grouped_bar_top_categories.png")
     fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -597,6 +817,137 @@ def plot_grouped_bar(df: pd.DataFrame, key_col: str = None, measure_cols: list =
 # ─────────────────────────────
 # Relationship
 # ─────────────────────────────
+
+def plot_mean_ci_comparison(df: pd.DataFrame, key_col: str = None, measure_cols: list = None,
+                            top_n: int = 8) -> dict:
+    """그룹 평균과 95% CI를 함께 보여주는 비교 차트."""
+    numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)
+    key_col = _pick_key_col(df, key_col) or _pick_flag_key_col(df)
+    if key_col is None or not numeric_cols:
+        return {"chart_paths": [], "stats": {}}
+
+    # 0/1 플래그를 그룹 키로 쓴 경우 축 라벨이 "0","1"로만 보여 어떤 비교인지 안 읽힌다
+    # (#166 실측 피드백) — 컬럼명 기반 라벨(예: "High value low satisfaction" / "Rest")로 대체.
+    is_flag_group = str(key_col).lower().startswith("is_") and _is_binary_flag(df[key_col].dropna())
+
+    paths = []
+    stats = {}
+    for metric in numeric_cols[:2]:
+        sub = df[[key_col, metric]].dropna()
+        grouped = sub.groupby(key_col)[metric].agg(["mean", "std", "count"]).reset_index()
+        grouped = grouped[grouped["count"] >= 2].sort_values("mean", ascending=False).head(top_n)
+        if len(grouped) < 2:
+            continue
+        grouped["ci95"] = 1.96 * (grouped["std"].fillna(0.0) / np.sqrt(grouped["count"].clip(lower=1)))
+        fig, ax = plt.subplots(figsize=(9, max(4.8, len(grouped) * 0.55)))
+        ypos = np.arange(len(grouped))
+        ax.errorbar(
+            grouped["mean"],
+            ypos,
+            xerr=grouped["ci95"],
+            fmt="o",
+            color=PALETTE_MAIN,
+            ecolor=PALETTE_SOFT,
+            elinewidth=2,
+            capsize=3,
+            markersize=7,
+        )
+        ax.set_yticks(ypos)
+        if is_flag_group:
+            tick_labels = [_flag_group_label(key_col, v) for v in grouped[key_col]]
+        else:
+            tick_labels = [_ellipsize(v, 18) for v in grouped[key_col]]
+        ax.set_yticklabels(tick_labels, fontsize=9)
+        ax.invert_yaxis()
+        _apply_style(
+            ax,
+            f"Mean +/- 95% CI: {_pretty_label(metric)} by {_pretty_label(key_col)}",
+            xlabel=metric,
+            subtitle="Group averages with uncertainty bands",
+            grid_axis="x",
+        )
+        # 평균 내림차순 정렬이라 최고 평균 그룹은 항상 (y=0=상단, x=최대값=우측)에 찍힌다 —
+        # 기본 위치(우상단)에 배지를 두면 그 점을 매번 가린다(#166 실측 발견). 안전한
+        # 좌상단(항상 최고 평균보다 왼쪽)으로 옮긴다.
+        _add_stat_badge(ax, [f"groups {len(grouped)}", f"top mean {float(grouped['mean'].iloc[0]):.2f}"],
+                        loc="upper left")
+        fig.tight_layout()
+        path = os.path.join(OUTPUT_DIR, f"interval_{metric}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=120)
+        plt.close(fig)
+        paths.append(path)
+        stats[metric] = {
+            "top_groups": grouped[[key_col, "mean", "ci95", "count"]].round(4).to_dict(orient="records")
+        }
+    return {"chart_paths": paths, "stats": stats}
+
+
+def plot_segment_flag_profiles(df: pd.DataFrame, measure_cols: list = None, max_flags: int = 2) -> dict:
+    """0/1 세그먼트 플래그 기준으로 주요 수치 지표의 표준화 차이를 비교한다."""
+    flag_cols = []
+    for col in df.columns:
+        if str(col).lower().startswith("is_") and _is_binary_flag(df[col]):
+            flag_cols.append(col)
+    numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)
+    if not flag_cols or not numeric_cols:
+        return {"chart_paths": [], "stats": {}}
+
+    paths = []
+    stats = {}
+    metric_pool = numeric_cols[:6]
+    for flag in flag_cols[:max_flags]:
+        work = df[[flag] + metric_pool].dropna()
+        if work.empty or work[flag].nunique(dropna=True) < 2:
+            continue
+        flag_values = work[flag].astype(float)
+        seg = work[flag_values == 1.0]
+        base = work[flag_values == 0.0]
+        if len(seg) < 10 or len(base) < 10:
+            continue
+        rows = []
+        for metric in metric_pool:
+            overall_std = float(work[metric].std())
+            if overall_std <= 1e-9:
+                continue
+            effect = (float(seg[metric].mean()) - float(base[metric].mean())) / overall_std
+            rows.append({
+                "metric": metric,
+                "effect": effect,
+                "seg_mean": float(seg[metric].mean()),
+                "base_mean": float(base[metric].mean()),
+            })
+        if len(rows) < 2:
+            continue
+        prof = pd.DataFrame(rows).sort_values("effect")
+        fig, ax = plt.subplots(figsize=(9, max(4.5, len(prof) * 0.6)))
+        colors = [PALETTE_POS if v >= 0 else PALETTE_NEG for v in prof["effect"]]
+        ax.barh(range(len(prof)), prof["effect"], color=colors, alpha=0.85, edgecolor="white")
+        ax.axvline(0, color="#64748B", linewidth=1)
+        ax.set_yticks(range(len(prof)))
+        ax.set_yticklabels([_pretty_label(m) for m in prof["metric"]], fontsize=9)
+        for idx, value in enumerate(prof["effect"]):
+            x = value + (0.03 if value >= 0 else -0.03)
+            ha = "left" if value >= 0 else "right"
+            ax.text(x, idx, f"{value:+.2f}std", va="center", ha=ha, fontsize=8, color="#334155")
+        _apply_style(
+            ax,
+            f"Segment Profile: {_pretty_label(flag)}",
+            xlabel="Standardized mean delta vs. rest",
+            subtitle="Positive values indicate the flagged segment is higher than the rest",
+            grid_axis="x",
+        )
+        _add_stat_badge(ax, [f"segment {float(flag_values.mean()):.1%}", f"n {len(seg):,} vs {len(base):,}"])
+        fig.tight_layout()
+        path = os.path.join(OUTPUT_DIR, f"segment_profile_{flag}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=120)
+        plt.close(fig)
+        paths.append(path)
+        stats[flag] = {
+            "segment_rate": round(float(flag_values.mean()), 4),
+            "effects": prof.round(4).to_dict(orient="records"),
+        }
+    return {"chart_paths": paths, "stats": stats}
+
 
 def plot_correlation(df: pd.DataFrame, measure_cols: list = None) -> dict:
     """수치형 컬럼 간 상관관계 히트맵 + 상관계수 행렬"""
@@ -630,9 +981,17 @@ def plot_correlation(df: pd.DataFrame, measure_cols: list = None) -> dict:
         annot_kws={"size": 9},
         cbar_kws={"shrink": 0.7},
     )
-    ax.set_title("Correlation Heatmap", fontsize=13, fontweight="bold", pad=12)
+    _apply_style(
+        ax,
+        "Correlation Heatmap",
+        subtitle="Pairwise linear relationships among selected numeric metrics",
+        grid_axis="x",
+    )
     ax.tick_params(axis="x", labelsize=9, rotation=30)
     ax.tick_params(axis="y", labelsize=9, rotation=0)
+    _format_category_ticks(ax, rotation=30, max_len=18, axis="x")
+    _format_category_ticks(ax, max_len=18, axis="y")
+    _add_stat_badge(ax, [f"metrics {len(cols)}", f"strong pairs {len(strong_pairs)}"])
     fig.tight_layout()
     path = os.path.join(OUTPUT_DIR, "correlation_heatmap.png")
     fig.savefig(path, bbox_inches="tight", dpi=120)
@@ -651,6 +1010,7 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
     paths = []
     stats = {}
     numeric_cols = _get_numeric_cols(df, measure_cols, allow_flags=False)   # 0/1 플래그 산점도 방지
+    numeric_cols = [c for c in numeric_cols if not _ORDINAL_BUCKET_NAME_RE.search(c)]  # quartile류 제외
     if len(numeric_cols) < 2:
         return {"chart_paths": [], "stats": {}}
 
@@ -705,9 +1065,9 @@ def plot_timeseries(df: pd.DataFrame, measure_cols: list = None, time_cols: list
     """datetime 컬럼 기준 수치형 지표 시계열 추세 + 기간/범위"""
     paths = []
     stats = {}
-    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백
-    if not time_cols:
-        time_cols = [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백 → 둘 다 usable 게이트 통과해야 함
+    candidates = time_cols or [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    time_cols = usable_time_columns(df, candidates)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if not time_cols or len(numeric_cols) == 0:
@@ -747,9 +1107,9 @@ def plot_seasonality(df: pd.DataFrame, measure_cols: list = None, time_cols: lis
     """월/요일 기준 시즌성 bar chart + 피크 시점"""
     paths = []
     stats = {}
-    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백
-    if not time_cols:
-        time_cols = [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    # LLM이 분류한 time_cols 우선, 없으면 dtype/이름 휴리스틱 폴백 → 둘 다 usable 게이트 통과해야 함
+    candidates = time_cols or [c for c in df.columns if "datetime" in str(df[c].dtype) or "date" in c.lower()]
+    time_cols = usable_time_columns(df, candidates)
     numeric_cols = _get_numeric_cols(df, measure_cols)
 
     if not time_cols or len(numeric_cols) == 0:
@@ -887,7 +1247,7 @@ def plot_grouped_box(df: pd.DataFrame, key_col: str = None, measure_cols: list =
 
         colors = sns.color_palette(PALETTE_SEQ, len(groups))[::-1]
         fig, ax = plt.subplots(figsize=(max(8, len(groups) * 0.85), 5))
-        bp = ax.boxplot(groups, vert=True, patch_artist=True, showfliers=True,
+        bp = ax.boxplot(groups, orientation="vertical", patch_artist=True, showfliers=True,
                         medianprops=dict(color=PALETTE_ACCENT, linewidth=2),
                         flierprops=dict(marker="o", markersize=3, alpha=0.4, markerfacecolor=PALETTE_NEG,
                                         markeredgecolor="none"))
@@ -993,12 +1353,21 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
                               measure_cols: list = None, top_n: int = 6, min_periods: int = 3) -> dict:
     """카테고리별 시간 추세를 한 그래프에 여러 줄로(상위 N개) — 시간 × 범주 교차."""
     numeric_cols = _get_numeric_cols(df, measure_cols)
-    cat_cols = categorical_object_columns(df)
     if not time_col:
-        time_col = next((c for c in df.columns
-                         if "datetime" in str(df[c].dtype) or "date" in c.lower() or "month" in c.lower()), None)
-    if key_col is None or key_col not in df.columns:
-        key_col = cat_cols[0] if cat_cols else None
+        candidates = [c for c in df.columns
+                     if "datetime" in str(df[c].dtype) or "date" in c.lower() or "month" in c.lower()]
+        usable = usable_time_columns(df, candidates)
+        time_col = usable[0] if usable else None
+    elif time_col not in usable_time_columns(df, [time_col]):
+        time_col = None
+    # 다른 key_col 소비 함수(plot_top_n_barplot·plot_mean_ci_comparison 등)와 달리 이 함수만
+    # cat_cols[0]을 검증 없이 쓰고 있었다 — customer_unique_id 같은 ID급 컬럼(9만+ 유니크)이
+    # ctx.key_col로 이미 들어와 있으면 그대로 통과되어 "고객 1명당 선 1개, 점 1개"짜리 무의미한
+    # 차트가 나왔다(#166 실측). _pick_key_col의 카디널리티/상수 가드를 거치도록 통일한다.
+    key_col = _pick_key_col(df, key_col) or _pick_flag_key_col(df)
+    # key_col 자신이 measure_cols에 섞여 들어오면(플래그를 key로 쓰는 케이스 등)
+    # groupby 결과에 같은 이름 컬럼을 또 넣으려다 충돌한다 — 그룹 키는 지표 후보에서 제외.
+    numeric_cols = [c for c in numeric_cols if c != key_col]
     if not time_col or not key_col or not numeric_cols:
         return {"chart_paths": [], "stats": {}, "skipped": "시간/범주/수치 컬럼 부족"}
 
@@ -1007,6 +1376,10 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
     if period.notna().sum() == 0:
         return {"chart_paths": [], "stats": {}, "skipped": f"{time_col} 시간 파싱 불가"}
     d["_period"] = period
+
+    # 0/1 플래그를 그룹 키로 쓴 경우 범례가 "0","1"로만 보여 어떤 그룹인지 안 읽힌다
+    # (#166 실측 피드백) — 컬럼명 기반 라벨로 대체.
+    is_flag_group = str(key_col).lower().startswith("is_") and _is_binary_flag(df[key_col].dropna())
 
     paths, stats = [], {}
     for metric in numeric_cols:
@@ -1020,12 +1393,13 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
         colors = sns.color_palette("tab10", wide.shape[1])
         fig, ax = plt.subplots(figsize=(max(9, len(wide) * 0.5), 5))
         for (col, series), color in zip(wide.items(), colors):
+            label = _flag_group_label(key_col, col) if is_flag_group else str(col)[:18]
             ax.plot(range(len(wide)), series.values, marker="o", markersize=3,
-                    linewidth=1.6, color=color, label=str(col)[:18])
+                    linewidth=1.6, color=color, label=label)
         ax.set_xticks(range(len(wide)))
         ax.set_xticklabels(list(wide.index), rotation=45, ha="right", fontsize=7)
         ax.legend(fontsize=7, frameon=False, ncol=2, loc="upper left")
-        _apply_style(ax, f"{metric} trend by {key_col} (top {wide.shape[1]})", ylabel=metric)
+        _apply_style(ax, f"{_pretty_label(metric)} trend by {_pretty_label(key_col)} (top {wide.shape[1]})", ylabel=metric)
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"multiline_{metric}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)

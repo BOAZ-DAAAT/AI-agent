@@ -96,7 +96,7 @@ def test_completion_readiness_rejects_state_without_analysis_evidence() -> None:
     assert "근거" in decision.reason
 
 
-def test_completion_readiness_requires_report_after_analysis_evidence() -> None:
+def test_completion_readiness_requires_insight_after_analysis_evidence() -> None:
     state = _state()
     state["accepted_evidence"] = {
         "sql_agent": [{"artifact_id": "artifact_sql"}],
@@ -105,44 +105,17 @@ def test_completion_readiness_requires_report_after_analysis_evidence() -> None:
 
     decision = _check_completion_readiness(state)
 
-    assert decision.status == "report_required"
-    assert "리포트" in decision.reason
+    assert decision.status == "insight_required"
+    assert "인사이트" in decision.reason
 
 
-def test_completion_readiness_rejects_report_completion_without_artifact() -> None:
+def test_completion_readiness_ready_after_insight_evidence() -> None:
     state = _state()
     state["accepted_evidence"] = {
-        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
+        "sql_agent": [{"artifact_id": "artifact_sql"}],
+        "insight_agent": [{"artifact_id": "artifact_insight"}],
     }
-    state["completed_agents"] = ["analysis_agent", "report_agent"]
-
-    decision = _check_completion_readiness(state)
-
-    assert decision.status == "invalid"
-    assert "아티팩트" in decision.reason
-
-
-def test_completion_readiness_rejects_report_artifact_without_completion() -> None:
-    state = _state()
-    state["accepted_evidence"] = {
-        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
-        "report_agent": [{"artifact_id": "artifact_report"}],
-    }
-    state["completed_agents"] = ["analysis_agent"]
-
-    decision = _check_completion_readiness(state)
-
-    assert decision.status == "invalid"
-    assert "완료 표식" in decision.reason
-
-
-def test_completion_readiness_allows_promoted_report_with_analysis_evidence() -> None:
-    state = _state()
-    state["accepted_evidence"] = {
-        "analysis_agent": [{"artifact_id": "artifact_analysis"}],
-        "report_agent": [{"artifact_id": "artifact_report"}],
-    }
-    state["completed_agents"] = ["analysis_agent", "report_agent"]
+    state["completed_agents"] = ["sql_agent", "insight_agent"]
 
     decision = _check_completion_readiness(state)
 
@@ -169,17 +142,17 @@ def test_guard_blocks_unknown_agent_explicitly() -> None:
     assert "unknown" in decision.reason.lower() or "알 수 없는" in decision.reason
 
 
-def test_guard_blocks_report_when_only_completed_agent_exists_without_artifact() -> None:
+def test_guard_blocks_insight_when_only_completed_agent_exists_without_artifact() -> None:
     state = _state()
     state["completed_agents"] = ["analysis_agent"]
 
-    decision = guard_agent_preconditions("report_agent", state)
+    decision = guard_agent_preconditions("insight_agent", state)
 
     assert decision.allowed is False
     assert decision.next_action == "call_analysis_agent"
 
 
-def test_guard_allows_report_after_evidence_artifact() -> None:
+def test_guard_allows_insight_after_evidence_artifact() -> None:
     state = _state()
     state = merge_agent_result(
         state,
@@ -191,10 +164,10 @@ def test_guard_allows_report_after_evidence_artifact() -> None:
         ),
     )
 
-    decision = guard_agent_preconditions("report_agent", state)
+    decision = guard_agent_preconditions("insight_agent", state)
 
     assert decision.allowed is True
-    assert decision.next_action == "call_report_agent"
+    assert decision.next_action == "call_insight_agent"
 
 
 def test_validate_failed_retryable_result_routes_to_same_agent() -> None:
@@ -343,35 +316,6 @@ def test_validate_retryable_failure_fails_after_retry_limit() -> None:
         summary="SQL 실패",
         retryable=True,
         error="SQL validation failed",
-    )
-
-    decision = validate_subagent_result(state, result)
-
-    assert decision.valid is False
-    assert decision.next_action == "fail"
-
-
-def test_validate_report_success_finalizes() -> None:
-    state = _state()
-    result = AgentCompactResult(
-        agent="report_agent",
-        status="success",
-        summary="리포트 생성 완료",
-        artifact_ids=["artifact_report"],
-    )
-
-    decision = validate_subagent_result(state, result)
-
-    assert decision.valid is True
-    assert decision.next_action == "finalize"
-
-
-def test_validate_report_success_without_artifact_is_invalid() -> None:
-    state = _state()
-    result = AgentCompactResult(
-        agent="report_agent",
-        status="success",
-        summary="리포트 생성 완료",
     )
 
     decision = validate_subagent_result(state, result)

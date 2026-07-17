@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any, Optional
@@ -82,15 +81,6 @@ def get_llm():
 # -----------------------------
 # Utils
 # -----------------------------
-def safe_json_parse(text_value: str, fallback: dict) -> dict:
-    cleaned = text_value.strip()
-    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return fallback
-
-
 def clean_sql(sql: str) -> str:
     sql = sql.replace("```sql", "").replace("```", "").strip()
     if not sql.endswith(";"):
@@ -126,13 +116,15 @@ def is_safe_mart_sql(sql: str, target_table: Optional[str]) -> tuple[bool, str]:
     if any(k in lowered for k in banned):
         return False, "위험한 DDL/DCL 문이 포함되어 있습니다."
 
-    allowed_prefixes = [
-        "create table",
-        "create or replace table",
-        "insert into"
-    ]
-    if not any(lowered.startswith(p) for p in allowed_prefixes):
-        return False, "허용되지 않은 마트 생성 SQL 형식입니다."
+    statements = split_sql_statements(sql)
+    if len(statements) != 1:
+        return False, "마트 생성 SQL은 단일 statement여야 합니다."
+    if not re.match(
+        r"^\s*CREATE\s+TABLE\s+.+?\s+AS\s+(?:WITH\b|SELECT\b)",
+        statements[0],
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return False, "CREATE TABLE ... AS SELECT 형식만 허용됩니다."
 
     if target_table:
         target_table_lower = target_table.lower()

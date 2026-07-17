@@ -5,16 +5,20 @@
 """
 
 from .plan import plan_prompt
+from .finalize_plan import finalize_table_plan_prompt
 from .mart_design import mart_design_prompt
 from .generate import generate_mart_prompt, generate_query_prompt
+from .repair import repair_sql_prompt
 from .validate import validate_prompt
 from .finalize import finalize_answer_prompt, finalize_mart_prompt, finalize_rewrite_prompt
 
 __all__ = [
     "plan_prompt",
+    "finalize_table_plan_prompt",
     "mart_design_prompt",
     "generate_mart_prompt",
     "generate_query_prompt",
+    "repair_sql_prompt",
     "validate_prompt",
     "finalize_mart_prompt",
     "finalize_answer_prompt",

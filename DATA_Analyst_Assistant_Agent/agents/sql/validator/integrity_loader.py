@@ -39,6 +39,70 @@ def load_schema_text():
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
+def _schema_tables(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    tables = data.get("tables")
+    return tables if isinstance(tables, dict) else data
+
+
+def _schema_with_tables(data: dict[str, Any], tables: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(data.get("tables"), dict):
+        return {"tables": tables}
+    return tables
+
+
+def _compact_description(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    first_line = value.splitlines()[0] if value.splitlines() else ""
+    return " ".join(first_line.split())[:160]
+
+
+def load_schema_catalog_text() -> str:
+    """1차 의미 계획에 필요한 테이블명과 설명만 반환한다."""
+    data = load_schema_json()
+    catalog: dict[str, Any] = {}
+    for table_name, table in _schema_tables(data).items():
+        if not isinstance(table, dict):
+            continue
+        catalog[table_name] = {
+            "description": _compact_description(table.get("description")),
+        }
+    return json.dumps(_schema_with_tables(data, catalog), ensure_ascii=False, indent=2)
+
+
+def load_scoped_schema_text(tables: Iterable[str] | None) -> str:
+    """선택 테이블의 상세 스키마를 샘플 데이터 없이 반환한다."""
+    selected_tables = _table_filter(tables)
+    if not selected_tables:
+        return ""
+
+    data = load_schema_json()
+    scoped: dict[str, Any] = {}
+    for table_name, table in _schema_tables(data).items():
+        if table_name not in selected_tables or not isinstance(table, dict):
+            continue
+        columns = table.get("columns")
+        scoped[table_name] = {
+            "description": table.get("description", ""),
+            "primary_key": table.get("primary_key", []),
+            "foreign_keys": table.get("foreign_keys", []),
+            "columns": [
+                {
+                    "name": column.get("name"),
+                    "type": column.get("type"),
+                    "nullable": column.get("nullable"),
+                    "description": column.get("description", ""),
+                }
+                for column in columns if isinstance(columns, list) and isinstance(column, dict)
+            ],
+        }
+    if not scoped:
+        return ""
+    return json.dumps(_schema_with_tables(data, scoped), ensure_ascii=False, indent=2)
+
+
 def load_integrity_text():
     data = load_integrity_json()
     return json.dumps(data, ensure_ascii=False, indent=2)
@@ -119,6 +183,8 @@ def _normalize_table_name(table: Any) -> str:
 def _table_filter(tables: Iterable[str] | None) -> set[str] | None:
     if not tables:
         return None
+    if isinstance(tables, str):
+        tables = [tables]
     filtered = {_normalize_table_name(table) for table in tables if _normalize_table_name(table)}
     return filtered or None
 

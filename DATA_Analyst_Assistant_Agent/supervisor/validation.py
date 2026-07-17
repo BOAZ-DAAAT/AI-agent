@@ -73,7 +73,7 @@ class ResultValidationDecision(BaseModel):
 
 
 class CompletionReadinessDecision(BaseModel):
-    status: Literal["ready", "report_required", "invalid"]
+    status: Literal["ready", "insight_required", "invalid"]
     reason: str
 
 
@@ -117,10 +117,12 @@ _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "sql_agent": "call_sql_agent",
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
-    "report_agent": "call_report_agent",
+    "insight_agent": "call_insight_agent",
 }
 
-_KNOWN_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent", "report_agent"}
+_KNOWN_AGENTS: set[AgentName] = {
+    "sql_agent", "eda_agent", "analysis_agent", "insight_agent",
+}
 _EVIDENCE_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent"}
 
 
@@ -153,26 +155,27 @@ def _check_completion_readiness(state: SupervisorState) -> CompletionReadinessDe
             reason="검증·승격된 SQL, EDA, 분석 근거가 없어 완료할 수 없습니다.",
         )
 
-    report_completed = "report_agent" in state.get("completed_agents", [])
-    has_report_artifact = _has_valid_accepted_artifact(state, "report_agent")
-    if report_completed and not has_report_artifact:
+    insight_completed = "insight_agent" in state.get("completed_agents", [])
+    has_insight_artifact = _has_valid_accepted_artifact(state, "insight_agent")
+    if insight_completed and not has_insight_artifact:
         return CompletionReadinessDecision(
             status="invalid",
-            reason="report_agent 완료 표식은 있지만 승격된 리포트 아티팩트가 없습니다.",
+            reason="insight_agent 완료 표식은 있지만 승격된 인사이트 아티팩트가 없습니다.",
         )
-    if has_report_artifact and not report_completed:
+    if has_insight_artifact and not insight_completed:
         return CompletionReadinessDecision(
             status="invalid",
-            reason="승격된 리포트 아티팩트는 있지만 report_agent 완료 표식이 없습니다.",
+            reason="승격된 인사이트 아티팩트는 있지만 insight_agent 완료 표식이 없습니다.",
         )
-    if not report_completed:
+    if not insight_completed:
         return CompletionReadinessDecision(
-            status="report_required",
-            reason="검증·승격된 분석 근거가 있어 최종 리포트 생성이 필요합니다.",
+            status="insight_required",
+            reason="검증·승격된 분석 근거가 있어 인사이트 생성이 필요합니다.",
         )
+
     return CompletionReadinessDecision(
         status="ready",
-        reason="분석 근거와 검증·승격된 최종 리포트가 있어 완료할 수 있습니다.",
+        reason="분석 근거와 검증·승격된 인사이트가 있어 완료할 수 있습니다.",
     )
 
 
@@ -217,17 +220,18 @@ def guard_agent_preconditions(agent: AgentName | str, state: SupervisorState) ->
             reason="분석을 실행하려면 먼저 SQL 또는 EDA 산출물이 필요합니다.",
         )
 
-    if _has_completed_evidence(state):
+    if agent == "insight_agent":
+        if _has_completed_evidence(state):
+            return GuardDecision(
+                allowed=True,
+                next_action="call_insight_agent",
+                reason="SQL, EDA, 분석 중 하나 이상의 근거 산출물이 있어 인사이트를 생성할 수 있습니다.",
+            )
         return GuardDecision(
-            allowed=True,
-            next_action="call_report_agent",
-            reason="SQL, EDA, 분석 중 하나 이상의 근거 산출물이 있어 리포트를 생성할 수 있습니다.",
+            allowed=False,
+            next_action="call_analysis_agent",
+            reason="인사이트를 생성하려면 먼저 SQL, EDA, 분석 중 하나 이상의 근거가 필요합니다.",
         )
-    return GuardDecision(
-        allowed=False,
-        next_action="call_analysis_agent",
-        reason="리포트를 생성하려면 먼저 SQL, EDA, 분석 중 하나 이상의 근거가 필요합니다.",
-    )
 
 
 def validate_subagent_result(
@@ -290,21 +294,6 @@ def validate_subagent_result(
         )
 
     if result.status in {"success", "warning"}:
-        if result.agent == "report_agent":
-            if not _result_has_artifact(result):
-                return ResultValidationDecision(
-                    valid=False,
-                    next_action="fail",
-                    reason="리포트 에이전트 결과에 리포트 산출물 ID가 없어 완료할 수 없습니다.",
-                    decision="reject",
-                    terminal_state=SupervisorTerminalState.failed_terminal.value,
-                )
-            return ResultValidationDecision(
-                valid=True,
-                next_action="finalize",
-                reason="리포트 에이전트가 유효한 결과를 반환해 종료할 수 있습니다.",
-                decision="accept_with_limitations" if limitation_findings else "accept",
-            )
         return ResultValidationDecision(
             valid=True,
             next_action="decide_next_action",
@@ -403,12 +392,6 @@ def _failure_signature(reason_code: str, failure_reason: str) -> str:
         " ".join(failure_reason.split()).casefold(),
     ]
     return json.dumps(normalized, ensure_ascii=False)
-
-
-def _result_has_artifact(result: AgentCompactResult) -> bool:
-    if any(bool(artifact_id) for artifact_id in result.artifact_ids):
-        return True
-    return any(bool(artifact.artifact_id) for artifact in result.artifacts)
 
 
 def _route_invalid_result(

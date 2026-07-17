@@ -42,7 +42,10 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert "validation_results" not in state
     assert "evidence_validation_results" not in state
     assert "semantic_validation_results" not in state
-    assert state["state_schema_version"] == 4
+    assert state["state_schema_version"] == 5
+    assert state["analysis_selection_response"] is None
+    assert state["analysis_selection_review_request"] is None
+    assert state["analysis_review_decisions"] == []
     assert state["semantic_recovery_attempts"] == {}
     assert state["limitations"] == []
     assert state["failure_streaks"] == {}
@@ -84,7 +87,10 @@ def test_normalize_v2_validation_arrays_into_v4_history() -> None:
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 4
+    assert normalized["state_schema_version"] == 5
+    assert normalized["analysis_selection_response"] is None
+    assert normalized["analysis_selection_review_request"] is None
+    assert normalized["analysis_review_decisions"] == []
     assert normalized["semantic_recovery_attempts"] == {}
     assert normalized["limitations"] == []
     assert "validation_results" not in normalized
@@ -134,9 +140,13 @@ def test_normalize_v2_pending_approval_preserves_candidate_hashes() -> None:
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["pending_approval"] == state["pending_approval"]
+    assert normalized["pending_approval"] == {
+        **state["pending_approval"],
+        "review_request": None,
+        "expected_resume": {"approved": "boolean"},
+    }
     assert normalized["pending_result"] == state["pending_result"]
-    assert normalized["state_schema_version"] == 4
+    assert normalized["state_schema_version"] == 5
 
 
 def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_history() -> None:
@@ -160,11 +170,41 @@ def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_hi
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 4
+    assert normalized["state_schema_version"] == 5
     assert normalized["semantic_retry_counts"] == {"candidate_001": 1}
     assert normalized["semantic_recovery_attempts"] == {}
     assert normalized["limitations"] == []
     assert normalized["validation_history"] == state["validation_history"]
+
+
+def test_normalize_v4_analysis_approval_does_not_retrofit_native_review() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id=None,
+    )
+    state["state_schema_version"] = 4
+    state["analysis_selection_response"] = {"selected_option_id": "legacy"}
+    state["analysis_selection_review_request"] = {"question": "legacy"}
+    state["analysis_review_decisions"] = [{"approval_id": "legacy"}]
+    state["pending_approval"] = {
+        "approval_id": "approval_legacy",
+        "agent": "analysis_agent",
+        "reason": "기존 승인",
+        "approval_type": "analysis.review",
+        "review_request": {"question": "legacy"},
+        "expected_resume": {"approval_id": "string"},
+    }
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["state_schema_version"] == 5
+    assert normalized["analysis_selection_response"] is None
+    assert normalized["analysis_selection_review_request"] is None
+    assert normalized["analysis_review_decisions"] == []
+    assert normalized["pending_approval"]["review_request"] is None
+    assert normalized["pending_approval"]["expected_resume"] == {"approved": "boolean"}
 
 
 def test_to_orchestration_state_merges_state_and_result_limitations_without_duplicates() -> None:
@@ -595,7 +635,7 @@ def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_
     normalized = normalize_supervisor_state(legacy)
     normalized_twice = normalize_supervisor_state(normalized)
 
-    assert normalized["state_schema_version"] == 4
+    assert normalized["state_schema_version"] == 5
     assert normalized["accepted_evidence"] == {}
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []
@@ -649,6 +689,94 @@ def test_to_orchestration_state_exposes_analysis_last_failure_in_plan_and_state(
     assert orchestration.retry_context == expected
     assert orchestration.plan is not None
     assert orchestration.plan.retry_context == expected
+
+
+def test_to_orchestration_state_exposes_agent_feedback_from_validation_history() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="상위 20% 고객군과 일반 고객군의 만족도 분포 차이를 검정해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {"goal": "고객 세그먼트별 만족도 분포 비교"}
+    state["validation_history"] = [
+        {
+            "candidate_id": "cand_1",
+            "validation_id": "val_1",
+            "agent": "eda_agent",
+            "outcome": {
+                "disposition": "recover",
+                "reason": "그룹별 분포 비교 없이 컬럼 나열만 반복함",
+                "reason_code": "semantic_validation_failed",
+            },
+            "checks": [
+                {
+                    "name": "semantic",
+                    "passed": False,
+                    "findings": [],
+                    "details": {"missing_evidence": ["상위20% vs 일반군 기술통계", "유의성 검정 결과"]},
+                }
+            ],
+        },
+        {
+            "candidate_id": "cand_2",
+            "validation_id": "val_2",
+            "agent": "sql_agent",
+            "outcome": {
+                "disposition": "accept",
+                "reason": "정합성 통과",
+                "reason_code": "none",
+            },
+            "checks": [],
+        },
+    ]
+
+    orchestration = to_orchestration_state(state)
+
+    expected_feedback = {
+        "eda_agent": {
+            "reason": "그룹별 분포 비교 없이 컬럼 나열만 반복함",
+            "missing_evidence": ["상위20% vs 일반군 기술통계", "유의성 검정 결과"],
+            "source": "semantic",
+        }
+    }
+    assert orchestration.retry_context["agent_feedback"] == expected_feedback
+    assert orchestration.plan is not None
+    assert orchestration.plan.retry_context["agent_feedback"] == expected_feedback
+    # accept 판정은 재시도 사유가 아니므로 피드백에 섞이면 안 된다
+    assert "sql_agent" not in orchestration.retry_context["agent_feedback"]
+
+
+def test_to_orchestration_state_agent_feedback_keeps_latest_record_per_agent() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="고객 단위 RFM 세그먼트를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {"goal": "고객 단위 RFM"}
+    state["validation_history"] = [
+        {
+            "candidate_id": "cand_1",
+            "validation_id": "val_1",
+            "agent": "sql_agent",
+            "outcome": {"disposition": "recover", "reason": "1차: 주문 단위로 생성됨", "reason_code": "x"},
+            "checks": [{"name": "semantic", "passed": False, "findings": [], "details": {"missing_evidence": []}}],
+        },
+        {
+            "candidate_id": "cand_2",
+            "validation_id": "val_2",
+            "agent": "sql_agent",
+            "outcome": {"disposition": "reject", "reason": "2차: 여전히 주문 단위", "reason_code": "y"},
+            "checks": [],
+        },
+    ]
+
+    orchestration = to_orchestration_state(state)
+
+    feedback = orchestration.retry_context["agent_feedback"]["sql_agent"]
+    assert feedback["reason"] == "2차: 여전히 주문 단위"
+    assert feedback["source"] == "hard_failure"
 
 
 def test_success_promotion_clears_only_matching_agent_failure_streak() -> None:

@@ -16,4 +16,5 @@ def run_time() -> str:
     if ctx.df is None:
         return "데이터가 로드되지 않았습니다."
     return _emit_and_dump(ctx, run_time_skill(
-        ctx.df, measure_cols=ctx.measure_cols, time_cols=ctx.time_cols, key_col=ctx.key_col))
+        ctx.df, measure_cols=ctx.measure_cols, time_cols=ctx.time_cols, key_col=ctx.key_col,
+        priority_metrics=ctx.priority_metrics))

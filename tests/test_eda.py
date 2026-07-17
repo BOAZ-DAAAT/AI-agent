@@ -272,17 +272,17 @@ def _ok_state(**over):
 
 
 def test_deterministic_fail_empty_insight_targets_insight():
-    target, _ = _deterministic_fail(_ok_state(insight_result="인사이트 생성 실패"))
+    target, _, _ = _deterministic_fail(_ok_state(insight_result="인사이트 생성 실패"))
     assert target == "insight"
 
 
 def test_deterministic_fail_no_analysis_targets_planner():
-    target, _ = _deterministic_fail(_ok_state(controller_log=[]))
+    target, _, _ = _deterministic_fail(_ok_state(controller_log=[]))
     assert target == "planner"
 
 
 def test_deterministic_fail_empty_metadata_targets_planner():
-    target, _ = _deterministic_fail(_ok_state(statistical_metadata={}))
+    target, _, _ = _deterministic_fail(_ok_state(statistical_metadata={}))
     assert target == "planner"
 
 
@@ -1031,13 +1031,101 @@ def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
             }))
 
     monkeypatch.setattr(CS, "_load_llm", lambda: _FakeSelLLM())
-    selected, captions = CS.run_chart_selector_skill(
+    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeSelLLM())
+    selected, captions, visual_debug = CS.run_chart_selector_skill(
         chart_paths=paths, user_question="a 상위는?", analysis_results={},
         statistical_metadata={}, hypotheses="[가설 1] a는 그룹별로 다르다")
     names = [os.path.basename(p) for p in selected]
     assert "violin_b.png" not in names and "bar_top_a.png" in names
     assert captions == {"bar_top_a.png": "a 순위 — 가설1 근거", "dist_b.png": "b 분포"}  # 생존 차트만
     assert "[가설 1]" in seen_prompts[0]                 # 가설이 프롬프트에 들어감
+    assert visual_debug["dropped"] == [] and visual_debug["check_failures"] == 0
+
+
+def test_visual_sanity_check_drops_chart_flagged_as_broken(monkeypatch, tmp_path):
+    # #166 실측: 배지가 데이터 점을 가리는 순수 렌더링 버그는 통계/이름 기반 판단으로는
+    # 못 잡는다 — 최종 후보만 멀티모달로 한 번 더 훑어 걸러낸다.
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
+    p_ok = tmp_path / "interval_ok.png"
+    p_bad = tmp_path / "interval_bad.png"
+    p_ok.write_bytes(b"png")
+    p_bad.write_bytes(b"png")
+
+    class _FakeVisionLLM:
+        def invoke(self, content):
+            # HumanMessage(content=[...])의 image_url 안 base64로 어느 파일인지 구분은
+            # 안 하고, 호출 순서로 구분한다(두 번째 호출을 "깨짐"으로 응답).
+            calls.append(1)
+            if len(calls) == 2:
+                return _FakeResp('{"ok": false, "issue": "배지가 점을 가림"}')
+            return _FakeResp('{"ok": true, "issue": ""}')
+
+    calls: list = []
+    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeVisionLLM())
+    kept, dropped, failures = CS._visual_sanity_check([str(p_ok), str(p_bad)])
+    names = [os.path.basename(p) for p in kept]
+    assert names == ["interval_ok.png"]
+    assert dropped and dropped[0]["chart"] == "interval_bad.png"
+    assert "배지가 점을 가림" in dropped[0]["reason"]
+    assert failures == 0
+
+
+def test_visual_sanity_check_passthrough_when_no_api_key(monkeypatch, tmp_path):
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    p = tmp_path / "interval_x.png"
+    p.write_bytes(b"png")
+    kept, dropped, failures = CS._visual_sanity_check([str(p)])
+    assert kept == [str(p)]
+    assert dropped == []
+    assert failures == 0
+
+
+def test_visual_sanity_check_counts_failures_separately_from_drops(monkeypatch, tmp_path):
+    # Codex 리뷰 P2: 판독기가 고장나면(이미지 읽기/모델호출/파싱 실패) 조용히 통과시키는데,
+    # 이게 "진짜 결함 없음"과 구분이 안 되면 검사가 꺼진 걸 아무도 못 알아챈다.
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
+    p = tmp_path / "interval_x.png"
+    p.write_bytes(b"png")
+
+    class _FakeBrokenLLM:
+        def invoke(self, content):
+            raise RuntimeError("모델 호출 실패")
+
+    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeBrokenLLM())
+    kept, dropped, failures = CS._visual_sanity_check([str(p)])
+    assert kept == [str(p)]   # 실패 시 보수적으로 통과
+    assert dropped == []
+    assert failures == 1      # 하지만 "실패했다"는 신호는 남는다
+
+
+def test_backfill_after_visual_drop_fills_from_remaining_candidates(monkeypatch, tmp_path):
+    # Codex 리뷰 P1: 시각점검이 드롭해도 대체 후보로 채워지지 않으면 _ensure_preferred_survives의
+    # 보호가 마지막 단계에서 깨진다 — 드롭된 자리를 filtered의 다음 우선순위 후보로 채운다.
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
+    for name in ("segment_profile_a.png", "dist_b.png", "interval_c.png"):
+        (tmp_path / name).write_bytes(b"png")
+    filtered = [str(tmp_path / n) for n in ("segment_profile_a.png", "dist_b.png", "interval_c.png")]
+
+    class _AlwaysOkLLM:
+        def invoke(self, content):
+            return _FakeResp('{"ok": true, "issue": ""}')
+
+    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _AlwaysOkLLM())
+    # segment_profile_a는 이미 시각점검에서 드롭된 상태를 흉내: dist_b만 살아남았고 자리 1개 빔.
+    # interval_c는 filtered에는 있지만 아직 final엔 없는 미사용 후보 — 이게 채워져야 한다.
+    final, dropped, failures = CS._backfill_after_visual_drop(
+        final=[str(tmp_path / "dist_b.png")], filtered=filtered, target_count=2,
+        exclude_names={"segment_profile_a.png"})
+    names = {os.path.basename(p) for p in final}
+    assert names == {"dist_b.png", "interval_c.png"}
+    assert failures == 0
 
 
 def test_selector_node_exposes_captions(monkeypatch, tmp_path):
@@ -1048,11 +1136,42 @@ def test_selector_node_exposes_captions(monkeypatch, tmp_path):
     chart = os.path.join(V.OUTPUT_DIR, "bar_top_x.png")
     open(chart, "wb").write(b"png")
     monkeypatch.setattr(N, "run_chart_selector_skill",
-                        lambda **kw: ([chart], {"bar_top_x.png": "x 순위 근거"}))
+                        lambda **kw: ([chart], {"bar_top_x.png": "x 순위 근거"},
+                                      {"dropped": [], "check_failures": 0}))
     out = N.chart_selector_node({"user_question": "x?", "hypotheses": "[가설 1] x"})
     assert out["key_charts"] == [chart]
     assert out["key_chart_captions"] == {"bar_top_x.png": "x 순위 근거"}
+    assert "cautions" not in out   # 드롭/실패 없으면 caution도 안 붙음
     assert os.path.exists(os.path.join(V.KEY_DIR, "bar_top_x.png"))   # key/ 복사됨
+
+
+def test_selector_node_adds_caution_when_visual_check_drops_chart(monkeypatch, tmp_path):
+    import os
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.chart_selector as N
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    chart = os.path.join(V.OUTPUT_DIR, "bar_top_x.png")
+    open(chart, "wb").write(b"png")
+    monkeypatch.setattr(N, "run_chart_selector_skill",
+                        lambda **kw: ([chart], {"bar_top_x.png": "x 순위 근거"},
+                                      {"dropped": [{"chart": "interval_y.png", "reason": "배지가 점 가림"}],
+                                       "check_failures": 0}))
+    out = N.chart_selector_node({"user_question": "x?", "hypotheses": ""})
+    assert out["cautions"][0]["code"] == "CHART_VISUAL_CHECK_ISSUE"
+    assert out["cautions"][0]["details"]["dropped"][0]["chart"] == "interval_y.png"
+
+
+def test_clear_output_dirs_removes_pngs_keeps_dirs(tmp_path):
+    # #166 커밋5: outputs/all·key가 런마다 안 지워지고 무한 누적되던 문제.
+    import os
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    open(os.path.join(V.OUTPUT_DIR, "old_all.png"), "wb").write(b"png")
+    open(os.path.join(V.KEY_DIR, "old_key.png"), "wb").write(b"png")
+    V.clear_output_dirs()
+    assert os.listdir(V.OUTPUT_DIR) == []
+    assert os.listdir(V.KEY_DIR) == []
+    assert os.path.isdir(V.OUTPUT_DIR) and os.path.isdir(V.KEY_DIR)  # 폴더 자체는 유지
 
 
 # ─────────────────────────────
@@ -1089,6 +1208,53 @@ def test_distribution_charts_skip_flags_and_use_log(tmp_path):
     assert "dist_is_flag.png" not in names               # 0/1 히스토그램 사라짐
     assert "dist_payment_seq.png" not in names           # 일련번호 분포 사라짐
     assert out["stats"]["value"]["skewness"] > 2         # 왜도 큰 컬럼은 log축으로 그려짐(스모크)
+
+
+def test_ecdf_charts_generate_for_numeric_columns(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    out = V.plot_ecdfs(df)
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "ecdf_value.png" in names
+    assert "ecdf_is_flag.png" not in names
+    assert out["stats"]["value"]["p99"] >= out["stats"]["value"]["p90"] >= out["stats"]["value"]["p50"]
+
+
+def test_distribution_skill_emits_ecdf_family():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.distribution_skill import run_distribution_skill
+    df = _guard_df()
+    out = run_distribution_skill(df, question_type="distribution")
+    assert "ecdfs" in out
+    assert out["ecdfs"]["chart_paths"]
+
+
+def test_select_capped_metrics_prioritizes_and_caps():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.measure_policy import select_capped_metrics
+    pool = ["a", "b", "c", "d", "e"]
+    priority = [{"metric": "d", "reason": "x"}, {"metric": "z_not_in_pool", "reason": "y"}]
+    assert select_capped_metrics(pool, priority, max_n=3) == ["d", "a", "b"]
+    assert select_capped_metrics(pool, None, max_n=2) == ["a", "b"]
+
+
+def test_pick_distribution_chart_types_caps_at_two():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.measure_policy import pick_distribution_chart_types
+    skewed = pd.Series(np.exp(np.random.default_rng(0).normal(3, 1.5, 200)))
+    normal = pd.Series(np.random.default_rng(0).normal(50, 10, 200))
+    assert pick_distribution_chart_types(skewed) == ["dist", "ecdf"]
+    assert pick_distribution_chart_types(normal) == ["dist", "box"]
+
+
+def test_distribution_skill_caps_metrics_and_drops_violin_by_default():
+    # #166 커밋4: 지표 전체 × 4종 무조건 생성하던 것을 priority_metrics 우선 + family 상한(6)
+    # + 지표당 최대 2종으로 축소. violin은 기본 예산에서 제외된다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.distribution_skill import run_distribution_skill
+    df = _guard_df()
+    out = run_distribution_skill(df, question_type="distribution",
+                                 priority_metrics=[{"metric": "score", "reason": "x"}])
+    assert out["violins"]["chart_paths"] == []
+    dist_names = {__import__("os").path.basename(p) for p in out["distributions"]["chart_paths"]}
+    assert "dist_score.png" in dist_names
 
 
 def test_key_charts_reject_high_cardinality_key(tmp_path):
@@ -1143,6 +1309,213 @@ def test_plot_top_n_barplot_top_only_skips_bottom(tmp_path):
     out = visualize.plot_top_n_barplot(d, measure_cols=["value"], top_only=True)
     names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
     assert names and all("bar_bottom" not in n for n in names)
+
+
+def test_segment_profile_chart_generates_for_flag_columns(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _guard_df()
+    df["is_high_value_low_satisfaction"] = ((df["value"] > df["value"].median()) & (df["score"] < df["score"].median())).astype(int)
+    out = V.plot_segment_flag_profiles(df, measure_cols=["value", "score"])
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "segment_profile_is_high_value_low_satisfaction.png" in names
+    assert out["stats"]["is_high_value_low_satisfaction"]["segment_rate"] > 0
+
+
+def test_comparison_skill_emits_interval_and_segment_charts():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.comparison_skill import run_comparison_skill
+    df = _guard_df()
+    df["state"] = np.where(df.index % 3 == 0, "AA", np.where(df.index % 3 == 1, "BB", "CC"))
+    df["is_high_value_low_satisfaction"] = ((df["value"] > df["value"].median()) & (df["score"] < df["score"].median())).astype(int)
+    out = run_comparison_skill(df, key_col="state", measure_cols=["value", "score"], question_type="comparison")
+    assert out["mean_ci"]["chart_paths"]
+    assert out["segment_profile"]["chart_paths"]
+
+
+def test_comparison_skill_caps_metrics_with_priority(tmp_path):
+    # #166 커밋4: 지표 6개(cap=4 초과) 중 priority_metrics가 앞에 오고 상한을 넘지 않아야 함.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.comparison_skill import run_comparison_skill
+    V.set_output_dirs(str(tmp_path))
+    rng = np.random.default_rng(0)
+    n = 150
+    df = pd.DataFrame({
+        "state": rng.choice(list("ABC"), n),
+        "m1": rng.normal(10, 2, n), "m2": rng.normal(20, 3, n), "m3": rng.normal(30, 4, n),
+        "m4": rng.normal(40, 5, n), "m5": rng.normal(50, 6, n), "m6": rng.normal(60, 7, n),
+    })
+    out = run_comparison_skill(
+        df, key_col="state", question_type="comparison",
+        priority_metrics=[{"metric": "m5", "reason": "x"}, {"metric": "m6", "reason": "y"}])
+    heatmap_metrics = set(out["heatmap_matrix"]["stats"].get("top3_per_metric", {}).keys())
+    assert {"m5", "m6"}.issubset(heatmap_metrics)
+    assert len(heatmap_metrics) <= 4
+
+
+def test_pick_key_col_rejects_constant_column(tmp_path):
+    # 고객 단위 집계본은 anchor_date 등 스냅샷 컬럼이 전 행 동일값(그룹 1개)인 경우가 많다.
+    # 카디널리티 상한만 보면 "유효한 범주"로 오판해 그룹 비교 차트가 전부 스킵된다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    df = pd.DataFrame({
+        "anchor_date": ["2018-08-29T15:00:37"] * 50,  # 상수(그룹 1개)
+        "value": np.linspace(1, 50, 50),
+    })
+    assert V._pick_key_col(df, None) is None
+
+
+def test_mean_ci_uses_flag_priority_when_no_categorical_key(tmp_path):
+    # 실측 재현: RFM 집계 마트(범주 키 없음, anchor_date는 상수) + 세그먼트 플래그만 존재.
+    # is_high_value_low_satisfaction/is_high_value가 이번 결과에서 전부 0(상수)이면
+    # 우선순위상 다음 순번인 is_low_satisfaction으로 그룹핑해야 한다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    rng = np.random.default_rng(0)
+    n = 100
+    df = pd.DataFrame({
+        "anchor_date": ["2018-08-29T15:00:37"] * n,          # 상수 스냅샷
+        "is_high_value_low_satisfaction": [0] * n,            # 이번 결과에선 전부 0(상수)
+        "is_high_value": [0] * n,                              # 이번 결과에선 전부 0(상수)
+        "is_low_satisfaction": ([1] * 20) + ([0] * 80),        # 유일하게 변동 있는 플래그
+        "avg_review_score": np.concatenate([
+            rng.normal(2.4, 0.8, 20), rng.normal(4.6, 0.4, 80),
+        ]),
+    })
+    out = V.plot_mean_ci_comparison(df, key_col=None, measure_cols=["avg_review_score"])
+    assert out["chart_paths"], "범주 키가 없어도 세그먼트 플래그로 그룹핑해 차트가 나와야 함"
+    groups = {g["is_low_satisfaction"] for g in out["stats"]["avg_review_score"]["top_groups"]}
+    assert groups == {0, 1}
+
+
+def test_mean_ci_badge_uses_safe_corner_not_covering_top_group_point(tmp_path, monkeypatch):
+    # 실측 발견(#166): 평균 내림차순 정렬이라 최고 평균 그룹은 항상 우상단(y=0,x=최댓값)에
+    # 찍히는데, 통계 배지 기본 위치도 우상단이라 그 점을 매번 가리는 렌더링 버그였다.
+    # 배지가 안전한 좌상단으로 호출되는지(=우상단 데이터 포인트를 더 이상 덮지 않는지) 확인한다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    captured = {}
+    original = V._add_stat_badge
+
+    def spy(ax, lines, loc="upper right"):
+        captured["loc"] = loc
+        return original(ax, lines, loc=loc)
+
+    monkeypatch.setattr(V, "_add_stat_badge", spy)
+    df = pd.DataFrame({
+        "flag": [0] * 80 + [1] * 20,
+        "metric": np.concatenate([np.full(80, 1.0), np.full(20, 5.0)]),
+    })
+    V.plot_mean_ci_comparison(df, key_col="flag", measure_cols=["metric"])
+    assert captured.get("loc") == "upper left"
+
+
+def test_add_stat_badge_positions_cover_all_corners():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import _BADGE_POSITIONS
+    x, y, ha, va = _BADGE_POSITIONS["upper left"]
+    assert x < 0.5 and y > 0.5 and ha == "left" and va == "top"
+    x, y, ha, va = _BADGE_POSITIONS["upper right"]
+    assert x > 0.5 and y > 0.5 and ha == "right" and va == "top"
+
+
+def test_flag_group_label_translates_binary_value_to_readable_name():
+    # 실측 피드백(#166): interval/multiline이 0/1 플래그를 그룹 키로 쓰면 축/범례가 그냥
+    # "0","1"로만 보여 어떤 그룹 비교인지 안 읽혔다. 컬럼명 기반 라벨로 바꾼다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize import _flag_group_label
+    assert _flag_group_label("is_high_value_low_satisfaction", 1) == "High value low satisfaction"
+    assert _flag_group_label("is_high_value_low_satisfaction", 0) == "Rest"
+    assert _flag_group_label("is_high_value", 1.0) == "High value"
+
+
+def test_mean_ci_uses_readable_labels_for_flag_group(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    monkeypatch.setattr(V.plt, "close", lambda *a, **k: None)  # 렌더된 축을 닫기 전에 검사
+    df = pd.DataFrame({
+        "is_high_value_low_satisfaction": [0] * 80 + [1] * 20,
+        "metric": np.concatenate([np.full(80, 4.3), np.full(20, 1.8)]),
+    })
+    V.plot_mean_ci_comparison(df, key_col=None, measure_cols=["metric"])
+    ax = plt.gcf().axes[0]
+    labels = [t.get_text() for t in ax.get_yticklabels()]
+    assert "Rest" in labels
+    assert "High value low satisfaction" in labels
+
+
+def test_multiline_timeseries_ignores_high_cardinality_id_key(tmp_path):
+    # 실측 발견(#166): key_col이 customer_unique_id처럼 ID급(고카디널리티)이면 고객마다
+    # 선 하나·점 하나짜리 무의미한 차트가 나왔다. 다른 세그먼트 플래그로 폴백해야 한다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _time_gate_df()
+    df["customer_unique_id"] = [f"id{i:05d}" for i in range(len(df))]  # 전부 유니크(ID급)
+    df["is_high_value"] = (df["value"] > df["value"].median()).astype(int)
+    out = V.plot_multiline_timeseries(df, key_col="customer_unique_id", measure_cols=["value"])
+    assert out.get("key_col") != "customer_unique_id"
+    assert out["chart_paths"], "ID급 키를 걸러내고 대체 키로 차트가 나와야 함"
+
+
+def test_scatter_pairs_excludes_quartile_derived_columns(tmp_path):
+    # 실측 피드백(#166): m_quartile/r_quartile처럼 원본에서 파생된 순서형 버킷 컬럼은
+    # scatter로 그리면 몇 줄짜리 계단 모양만 나와 정보량이 낮다 — 후보에서 제외한다.
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    rng = np.random.default_rng(0)
+    n = 200
+    monetary = rng.exponential(200, n)
+    df = pd.DataFrame({
+        "monetary_value": monetary,
+        "m_quartile": pd.qcut(monetary, 4, labels=False) + 1,
+        "avg_review_score": rng.normal(4, 1, n),
+    })
+    out = V.plot_scatter_pairs(df, measure_cols=["monetary_value", "m_quartile", "avg_review_score"])
+    pairs = list(out["stats"].keys())
+    assert not any("m_quartile" in p for p in pairs)
+
+
+# ─────────────────────────────
+# 시계열 usable_time_columns 게이팅 (#166 커밋3)
+# ─────────────────────────────
+def _time_gate_df(n=200):
+    import numpy as _np
+    rng = _np.random.default_rng(0)
+    base = pd.Timestamp("2018-01-01")
+    day_offsets = rng.choice(_np.arange(0, 180, 6), size=n)  # 30개 날짜(~6개월)에 반복관측
+    return pd.DataFrame({
+        "anchor_date": [base] * n,                                    # 상수 스냅샷
+        "signup_date": pd.date_range(base, periods=n, freq="D"),       # 행마다 유니크(엔티티 속성)
+        "order_date": base + pd.to_timedelta(day_offsets, unit="D"),   # 날짜당 반복관측(진짜 시계열)
+        "value": rng.normal(50, 10, n),
+    })
+
+
+def test_usable_time_columns_excludes_snapshot_and_entity_attribute_dates():
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib.dtype_utils import usable_time_columns
+    df = _time_gate_df()
+    result = usable_time_columns(df, ["anchor_date", "signup_date", "order_date"])
+    assert result == ["order_date"]
+
+
+def test_plot_timeseries_skips_constant_snapshot_and_uses_real_date(tmp_path):
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _time_gate_df()
+    out = V.plot_timeseries(df, measure_cols=["value"])
+    assert out["chart_paths"]
+    assert out["stats"]["value"]["start"] != out["stats"]["value"]["end"]  # anchor_date였다면 상수라 같았을 것
+
+
+def test_plot_multiline_timeseries_no_crash_when_key_col_equals_metric(tmp_path):
+    # 실측 재현: key_col이 세그먼트 플래그(is_high_value)로 잡히고 measure_cols에도 같은
+    # 컬럼이 섞여 들어오면, groupby 결과에 동일 이름 컬럼을 또 넣으려다 크래시했다(#166).
+    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize as V
+    V.set_output_dirs(str(tmp_path))
+    df = _time_gate_df()
+    df["is_high_value"] = (df["value"] > df["value"].median()).astype(int)
+    out = V.plot_multiline_timeseries(   # 크래시하지 않아야 함(과거엔 ValueError)
+        df, key_col="is_high_value", measure_cols=["value", "is_high_value"])
+    names = [__import__("os").path.basename(p) for p in out["chart_paths"]]
+    assert "multiline_value.png" in names
+    assert "multiline_is_high_value.png" not in names  # 그룹 키 자신은 지표 후보에서 제외
 
 
 def test_validate_request_rejects_bad_shape():

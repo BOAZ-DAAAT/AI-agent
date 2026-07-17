@@ -14,6 +14,7 @@ import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.analyze import AnalysisOutcome
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.coverage import build_answer_coverage
+from DATA_Analyst_Assistant_Agent.agents.analysis.result_contract import normalize_result_payload
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisContext,
     AnalysisEvidence,
@@ -77,7 +78,7 @@ def build_result_from_outcome(
     dataframe: pd.DataFrame,
     profiles: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    result_payload = outcome.result or {}
+    result_payload = normalize_result_payload(outcome.result or {})
     evidence = _evidence_from_outcome(outcome)
 
     findings: list[str] = [str(item) for item in (result_payload.get("findings") or [])]
@@ -138,6 +139,7 @@ def build_result_from_outcome(
         evidence_tables=result_payload.get("evidence_tables") or [],
         interpretation=[str(item) for item in (result_payload.get("interpretation") or [])],
         review_request=review_request,
+        selection_response=context.selection_response,
         method_notes=list(dict.fromkeys(method_notes)),
         method_decision=method_decision,
         intent=intent,
