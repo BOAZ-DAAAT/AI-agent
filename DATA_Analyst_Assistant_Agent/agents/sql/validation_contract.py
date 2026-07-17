@@ -10,6 +10,13 @@ from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     schema_tables,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_error
+from DATA_Analyst_Assistant_Agent.agents.sql.sql_features import (
+    SQLFeatures,
+    bare_identifier,
+    canonical_aggregation,
+    canonical_identifier,
+    extract_sql_features,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 
 
@@ -19,49 +26,6 @@ def _normalized_sql(sql: str) -> str:
 
 def _normalized_upper_sql(sql: str) -> str:
     return _normalized_sql(sql).upper()
-
-
-_AGGREGATION_ALIASES = {
-    "COUNT_DISTINCT": "COUNT_DISTINCT",
-    "COUNTDISTINCT": "COUNT_DISTINCT",
-    "DISTINCT_COUNT": "COUNT_DISTINCT",
-    "COUNT DISTINCT": "COUNT_DISTINCT",
-    "DEDUP": "DEDUPLICATE",
-    "DEDUPLICATE": "DEDUPLICATE",
-    "ROW_NUMBER": "DEDUPLICATE",
-}
-
-
-def _canonical_aggregation(value: Any) -> str:
-    token = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
-    if not token:
-        return ""
-    return _AGGREGATION_ALIASES.get(token, token)
-
-
-def _sql_aggregation_features(sql: str) -> set[str]:
-    upper_sql = _normalized_upper_sql(sql)
-    features: set[str] = set()
-    for func in ("SUM", "COUNT", "AVG", "MIN", "MAX"):
-        if re.search(rf"\b{func}\s*\(", upper_sql):
-            features.add(func)
-    if re.search(r"\bCOUNT\s*\(\s*DISTINCT\b", upper_sql):
-        features.add("COUNT_DISTINCT")
-        features.add("COUNT")
-    if re.search(r"\bROW_NUMBER\s*\(", upper_sql) or re.search(r"\bSELECT\s+DISTINCT\b", upper_sql):
-        features.add("DEDUPLICATE")
-    if re.search(r"\bNTILE\s*\(", upper_sql):
-        features.add("NTILE")
-    return features
-
-
-def _has_required_aggregation(sql: str, aggregation: Any) -> bool:
-    required = _canonical_aggregation(aggregation)
-    if not required:
-        return True
-    if required in _sql_aggregation_features(sql):
-        return True
-    return required in _normalized_upper_sql(sql)
 
 
 def _normalized_mart_policy(plan: dict[str, Any], mart_design: dict[str, Any]) -> str:
@@ -108,6 +72,25 @@ def _has_aggregation_justification(mart_design: dict[str, Any], sql_draft: dict[
         "원본",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _parse_sql_features(sql: str) -> tuple[SQLFeatures | None, list[dict[str, Any]]]:
+    try:
+        return extract_sql_features(sql), []
+    except Exception as exc:
+        return None, [{
+            "category": "sql_parse_error",
+            "severity": "error",
+            "retryable": True,
+            "detail": f"SQL 구조를 파싱하지 못했습니다: {exc}",
+        }]
+
+
+def _has_required_aggregation(features: SQLFeatures, aggregation: Any) -> bool:
+    required = canonical_aggregation(aggregation)
+    if not required:
+        return True
+    return required in features.aggregations or required in features.window_functions
 
 
 # TRIM(BOTH x FROM y) / EXTRACT(YEAR FROM col) / SUBSTRING(str FROM pos FOR len) 등은
@@ -199,22 +182,28 @@ def validate_sql_dialect_and_route(plan: dict[str, Any], sql_draft: dict[str, An
 def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     sql = sql_draft.get("sql") or ""
+    features, parse_findings = _parse_sql_features(sql)
+    if parse_findings:
+        return parse_findings
+    assert features is not None
     contract = build_intent_contract(plan)
     # required_aggregations/required_tables는 datamart_creation(comprehensive)에도 그대로
     # 적용한다 — RFM처럼 "이 파생 집계 컬럼이 마트에 있어야 한다"는 요구를 semantic LLM
     # 판정에만 맡기지 않고 결정론적으로 먼저 걸러낸다. grouped_aggregate 전용 GROUP BY
     # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
-        if not _has_required_aggregation(sql, agg):
+        if not _has_required_aggregation(features, agg):
             findings.append({"category": "intent_mismatch", "severity": "error", "retryable": True, "detail": f"질문 의도상 필요한 집계 함수 {agg} 가 SQL에 없습니다."})
     dimensions = [str(d) for d in contract.get("dimensions", []) if d]
-    if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and "GROUP BY" not in _normalized_upper_sql(sql):
+    if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and not features.top_level_group_by:
         findings.append({"category": "result_shape_mismatch", "severity": "error", "retryable": True, "detail": "그룹 집계 질문인데 GROUP BY가 없습니다."})
     required_tables = [str(t) for t in contract.get("required_tables", []) if t]
-    source_tables = [str(t) for t in sql_draft.get("source_tables", []) if t]
-    sql_lower = _normalized_sql(sql_draft.get("sql") or "").lower()
+    source_tables = {
+        canonical_identifier(t) for t in sql_draft.get("source_tables", []) if t
+    } | features.source_tables
     for table_name in required_tables:
-        if table_name not in source_tables and table_name.lower() not in sql_lower:
+        table = canonical_identifier(table_name)
+        if table not in source_tables and bare_identifier(table) not in {bare_identifier(t) for t in source_tables}:
             findings.append({"category": "invalid_join_plan", "severity": "warning", "retryable": True, "detail": f"planner가 선택한 핵심 테이블 {table_name} 이 SQL에 반영되지 않았습니다."})
     return findings
 
@@ -248,10 +237,11 @@ def validate_datamart_reusability(plan: dict[str, Any], mart_design: dict[str, A
     if contract.get("expected_result_shape") != "datamart_creation":
         return []
     findings: list[dict[str, Any]] = []
-    sql = _normalized_upper_sql(sql_draft.get("sql") or "")
-    has_aggregate_summary = _has_top_level_token(
-        sql, ("GROUP BY", "HAVING", "COUNT(", "SUM(", "AVG(", "MIN(", "MAX(")
-    )
+    features, parse_findings = _parse_sql_features(sql_draft.get("sql") or "")
+    if parse_findings:
+        return parse_findings
+    assert features is not None
+    has_aggregate_summary = features.top_level_group_by or bool(features.top_level_aggregations)
     policy = _normalized_mart_policy(plan, mart_design)
     grain = str((mart_design or {}).get("grain") or "")
     if not grain.strip():
@@ -270,27 +260,29 @@ def validate_sql_identifiers(plan: dict[str, Any], sql_draft: dict[str, Any], sc
     findings: list[dict[str, Any]] = []
     if not isinstance(tables, dict) or not tables:
         return findings
-    available_tables = set(str(name) for name in tables.keys())
+    available_tables = {canonical_identifier(name) for name in tables.keys()}
+    available_bare_tables = {bare_identifier(name) for name in available_tables}
     available_columns = {str(table_name): _extract_table_columns(table_info) for table_name, table_info in tables.items()}
     sql = _normalized_sql(sql_draft.get("sql") or "")
-    cte_names = _extract_cte_names(sql)
+    features, parse_findings = _parse_sql_features(sql)
+    if parse_findings:
+        return parse_findings
+    assert features is not None
     source_tables = [str(t) for t in sql_draft.get("source_tables", []) if t]
     required_tables = [str(t) for t in build_intent_contract(plan).get("required_tables", []) if t]
     candidate_tables = list(dict.fromkeys(source_tables + required_tables))
     for table_name in candidate_tables:
-        bare_name = table_name.split(".")[-1]
-        if bare_name not in available_tables and table_name not in available_tables:
+        table = canonical_identifier(table_name)
+        bare_name = bare_identifier(table)
+        if bare_name not in available_bare_tables and table not in available_tables:
             findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"테이블 {table_name} 이(가) 제공된 스키마에 없습니다."})
     for column_name in [str(c) for c in sql_draft.get("source_column_refs", []) if c]:
         bare_column_name = column_name.split(".")[-1]
         if not any(bare_column_name in cols for cols in available_columns.values()):
             findings.append({"category": "missing_column", "severity": "error", "retryable": False, "detail": f"컬럼 {column_name} 이(가) 제공된 스키마에 없습니다."})
-    sql_lower = _mask_from_arg_functions(sql.lower())
-    for ref in re.findall(r"(?:from|join|into|table)\s+([a-zA-Z_][a-zA-Z0-9_\\.]*)", sql_lower):
-        bare_name = ref.split(".")[-1]
-        if bare_name in cte_names:
-            continue
-        if bare_name not in available_tables and not ref.startswith("analytics."):
+    for ref in sorted(features.source_tables):
+        bare_name = bare_identifier(ref)
+        if bare_name not in available_bare_tables and ref not in available_tables:
             findings.append({"category": "missing_table", "severity": "error", "retryable": False, "detail": f"SQL이 참조한 테이블 {ref} 이(가) 제공된 스키마에 없습니다."})
     return _dedupe_findings(findings)
 
@@ -335,7 +327,7 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     if not findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
-    priority = {"sql_generation_failed": 0, "mysql_dialect_error": 1, "missing_table": 2, "missing_column": 3, "intent_mismatch": 4, "result_shape_mismatch": 5, "invalid_join_plan": 6, "postcheck_failed": 7, "mart_summary_bias": 8, "mart_policy_mismatch": 9, "mart_grain_missing": 10, "execution_error": 11, "empty_result": 12}
+    priority = {"sql_generation_failed": 0, "sql_parse_error": 1, "mysql_dialect_error": 2, "missing_table": 3, "missing_column": 4, "intent_mismatch": 5, "result_shape_mismatch": 6, "invalid_join_plan": 7, "postcheck_failed": 8, "mart_summary_bias": 9, "mart_policy_mismatch": 10, "mart_grain_missing": 11, "execution_error": 12, "empty_result": 13}
     ranked_findings = sorted(
         findings,
         key=lambda item: (
@@ -347,6 +339,7 @@ def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
     category = primary.get("category", "validation_failed")
     suggested_action = primary.get("suggested_action") or {
         "sql_generation_failed": "regenerate_sql",
+        "sql_parse_error": "rewrite_parseable_sql",
         "mysql_dialect_error": "rewrite_mysql_dialect",
         "route_kind_mismatch": "repair_sql_type",
         "missing_table": "reselect_table",

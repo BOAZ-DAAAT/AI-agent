@@ -55,6 +55,41 @@ def test_genuine_missing_table_reference_is_still_caught() -> None:
     assert any(f["category"] == "missing_table" and "not_a_real_table" in f["detail"] for f in findings)
 
 
+def test_cte_names_are_not_mistaken_for_missing_schema_tables() -> None:
+    plan = {"route_kind": "comprehensive"}
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.dm_customer_order_rfm_base AS "
+            "WITH payments_agg AS ("
+            "  SELECT order_id, SUM(payment_value) AS order_gross_revenue "
+            "  FROM order_payments GROUP BY order_id"
+            "), "
+            "global_stats AS ("
+            "  SELECT MAX(order_purchase_timestamp) AS max_order_purchase_timestamp FROM orders"
+            "), "
+            "ntile_probe AS ("
+            "  SELECT MAX(tile) AS any_ntile_value FROM ("
+            "    SELECT NTILE(4) OVER (ORDER BY order_purchase_timestamp) AS tile FROM orders"
+            "  ) t"
+            ") "
+            "SELECT o.order_id, p.order_gross_revenue "
+            "FROM orders o "
+            "JOIN payments_agg p ON o.order_id = p.order_id "
+            "CROSS JOIN global_stats gs "
+            "CROSS JOIN ntile_probe np"
+        ),
+        "source_tables": ["orders", "order_payments"],
+    }
+    schema_text = _schema_text(
+        orders=["order_id", "order_purchase_timestamp"],
+        order_payments=["order_id", "payment_value"],
+    )
+
+    findings = validate_sql_identifiers(plan, sql_draft, schema_text)
+
+    assert findings == []
+
+
 # ── 서브쿼리 사전집계(fan-out 방지 JOIN)를 마트 전체 요약으로 오인하지 않는다 ──
 
 
