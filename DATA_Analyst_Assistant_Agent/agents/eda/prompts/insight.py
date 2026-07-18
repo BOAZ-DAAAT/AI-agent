@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-# 프로즈 뒤에 붙일 구조화 필드 구분자 — 노드가 이 마커 뒤 JSON을 분리해 summary_facts로 쓴다(#194).
+# 프로즈 뒤에 붙일 구조화 필드 구분자들 — 노드가 이 마커 뒤 JSON을 분리해 각각 쓴다(#194).
 SUMMARY_FACTS_MARKER = "===SUMMARY_FACTS==="
+LLM_CAUTIONS_MARKER = "===LLM_CAUTIONS==="
+LLM_CAUTION_MAX = 3
+ALLOWED_CAUTION_SEVERITY = {"low", "medium", "high"}
 
 
-def insight_prompt(user_question: str, statistical_metadata: Dict[str, Any], all_results: str) -> str:
+def insight_prompt(
+    user_question: str, statistical_metadata: Dict[str, Any], all_results: str,
+    existing_caution_codes: List[str] | None = None,
+) -> str:
+    existing_codes_text = sorted(existing_caution_codes or [])
     return f"""
 너는 EDA 종합 분석가다. 데이터를 읽는 것을 넘어, 이 데이터가 어떤 시장·비즈니스 구조를 보여주는지 해석하는 것이 네 역할이다.
 
@@ -68,4 +75,15 @@ def insight_prompt(user_question: str, statistical_metadata: Dict[str, Any], all
 {SUMMARY_FACTS_MARKER}
 ["핵심 사실 3~6개. 각 항목은 위 [검증된 수치]에 실제로 존재하는 값만 담은 짧은 한 문장.",
  "검증된 수치에 없는 조합(예: 그룹별로 따로 집계되지 않은 평균)은 새 숫자로 만들지 마라 — 그런 건 방향성만 서술하거나 아예 넣지 마라."]
+
+그 다음, 아래 구분선과 JSON 배열을 정확히 그대로 추가로 출력하라(규칙 기반 점검이 놓쳤을 수 있는
+추가 주의사항 — 클래스 불균형·시계열 계절성·이중분포·절단/검열·결측 편중 같은 유형만, 근거 없으면
+빈 배열 `[]`):
+- 이미 있는 code는 다시 만들지 마라: {existing_codes_text}
+- data_level.is_aggregated가 true면 집계본이다: group_comparison의 min_group_n/max_group_n으로
+  '표본 부족' 경고를 만들지 마라(그룹당 1행이라 1이 당연). 표본 신뢰도는 sample_reliability.low_n_groups를 근거로 하라.
+- 각 항목은 soft 경고다. 분석을 '금지'하지 마라(권고까지만). 최대 {LLM_CAUTION_MAX}개.
+{LLM_CAUTIONS_MARKER}
+[{{"code":"UPPER_SNAKE","severity":"low|medium|high","message_ko":"한국어 설명",
+"recommended_action":["english_tag"],"evidence_keys":["어느 통계를 봤는지"]}}]
 """

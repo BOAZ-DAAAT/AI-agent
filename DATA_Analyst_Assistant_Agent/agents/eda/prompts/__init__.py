@@ -9,7 +9,6 @@ from DATA_Analyst_Assistant_Agent.agents.eda.prompts.analysis import (
     distribution_prompt,
     inspect_prompt,
     quality_prompt,
-    react_fix_prompt,
     relationship_prompt,
     time_prompt,
 )
@@ -32,7 +31,6 @@ __all__ = [
     "comparison_prompt",
     "relationship_prompt",
     "time_prompt",
-    "react_fix_prompt",
     "insight_prompt",
     "hypothesis_prompt",
     "output_summary_prompt",
