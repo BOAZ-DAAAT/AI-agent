@@ -113,6 +113,27 @@ class ActiveNodeExecution(BaseModel):
     status: ActiveNodeStatus = "running"
 
 
+class CompletedNodeExecution(BaseModel):
+    node_id: str
+    agent_name: AgentName
+    parent_node_id: str | None = None
+    node_sequence: int = Field(ge=1)
+    attempt: int = Field(ge=1)
+    status: Literal["completed"] = "completed"
+    summary: StepSummary
+
+
+class FailedNodeExecution(BaseModel):
+    node_id: str
+    agent_name: AgentName
+    parent_node_id: str | None = None
+    node_sequence: int = Field(ge=1)
+    attempt: int = Field(ge=1)
+    status: Literal["failed"] = "failed"
+    reason: str
+    reason_code: str = ""
+
+
 class PendingApproval(BaseModel):
     approval_id: str
     agent: AgentName
@@ -625,6 +646,199 @@ def begin_or_retry_agent_node(
         _ensure_json_serializable(updated_state),
         next_node,
         "agent.started",
+    )
+
+
+def discard_active_node_for_recovery(
+    state: SupervisorState,
+    *,
+    next_agent_name: AgentName,
+    reason: str,
+) -> tuple[
+    SupervisorState,
+    ActiveNodeExecution,
+    Literal["agent.discarded"],
+]:
+    normalized = normalize_supervisor_state(state)
+    active_node_payload = normalized.get("active_node")
+
+    if not isinstance(active_node_payload, dict):
+        raise ValueError("폐기할 active_node가 없습니다.")
+
+    active_node = ActiveNodeExecution.model_validate(active_node_payload)
+
+    if active_node.agent_name == next_agent_name:
+        raise ValueError(
+            "같은 Agent의 재시도에는 노드를 폐기할 수 없습니다. "
+            "begin_or_retry_agent_node()를 사용해야 합니다."
+        )
+
+    if not reason.strip():
+        raise ValueError("노드 폐기 사유가 필요합니다.")
+
+    updated_state: SupervisorState = {
+        **normalized,
+        "active_node": None,
+    }
+
+    return (
+        _ensure_json_serializable(updated_state),
+        active_node,
+        "agent.discarded",
+    )
+
+
+def wait_active_node(
+    state: SupervisorState,
+    *,
+    agent_name: AgentName,
+    reason: str,
+) -> tuple[
+    SupervisorState,
+    ActiveNodeExecution,
+    Literal["agent.waiting"],
+]:
+    normalized = normalize_supervisor_state(state)
+    active_node_payload = normalized.get("active_node")
+
+    if not isinstance(active_node_payload, dict):
+        raise ValueError("대기 상태로 전환할 active_node가 없습니다.")
+
+    active_node = ActiveNodeExecution.model_validate(active_node_payload)
+
+    if active_node.agent_name != agent_name:
+        raise ValueError(
+            "active_node의 Agent와 대기할 Agent가 다릅니다. "
+            f"active={active_node.agent_name}, waiting={agent_name}"
+        )
+
+    if not reason.strip():
+        raise ValueError("노드 대기 사유가 필요합니다.")
+
+    waiting_node = active_node.model_copy(
+        update={"status": "waiting"},
+    )
+
+    updated_state: SupervisorState = {
+        **normalized,
+        "active_node": waiting_node.model_dump(mode="json"),
+    }
+
+    return (
+        _ensure_json_serializable(updated_state),
+        waiting_node,
+        "agent.waiting",
+    )
+
+
+def fail_active_node(
+    state: SupervisorState,
+    *,
+    agent_name: AgentName,
+    reason: str,
+    reason_code: str = "",
+) -> tuple[
+    SupervisorState,
+    FailedNodeExecution,
+    Literal["agent.failed"],
+]:
+    normalized = normalize_supervisor_state(state)
+    active_node_payload = normalized.get("active_node")
+
+    if not isinstance(active_node_payload, dict):
+        raise ValueError("실패 처리할 active_node가 없습니다.")
+
+    active_node = ActiveNodeExecution.model_validate(active_node_payload)
+
+    if active_node.agent_name != agent_name:
+        raise ValueError(
+            "active_node의 Agent와 실패 처리할 Agent가 다릅니다. "
+            f"active={active_node.agent_name}, failed={agent_name}"
+        )
+
+    if not reason.strip():
+        raise ValueError("노드 실패 사유가 필요합니다.")
+
+    failed_node = FailedNodeExecution(
+        node_id=active_node.node_id,
+        agent_name=active_node.agent_name,
+        parent_node_id=active_node.parent_node_id,
+        node_sequence=active_node.node_sequence,
+        attempt=active_node.attempt,
+        reason=reason,
+        reason_code=reason_code,
+    )
+
+    updated_state: SupervisorState = {
+        **normalized,
+        "active_node": None,
+    }
+
+    return (
+        _ensure_json_serializable(updated_state),
+        failed_node,
+        "agent.failed",
+    )
+
+
+def complete_active_node(
+    state: SupervisorState,
+    *,
+    agent_name: AgentName,
+    step_summary: StepSummary,
+) -> tuple[
+    SupervisorState,
+    CompletedNodeExecution,
+    Literal["agent.completed"],
+]:
+    normalized = normalize_supervisor_state(state)
+    active_node_payload = normalized.get("active_node")
+
+    if not isinstance(active_node_payload, dict):
+        raise ValueError("완료할 active_node가 없습니다.")
+
+    active_node = ActiveNodeExecution.model_validate(active_node_payload)
+
+    if active_node.agent_name != agent_name:
+        raise ValueError(
+            "active_node의 Agent와 완료할 Agent가 다릅니다. "
+            f"active={active_node.agent_name}, completed={agent_name}"
+        )
+
+    if agent_name not in normalized.get("completed_agents", []):
+        raise ValueError(
+            "결과가 아직 accepted evidence로 승격되지 않았습니다."
+        )
+
+    if step_summary.agent != agent_name:
+        raise ValueError("StepSummary의 Agent가 active_node와 다릅니다.")
+
+    if not step_summary.summary.strip():
+        raise ValueError("완료 노드에는 비어 있지 않은 summary가 필요합니다.")
+
+    summary_payload = step_summary.model_dump(mode="json")
+    if summary_payload not in normalized.get("step_summaries", []):
+        raise ValueError("StepSummary가 SupervisorState에 저장되지 않았습니다.")
+
+    completed_node = CompletedNodeExecution(
+        node_id=active_node.node_id,
+        agent_name=active_node.agent_name,
+        parent_node_id=active_node.parent_node_id,
+        node_sequence=active_node.node_sequence,
+        attempt=active_node.attempt,
+        summary=step_summary,
+    )
+
+    updated_state: SupervisorState = {
+        **normalized,
+        "active_node": None,
+        "last_completed_node_id": completed_node.node_id,
+    }
+
+    return (
+        _ensure_json_serializable(updated_state),
+        completed_node,
+        "agent.completed",
     )
 
 
