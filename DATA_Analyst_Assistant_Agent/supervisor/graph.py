@@ -15,6 +15,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
     validate_analysis_review_resume,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.decision import (
+    AnalysisRuleExtractionDecision,
     AnalysisPlanDecision,
     ClarificationDecision,
     FinalizationDecision,
@@ -28,6 +29,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     invoke_supervisor_decision,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
+    ANALYSIS_RULE_EXTRACTION_PROMPT,
     CLARIFY_DECISION_PROMPT,
     DECIDE_NEXT_ACTION_PROMPT,
     FINALIZE_DECISION_PROMPT,
@@ -99,6 +101,167 @@ FINALIZE_PROTECTED_TERMINAL_STATES = {
     SupervisorTerminalState.needs_clarification.value,
     SupervisorTerminalState.failed_with_recoverable_context.value,
 }
+
+def _default_analysis_rule_search(query: str, **kwargs: Any) -> list[Any]:
+    from DATA_Analyst_Assistant_Agent.shared.pinecone import search_company_context
+
+    return search_company_context(query, **kwargs)
+
+
+def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | None = None):
+    rule_search = search or _default_analysis_rule_search
+
+    def retrieve_analysis_rules_node(state: SupervisorState) -> SupervisorState:
+        query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
+        base_updates: SupervisorState = {
+            "analysis_rule_context": None,
+            "current_step": "retrieve_analysis_rules",
+            "terminal_state": "running",
+        }
+        if not query:
+            return {
+                **base_updates,
+                "analysis_rule_retrieval": {"status": "skipped", "reason": "empty_query"},
+            }
+
+        try:
+            hits = rule_search(
+                query,
+                top_k=1,
+                metadata_filter={"doc_type": {"$eq": "analysis_query_rule"}},
+            )
+        except Exception as exc:
+            status = (
+                "disabled"
+                if exc.__class__.__name__ == "PineconeConfigurationError"
+                else "failed"
+            )
+            limitation = f"분석 규칙 검색을 적용하지 못했습니다: {exc}"
+            return {
+                **base_updates,
+                "analysis_rule_retrieval": {
+                    "status": status,
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+                "limitations": [*state.get("limitations", []), limitation],
+                "run_events": [
+                    *state.get("run_events", []),
+                    {"type": "analysis_rule_retrieval", "status": status},
+                ],
+            }
+
+        if not hits:
+            return {
+                **base_updates,
+                "analysis_rule_retrieval": {"status": "empty"},
+                "run_events": [
+                    *state.get("run_events", []),
+                    {"type": "analysis_rule_retrieval", "status": "empty"},
+                ],
+            }
+
+        hit = hits[0]
+        try:
+            extraction = invoke_supervisor_decision(
+                state,
+                model,
+                ANALYSIS_RULE_EXTRACTION_PROMPT,
+                AnalysisRuleExtractionDecision,
+                extra={
+                    "user_query": query,
+                    "document": {
+                        "document_id": _hit_value(hit, "document_id", ""),
+                        "title": _hit_value(hit, "title", ""),
+                        "metadata": _hit_value(hit, "metadata", {}),
+                        "content": _hit_value(hit, "text", ""),
+                    },
+                },
+            )
+        except Exception as exc:
+            limitation = f"검색된 분석 규칙 문서에서 필요한 규칙을 추출하지 못했습니다: {exc}"
+            return {
+                **base_updates,
+                "analysis_rule_retrieval": {
+                    "status": "extraction_failed",
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+                "limitations": [*state.get("limitations", []), limitation],
+                "run_events": [
+                    *state.get("run_events", []),
+                    {"type": "analysis_rule_retrieval", "status": "extraction_failed"},
+                ],
+            }
+
+        if not extraction.applicable or not extraction.rules:
+            return {
+                **base_updates,
+                "analysis_rule_retrieval": {
+                    "status": "not_applicable",
+                    "document_id": str(_hit_value(hit, "document_id", "")),
+                    "reason": extraction.reason,
+                },
+                "run_events": [
+                    *state.get("run_events", []),
+                    {"type": "analysis_rule_retrieval", "status": "not_applicable"},
+                ],
+            }
+
+        context = _analysis_rule_context(hit, extraction)
+        return {
+            **base_updates,
+            "analysis_rule_context": context,
+            "analysis_rule_retrieval": {
+                "status": "success",
+                "document_id": context.get("document_id", ""),
+                "query_type": context.get("query_type", ""),
+                "score": float(_hit_value(hit, "score", 0.0) or 0.0),
+                "reason": extraction.reason,
+            },
+            "run_events": [
+                *state.get("run_events", []),
+                {
+                    "type": "analysis_rule_retrieval",
+                    "status": "success",
+                    "document_id": context.get("document_id", ""),
+                },
+            ],
+        }
+
+    return retrieve_analysis_rules_node
+
+
+def _analysis_rule_context(
+    hit: Any,
+    extraction: AnalysisRuleExtractionDecision,
+) -> dict[str, Any]:
+    metadata = _hit_value(hit, "metadata", {})
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    context: dict[str, Any] = {
+        "document_id": str(
+            metadata.get("document_id") or _hit_value(hit, "document_id", "")
+        ),
+        "title": str(metadata.get("title") or _hit_value(hit, "title", "")),
+        "query_type": str(metadata.get("query_type") or ""),
+        "version": str(metadata.get("version") or ""),
+    }
+    context["rules"] = [
+        " ".join(str(rule).split())[:500]
+        for rule in extraction.rules[:12]
+        if str(rule).strip()
+    ]
+    if extraction.clarification_needed and extraction.clarification_question.strip():
+        context["clarification_question"] = " ".join(
+            extraction.clarification_question.split()
+        )[:500]
+    return context
+
+
+def _hit_value(hit: Any, key: str, default: Any) -> Any:
+    if isinstance(hit, dict):
+        return hit.get(key, default)
+    return getattr(hit, key, default)
 
 
 def make_clarify_query_node(model: Any | None):
@@ -335,6 +498,7 @@ def make_create_analysis_plan_node(model: Any | None):
             "dimension": decision.dimension,
             "filters": list(decision.filters),
             "requires_mart_review": decision.requires_mart_review,
+            "query_rules": dict(state.get("analysis_rule_context") or {}),
         }
         if state.get("datasource_id") is not None:
             plan["datasource_id"] = state.get("datasource_id")
@@ -900,6 +1064,7 @@ def build_graph(
     checkpointer: Any | None = None,
     *,
     insight_generator: Any | None = None,
+    analysis_rule_search: Any | None = None,
 ):
     if insight_generator is None:
         if hasattr(subagent_adapter, "generate_insight"):
@@ -912,6 +1077,10 @@ def build_graph(
 
     graph = StateGraph(SupervisorState)
     backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
+    graph.add_node(
+        "retrieve_analysis_rules",
+        make_retrieve_analysis_rules_node(analysis_rule_search, model),
+    )
     graph.add_node("clarify_query", make_clarify_query_node(model))
     graph.add_node("collect_clarification", make_collect_clarification_node())
     graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
@@ -925,7 +1094,8 @@ def build_graph(
     graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model))
 
-    graph.add_edge(START, "clarify_query")
+    graph.add_edge(START, "retrieve_analysis_rules")
+    graph.add_edge("retrieve_analysis_rules", "clarify_query")
     graph.add_conditional_edges(
         "clarify_query",
         _route_after_clarify,

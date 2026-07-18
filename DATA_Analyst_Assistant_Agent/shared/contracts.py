@@ -140,6 +140,7 @@ class AnalysisPlan(BaseModel):
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
+    query_rules: dict[str, Any] = Field(default_factory=dict)
     route_kind: Literal["simple", "eda", "trend", "mart", "comprehensive"] = "simple"
     generated_sql: str = ""
     source_sql: str = ""

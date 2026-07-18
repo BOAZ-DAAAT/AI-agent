@@ -16,8 +16,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     make_decide_next_action_node,
     make_execute_subagent_node,
     make_finalize_node,
+    make_retrieve_analysis_rules_node,
     make_resolve_candidate_node,
 )
+from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
@@ -143,6 +145,109 @@ def _state(user_query: str = "매출") -> dict[str, Any]:
         user_query=user_query,
         datasource_id=None,
     )
+
+
+def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() -> None:
+    document_text = """# 구매 빈도 분석 규칙
+
+## definition
+- 자주 구매한 고객은 구매 완료 주문 횟수로 집계한다.
+
+## default_metrics
+- customer_unique_id별 distinct order_id 수를 사용한다.
+
+## entity_grain
+- customer_unique_id당 한 행이다.
+
+## time_basis
+- order_purchase_timestamp를 사용한다.
+
+## required_tables
+- customers
+- orders
+
+## join_constraints
+- customers.customer_id = orders.customer_id로 조인한다.
+
+## status_and_null_rules
+- 취소 주문을 제외한다.
+
+## constraints
+- 결제 합계로 구매 빈도를 대체하지 않는다.
+
+## clarify_when
+- 기간이 없으면 전체 관측 기간인지 확인한다.
+
+## ambiguous_examples
+- 이 예시는 state에 저장하면 안 된다.
+
+## positive_examples
+- 이 원문도 state에 저장하면 안 된다.
+"""
+
+    def fake_search(query: str, **kwargs: Any) -> list[CompanyContextHit]:
+        assert query == "자주 구매하는 고객 특징을 분석해줘"
+        assert kwargs["top_k"] == 1
+        assert kwargs["metadata_filter"] == {
+            "doc_type": {"$eq": "analysis_query_rule"}
+        }
+        return [
+            CompanyContextHit(
+                record_id="purchase_frequency",
+                score=0.94,
+                text=document_text,
+                document_id="purchase_frequency",
+                title="Olist 구매 빈도 분석 규칙",
+                metadata={"query_type": "purchase_frequency", "version": "1.0"},
+            )
+        ]
+
+    model = SequencedDecisionModel(
+        [
+            {
+                "applicable": True,
+                "rules": [
+                    "구매 빈도는 결제 합계가 아니라 customer_unique_id별 distinct order_id 수로 계산한다.",
+                    "취소 주문은 구매 횟수에서 제외한다.",
+                ],
+                "clarification_needed": False,
+                "clarification_question": "",
+                "reason": "구매 빈도 집계에 직접 필요한 규칙만 선택했다.",
+            }
+        ]
+    )
+    updates = make_retrieve_analysis_rules_node(fake_search, model)(
+        _state("자주 구매하는 고객 특징을 분석해줘")
+    )
+
+    assert updates["analysis_rule_retrieval"]["status"] == "success"
+    assert updates["analysis_rule_context"]["document_id"] == "purchase_frequency"
+    assert updates["analysis_rule_context"]["query_type"] == "purchase_frequency"
+    assert updates["analysis_rule_context"]["rules"] == [
+        "구매 빈도는 결제 합계가 아니라 customer_unique_id별 distinct order_id 수로 계산한다.",
+        "취소 주문은 구매 횟수에서 제외한다.",
+    ]
+    extraction_payload = json.loads(model.messages[0][1]["content"])
+    assert extraction_payload["document"]["content"] == document_text
+    serialized = json.dumps(updates["analysis_rule_context"], ensure_ascii=False)
+    assert "이 예시는 state에 저장하면 안 된다" not in serialized
+    assert "이 원문도 state에 저장하면 안 된다" not in serialized
+    assert document_text not in serialized
+
+
+def test_retrieve_analysis_rules_fails_open_when_search_errors() -> None:
+    state = _state("배송 지연 분석")
+
+    def failing_search(query: str, **kwargs: Any) -> list[Any]:
+        raise RuntimeError("pinecone unavailable")
+
+    updates = make_retrieve_analysis_rules_node(failing_search)(state)
+
+    assert updates["analysis_rule_context"] is None
+    assert updates["analysis_rule_retrieval"]["status"] == "failed"
+    assert updates["current_step"] == "retrieve_analysis_rules"
+    assert updates["terminal_state"] == "running"
+    assert "pinecone unavailable" in updates["limitations"][-1]
 
 
 class RecordingBackendAdapter:
@@ -487,6 +592,7 @@ def test_supervisor_graph_has_expected_nodes() -> None:
 
     assert set(graph.nodes) == {
         "__start__",
+        "retrieve_analysis_rules",
         "clarify_query",
         "collect_clarification",
         "collect_analysis_review",
@@ -780,11 +886,17 @@ def test_finalize_llm_can_fail_without_insight_evidence() -> None:
 
 def test_plan_node_records_llm_planner_mode() -> None:
     node = make_create_analysis_plan_node(SequencedDecisionModel([_plan_decision(route_kind="comprehensive")]))
+    state = _state()
+    state["analysis_rule_context"] = {
+        "document_id": "sales-orders",
+        "default_metrics": ["SUM(order_payments.payment_value)"],
+    }
 
-    result = node(_state())
+    result = node(state)
 
     assert result["analysis_plan"]["route_kind"] == "comprehensive"
     assert result["analysis_plan"]["planner_mode"] == "llm"
+    assert result["analysis_plan"]["query_rules"] == state["analysis_rule_context"]
     assert result["llm_decisions"][0]["node"] == "create_analysis_plan"
 
 

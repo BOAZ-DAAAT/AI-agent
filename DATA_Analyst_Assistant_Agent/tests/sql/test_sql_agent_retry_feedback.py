@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
 
@@ -82,6 +84,30 @@ def test_sql_agent_clarification_empty_without_retry_context(monkeypatch) -> Non
 
     assert fake_app.invoked_with is not None
     assert fake_app.invoked_with["clarification_request"] == ""
+
+
+def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monkeypatch) -> None:
+    fake_app = _FakeApp()
+    _patch_build_app(monkeypatch, fake_app)
+    state = OrchestrationState(
+        run_id="run_1",
+        user_query="자주 구매하는 고객 특징을 분석해줘",
+        plan=AnalysisPlan(
+            goal="구매 빈도 상위 고객 분석",
+            query_rules={
+                "document_id": "purchase_frequency",
+                "default_metrics": ["distinct order_id 구매 횟수"],
+                "entity_grain": ["customer_unique_id 기준"],
+            },
+        ),
+    )
+
+    SQLAgent()._run_main_sql_agent(state)
+
+    assert fake_app.invoked_with is not None
+    reason = fake_app.invoked_with["planner_selection_reason"]
+    payload = json.loads(reason.split("Supervisor analysis_plan:\n", 1)[1])
+    assert payload["query_rules"] == state.plan.query_rules
 
 
 def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
