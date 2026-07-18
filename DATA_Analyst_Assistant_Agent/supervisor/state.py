@@ -31,6 +31,11 @@ NodeLifecycleEventType = Literal[
     "agent.discarded",
     "agent.failed",
 ]
+NodeActivationEventType = Literal[
+    "agent.started",
+    "agent.retrying",
+    "agent.resumed",
+]
 NextAction = Literal[
     "clarify",
     "create_plan",
@@ -553,6 +558,74 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "analysis_rule_retrieval": {"status": "not_started"},
     }
     return _ensure_json_serializable(normalized)
+
+
+def begin_or_retry_agent_node(
+    state: SupervisorState,
+    agent_name: AgentName,
+) -> tuple[
+    SupervisorState,
+    ActiveNodeExecution,
+    NodeActivationEventType,
+]:
+    normalized = normalize_supervisor_state(state)
+    active_node_payload = normalized.get("active_node")
+
+    if isinstance(active_node_payload, dict):
+        active_node = ActiveNodeExecution.model_validate(active_node_payload)
+
+        if active_node.agent_name != agent_name:
+            raise ValueError(
+                "다른 Agent의 active_node가 남아 있습니다. "
+                "Recovery 전환이라면 기존 active_node를 먼저 폐기해야 합니다. "
+                f"active={active_node.agent_name}, requested={agent_name}"
+            )
+
+        if active_node.status == "waiting":
+            next_node = active_node.model_copy(
+                update={"status": "running"},
+            )
+            event_type: NodeActivationEventType = "agent.resumed"
+        else:
+            next_node = active_node.model_copy(
+                update={"attempt": active_node.attempt + 1},
+            )
+            event_type = "agent.retrying"
+
+        updated_state: SupervisorState = {
+            **normalized,
+            "active_node": next_node.model_dump(mode="json"),
+        }
+        return (
+            _ensure_json_serializable(updated_state),
+            next_node,
+            event_type,
+        )
+
+    current_run_id = str(normalized.get("current_run_id") or "")
+    if not current_run_id:
+        raise ValueError("Agent 노드를 생성하려면 current_run_id가 필요합니다.")
+
+    next_sequence = int(normalized.get("node_sequence", 0) or 0) + 1
+    next_node = ActiveNodeExecution(
+        node_id=f"{current_run_id}:node:{next_sequence}",
+        agent_name=agent_name,
+        parent_node_id=normalized.get("last_completed_node_id"),
+        node_sequence=next_sequence,
+        attempt=1,
+        status="running",
+    )
+
+    updated_state = {
+        **normalized,
+        "active_node": next_node.model_dump(mode="json"),
+        "node_sequence": next_sequence,
+    }
+    return (
+        _ensure_json_serializable(updated_state),
+        next_node,
+        "agent.started",
+    )
 
 
 def _migrate_v2_validation_history(state: SupervisorState) -> list[dict[str, Any]]:
