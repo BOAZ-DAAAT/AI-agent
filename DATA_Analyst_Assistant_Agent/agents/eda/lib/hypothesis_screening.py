@@ -33,17 +33,29 @@ MEDIUM_SILHOUETTE = 0.25
 # 명백 무상관 드롭 기준: pearson·spearman 둘 다 이 값 미만일 때만 드롭
 NULL_ABS_R = 0.05
 
-# 정규 유형 6종
-_TYPES = ("회귀", "분류", "관계추론", "그룹차이", "군집", "시계열")
+# 정규 유형 13종 (기존 6 + analysis_agent가 codegen/vetted primitive로 커버하는 5개 특화기법 +
+# 코호트/퍼널 — EDA는 '제안'만 하고 최종 방법 선택은 analysis_agent가 다시 하므로, 유형 폭을
+# analysis_agent 커버리지에 맞춰 넓혀둔다).
+_TYPES = ("회귀", "분류", "관계추론", "그룹차이", "군집", "시계열",
+          "생애가치", "생존분석", "지역분석", "마케팅믹스", "자원배분", "코호트", "퍼널")
 
 # 유형 라인이 없을 때(HYPOTHESIS_TYPE_GUIDE=False) 검증방법 텍스트로 유형 추론
 _METHOD_TYPE_HINTS: List[Tuple[str, Tuple[str, ...]]] = [
     ("관계추론", ("상관", "피어슨", "스피어만", "correlation", "pearson", "spearman")),
     ("군집", ("군집", "클러스터", "kmeans", "k-means", "silhouette", "실루엣")),
     ("시계열", ("시계열", "arima", "prophet", "추세", "계절", "자기상관", "autocorrelation")),
-    ("그룹차이", ("anova", "분산분석", "t검정", "t-검정", "ttest", "t test", "tukey", "튜키")),
+    ("그룹차이", ("anova", "분산분석", "t검정", "t-검정", "ttest", "t test", "tukey", "튜키",
+                "mann-whitney", "mann whitney", "만-휘트니", "만휘트니", "kruskal", "크루스칼",
+                "wilcoxon", "윌콕슨", "카이제곱", "chi-square", "chi square", "chi2")),
     ("분류", ("분류", "로지스틱", "logistic", "의사결정", "decision tree", "randomforestclassifier", "auc")),
     ("회귀", ("회귀", "regression", "ols", "randomforestregressor")),
+    ("생애가치", ("ltv", "생애가치", "clv", "bg/nbd", "gamma-gamma", "감마-감마")),
+    ("생존분석", ("생존", "survival", "kaplan", "카플란", "cox", "콕스")),
+    ("지역분석", ("지역", "공간", "geospatial", "moran", "모란", "hotspot", "핫스팟")),
+    ("마케팅믹스", ("mmm", "마케팅믹스", "adstock", "애드스톡", "saturation")),
+    ("자원배분", ("배분", "최적화", "optimization", "선형계획", "linear program")),
+    ("코호트", ("코호트", "cohort", "유지율", "리텐션", "retention")),
+    ("퍼널", ("퍼널", "funnel", "전환율", "이탈률", "conversion")),
 ]
 
 # 신호로 검증 가능한 유형(나머지는 미측정으로 둠)

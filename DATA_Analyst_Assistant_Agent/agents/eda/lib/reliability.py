@@ -16,8 +16,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-# 그룹 간 차이 검정(그룹당 복수 관측이 반드시 필요) — 집계본(그룹당 1행)에선 수학적으로 불가
-_GROUP_DIFF_METHODS = ("anova", "분산분석", "t검정", "t-검정", "t test", "ttest", "tukey", "튜키")
+# 그룹 간 차이 검정(그룹당 복수 관측이 반드시 필요) — 집계본(그룹당 1행)에선 수학적으로 불가.
+# 우선순위: '유형: 그룹차이' 라인(LLM이 매 가설마다 명시)으로 판정한다 — 검정 이름이 ANOVA든
+# Mann-Whitney든 Kruskal-Wallis든 나중에 나올 다른 검정이든, '그룹차이' 유형이면 요구사항이
+# 똑같으므로 검정 이름 목록을 계속 늘릴 필요가 없다(#run-019f7437 — Mann-Whitney가 목록에
+# 없어서 못 잡혔던 사례). 유형 라인이 없을 때만(HYPOTHESIS_TYPE_GUIDE=False 등) 아래 이름
+# 힌트로 폴백 추정한다.
+_GROUP_DIFF_TYPE = "그룹차이"
+_GROUP_DIFF_METHOD_HINTS = (
+    "anova", "분산분석", "t검정", "t-검정", "t test", "ttest", "tukey", "튜키",
+    "mann-whitney", "mann whitney", "만-휘트니", "만휘트니",
+    "kruskal", "크루스칼", "wilcoxon", "윌콕슨",
+    "카이제곱", "chi-square", "chi square", "chi2",
+)
 
 # 집계 산출물임을 시사하는 컬럼명 힌트
 _AGG_NAME_HINTS = ("avg_", "mean_", "total_", "sum_", "count_", "cnt_",
@@ -148,11 +159,18 @@ def correct_hypothesis_feasibility(df: pd.DataFrame, hypotheses_text: str,
 
     lines = hypotheses_text.split("\n")
     corrections: List[dict] = []
-    cur = {"method": "", "feature": None, "data_idx": None}
+    cur = {"type": "", "method": "", "feature": None, "data_idx": None}
+
+    def _is_group_diff() -> bool:
+        if cur["type"] == _GROUP_DIFF_TYPE:
+            return True
+        if cur["type"]:
+            return False  # 유형이 명시돼있는데 그룹차이가 아니면 폴백 안 씀(오탐 방지)
+        method = (cur["method"] or "").lower()
+        return any(k in method for k in _GROUP_DIFF_METHOD_HINTS)
 
     def _flush() -> None:
-        method = (cur["method"] or "").lower()
-        if cur["data_idx"] is None or not any(k in method for k in _GROUP_DIFF_METHODS):
+        if cur["data_idx"] is None or not _is_group_diff():
             return
         feasible, col = _group_diff_feasible(cur["feature"])
         if feasible is False:
@@ -166,7 +184,13 @@ def correct_hypothesis_feasibility(df: pd.DataFrame, hypotheses_text: str,
         s = ln.strip()
         if s.startswith("[가설"):
             _flush()
-            cur = {"method": "", "feature": None, "data_idx": None}
+            cur = {"type": "", "method": "", "feature": None, "data_idx": None}
+        elif s.startswith("유형:"):
+            body = s.split(":", 1)[1]
+            if _GROUP_DIFF_TYPE in body:
+                cur["type"] = _GROUP_DIFF_TYPE
+            elif body.strip():
+                cur["type"] = "기타"  # 다른 유형 명시됨 — 폴백 방지용 플래그
         elif s.startswith("검증방법:"):
             cur["method"] = s.split(":", 1)[1]
         elif s.startswith("필요변수:"):
