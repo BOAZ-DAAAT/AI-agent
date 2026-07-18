@@ -19,7 +19,12 @@ def validator_prompt(
     insight_result: str,
     hypotheses: str,
     final_summary: str,
+    analysis_facts: Dict[str, List[str]] | None = None,
 ) -> str:
+    facts_block = (
+        json.dumps(analysis_facts, ensure_ascii=False, separators=(",", ":"))
+        if analysis_facts else "(없음)"
+    )
     return f"""
 너는 EDA 결과의 '관문 검수자'다. 목표는 완벽을 요구하는 게 아니라,
 이 결과를 다음 단계로 넘겨도 되는지(질문에 답했고, 명백히 틀린 내용이 없는지)만 판단하는 것이다.
@@ -32,6 +37,10 @@ def validator_prompt(
 [검증된 수치 (인사이트의 숫자는 이것과 일치해야 한다)]
 {json.dumps(statistical_metadata, ensure_ascii=False, default=str, separators=(",", ":"))}
 
+[분석 노드별 핵심 사실 — 여기 있는 수치도 검증된 것으로 인정하라. 각 분석노드가
+결정론적으로 계산한 수치를 그대로 인용한 것이라 [검증된 수치]에 없어도 근거가 있다]
+{facts_block}
+
 [인사이트]
 {insight_result}
 
@@ -42,7 +51,9 @@ def validator_prompt(
 {final_summary}
 
 ── retry 해야 하는 '명백한 결함' (이때만 retry) ──
-1. 환각/오류: 인사이트의 숫자가 [검증된 수치]와 명백히 다르거나, 없는 값을 지어냄 → retry_target="insight"
+1. 환각/오류: 인사이트의 숫자가 [검증된 수치]·[분석 노드별 핵심 사실] 둘 다와 명백히 다르거나,
+   둘 다에 없는 값을 지어냄 → retry_target="insight"
+   (숫자가 [검증된 수치]엔 없어도 [분석 노드별 핵심 사실]에 있으면 지어낸 게 아니다 — pass)
 2. 핵심 분석 누락: 질문에 답하는 데 꼭 필요한 분석이 빠짐 (예: 비교 질문인데 comparison 안 함) → retry_target="planner"
 3. 질문 미응답: 최종 요약이 사용자 질문에 사실상 답하지 않음 → retry_target="insight"
 4. 가설 결함: 가설이 비어있거나 검증 불가능/순환논리 → retry_target="hypothesis"
