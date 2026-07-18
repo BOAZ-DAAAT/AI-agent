@@ -17,7 +17,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context, get_ll
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import validator_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
-MAX_VALIDATION_RETRIES = 2          # 총 재시도 캡 (무한 루프 방지)
+MAX_VALIDATION_RETRIES = 1          # 총 재시도 캡 (무한 루프 방지, #194 — 2회는 비용 대비 효과가 낮아 축소)
 _RETRY_TARGETS = {"planner", "insight", "hypothesis"}
 _FALLBACK_TEXTS = {"", "인사이트 생성 실패", "가설 생성 실패", "요약 생성 실패", "분석 스킵 (오류로 인해 생략됨)"}
 
@@ -123,8 +123,16 @@ def validator_node(state: EDAState) -> dict:
         # ── 3) verdict 정규화 + 캡 적용 ──
         if verdict.get("status") == "retry":
             if cap_reached:
+                # 캡 소진으로 강제통과 시켜도, 지적됐던 사유(환각 등)를 caution으로 남겨야
+                # 분석에이전트/리포트가 "검증 미완료인 채로 넘어왔다"를 알 수 있다(#194 —
+                # 이전엔 결정론적 실패만 caution이 남고 이 경로는 조용히 사라졌음).
+                original_reason = verdict.get("reason") or "품질 감사 지적 사항 미해결"
+                stopped_failure = {"reason": original_reason, "failure_code": "llm_audit_unresolved",
+                                   "retryable": False}
                 verdict = {"status": "pass", "retry_target": "none",
-                           "reason": "재시도 소진 후 통과", "feedback": ""}
+                           "reason": f"검증 미통과(재시도 소진): {original_reason}", "feedback": "",
+                           "failure_code": "llm_audit_unresolved", "retryable": False,
+                           "suggested_action": "manual_review"}
             elif verdict.get("retry_target") not in _RETRY_TARGETS:
                 verdict["retry_target"] = "planner"  # 타겟 불명확 시 기본값
 

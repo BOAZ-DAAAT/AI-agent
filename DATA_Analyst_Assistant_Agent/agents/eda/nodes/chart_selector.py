@@ -17,22 +17,51 @@ except Exception:  # noqa: BLE001
         pass
 
 
+def _slim_stat_for_curation(stat: dict) -> dict:
+    """차트 큐레이션 프롬프트엔 statistical_metadata 전체가 아니라 실제로 쓰는 필드만 넘긴다.
+
+    _call_llm_remove의 큐레이션 가이드(질문직답/가설근거/종합비교/순위/클러스터)는
+    correlation_pairs(관계 차트 판단)·group_comparison(bar/heatmap 우선순위)·
+    clustering(cluster_chart_rule 근거)만 참조한다. 컬럼별 distribution 전체 블록·
+    cautions·analysis_constraints 등은 큐레이션 판단에 안 쓰이는데 토큰만 크게
+    차지해서(#194) 여기선 뺀다 — insight/hypothesis로 가는 원본 state는 안 건드림.
+    """
+    clustering = stat.get("clustering", {}) or {}
+    return {
+        "correlation_pairs": stat.get("correlation_pairs", {}),
+        "group_comparison":  stat.get("group_comparison", {}),
+        "clustering":        {k: v for k, v in clustering.items() if k != "cluster_labels"},
+    }
+
+
+_ANALYSIS_RESULT_CHAR_LIMIT = 300  # 노드당 원문 요약 상한 — 차트 큐레이션엔 전체 서술이 불필요(#194)
+
+
+def _truncate(text: str, limit: int = _ANALYSIS_RESULT_CHAR_LIMIT) -> str:
+    return (text[:limit] + "...") if isinstance(text, str) and len(text) > limit else text
+
+
 def chart_selector_node(state: EDAState) -> dict:
     all_charts = sorted(glob.glob(os.path.join(visualize.OUTPUT_DIR, "*.png")))
     if not all_charts:
         return {"key_charts": [], "key_chart_captions": {}}
 
+    # 각 분석 노드의 원문 요약을 통째로 넘기지 않는다 — 큐레이션 판단엔 핵심 몇 문장이면
+    # 충분한데 전체 서술을 다시 먹이면 토큰만 커진다(#194, RateLimitError 폴백에만 있던
+    # 절단 패턴을 기본 경로에도 적용).
     analysis_results = {
-        "inspect":      state.get("inspect_result", ""),
-        "quality":      state.get("quality_result", ""),
-        "distribution": state.get("distribution_result", ""),
-        "comparison":   state.get("comparison_result", ""),
-        "relationship": state.get("relationship_result", ""),
-        "time":         state.get("time_result", ""),
+        "inspect":      _truncate(state.get("inspect_result", "")),
+        "quality":      _truncate(state.get("quality_result", "")),
+        "distribution": _truncate(state.get("distribution_result", "")),
+        "comparison":   _truncate(state.get("comparison_result", "")),
+        "relationship": _truncate(state.get("relationship_result", "")),
+        "time":         _truncate(state.get("time_result", "")),
     }
-    stat = state.get("statistical_metadata", {})
+    stat = _slim_stat_for_curation(state.get("statistical_metadata", {}))
+    # 가설도 마찬가지 — 차트 선정엔 "무엇을 검증하는지"만 필요하지 H0/H1/검증방법 전문은 불필요.
+    hypotheses = _truncate(state.get("hypotheses", ""), limit=600)
 
-    def _run(ar, st):
+    def _run(ar, st, hyp):
         return run_chart_selector_skill(
             chart_paths=all_charts,
             user_question=state["user_question"],
@@ -40,17 +69,14 @@ def chart_selector_node(state: EDAState) -> dict:
             question_type=state.get("question_type", ""),
             statistical_metadata=st,
             priority_metrics=state.get("analysis_plan", {}).get("priority_metrics", []),
-            hypotheses=state.get("hypotheses", ""),   # 가설 근거 차트 우선 유지 (#71 B)
+            hypotheses=hyp,   # 가설 근거 차트 우선 유지 (#71 B)
         )
 
     try:
-        key_charts, captions, visual_debug = _run(analysis_results, stat)
+        key_charts, captions, visual_debug = _run(analysis_results, stat, hypotheses)
     except RateLimitError:
-        truncated = {k: (v[:300] + "...") if isinstance(v, str) and len(v) > 300 else v
-                     for k, v in analysis_results.items()}
-        clustering = stat.get("clustering", {})
-        slim_stat = {"clustering": {k: v for k, v in clustering.items() if k != "cluster_labels"}}
-        key_charts, captions, visual_debug = _run(truncated, slim_stat)
+        slim_stat = {"clustering": stat.get("clustering", {})}
+        key_charts, captions, visual_debug = _run(analysis_results, slim_stat, hypotheses)
 
     # key/ 폴더 초기화 후 선별 차트 복사
     for f in glob.glob(os.path.join(visualize.KEY_DIR, "*.png")):

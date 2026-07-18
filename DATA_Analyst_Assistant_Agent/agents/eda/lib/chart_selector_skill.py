@@ -97,20 +97,30 @@ def _ensure_preferred_survives(paths: list[str]) -> list[str]:
     return selected
 
 
+_VISUAL_CHECK_BATCH_SIZE = 8  # 배치당 이미지 수 — 단순 ok/issue 판정이라 여러 장 묶어도 정확도 저하가 적다
+                              # (분석 에이전트의 자유서술 판독과 달리 판정 자체가 단순해서 배치에 유리, #194)
+
 _VISUAL_CHECK_PROMPT = (
-    "이 차트가 렌더링 결함 없이 정상적으로 보이는지만 판정해줘. 데이터 해석이나 인사이트의 "
+    "아래 차트들이 각각 렌더링 결함 없이 정상적으로 보이는지만 판정해줘. 데이터 해석이나 인사이트의 "
     "좋고나쁨은 판단하지 마 — 순수하게 시각적 결함만 봐:\n"
     "- 범례/텍스트 박스가 실제 데이터 점이나 선을 가리고 있는지\n"
     "- 축 라벨이 0/1 같은 원시값만 있어 무슨 그룹인지 알아볼 수 없는지\n"
     "- 그려져야 할 자리가 비어있거나(데이터가 있는데 안 그려짐) 점/선이 하나뿐인지\n"
-    '반드시 JSON만 출력: {"ok": true 또는 false, "issue": "문제 설명(없으면 빈 문자열)"}'
+    "각 차트 이미지 바로 앞에 그 파일명이 텍스트로 붙어 있다. 반드시 그 파일명을 키로 쓴 "
+    "JSON 객체 하나만 출력해라(설명 금지):\n"
+    '{"파일명1.png": {"ok": true 또는 false, "issue": "문제 설명(없으면 빈 문자열)"}, "파일명2.png": {...}}'
 )
+
+
+def _chunked(items: list, size: int) -> list[list]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
     """최종 선정된 차트(보통 TOTAL_MAX 이하)만 멀티모달로 훑어 렌더링 결함을 거른다.
 
-    비용 통제: 전체 후보가 아니라 이미 좁혀진 최종 목록에만, 1장당 1회 호출한다.
+    비용 통제: 전체 후보가 아니라 이미 좁혀진 최종 목록에만, _VISUAL_CHECK_BATCH_SIZE장씩
+    묶어 호출한다(#194 — 1장당 1콜이던 걸 배치화, 최대 10장이면 2콜로 줄어듦).
     반환: (유지 경로, 드롭 메타 [{"chart","reason"}], 점검 자체가 실패한 횟수).
     check_failures를 dropped와 분리하는 이유 — 이미지 읽기/모델 호출/JSON 파싱이 실패해
     보수적으로 통과시킨 경우와, 모델이 실제로 "결함 있음"이라 판정해 드롭한 경우를
@@ -123,28 +133,54 @@ def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
     kept: list[str] = []
     dropped: list[dict] = []
     check_failures = 0
-    for p in paths:
+
+    for batch in _chunked(paths, _VISUAL_CHECK_BATCH_SIZE):
+        content: list[dict] = [{"type": "text", "text": _VISUAL_CHECK_PROMPT}]
+        batch_names: list[str] = []
+        for p in batch:
+            try:
+                with open(p, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("ascii")
+            except Exception:
+                kept.append(p)
+                check_failures += 1
+                continue
+            name = os.path.basename(p)
+            batch_names.append(name)
+            content.append({"type": "text", "text": f"[파일명: {name}]"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}})
+
+        if not batch_names:
+            continue  # 배치 전원이 파일 읽기 실패
+
         try:
-            with open(p, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("ascii")
-        except Exception:
-            kept.append(p)
-            check_failures += 1
-            continue
-        try:
-            response = model.invoke([HumanMessage(content=[
-                {"type": "text", "text": _VISUAL_CHECK_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
-            ])])
+            response = model.invoke([HumanMessage(content=content)])
             raw = str(getattr(response, "content", response)).replace("```json", "").replace("```", "").strip()
-            verdict = json.loads(raw)
+            verdicts = json.loads(raw)
+            if not isinstance(verdicts, dict):
+                raise ValueError("batch verdict is not a dict")
         except Exception:
-            verdict = {"ok": True, "issue": ""}
-            check_failures += 1
-        if verdict.get("ok", True):
-            kept.append(p)
-        else:
-            dropped.append({"chart": os.path.basename(p), "reason": str(verdict.get("issue", "시각 결함"))})
+            # 배치 콜 자체가 실패하면 배치 전체를 보수적으로 통과시킨다(단일 이미지 실패 처리와 동일 철학).
+            for p in batch:
+                if os.path.basename(p) in batch_names:
+                    kept.append(p)
+            check_failures += len(batch_names)
+            continue
+
+        for p in batch:
+            name = os.path.basename(p)
+            if name not in batch_names:
+                continue  # 파일 읽기 실패로 이미 처리됨
+            verdict = verdicts.get(name)
+            if not isinstance(verdict, dict):
+                kept.append(p)
+                check_failures += 1
+                continue
+            if verdict.get("ok", True):
+                kept.append(p)
+            else:
+                dropped.append({"chart": name, "reason": str(verdict.get("issue", "시각 결함"))})
+
     return kept, dropped, check_failures
 
 

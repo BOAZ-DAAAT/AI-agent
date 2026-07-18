@@ -33,6 +33,7 @@ class EDAState(TypedDict, total=False):
     round: int                       # 현재 라운드 (0부터)
     next_analysis: str               # 플래너가 고른 다음 분석 ("done" 가능)
     controller_log: List[Dict[str, Any]]  # [{round, choice, reason}] 결정 추적
+    analysis_queue: List[str]        # 1차 배치계획 중 아직 안 돌린 것들 (#194, 있으면 LLM 호출 없이 소비)
 
     # validator(자기검증) 상태
     validation_result: Dict[str, Any]     # {status, retry_target, reason, feedback}
@@ -62,8 +63,10 @@ class EDAState(TypedDict, total=False):
 
     # 최종 출력
     insight_result: str
+    summary_facts: List[str]              # insight가 뽑은 짧은 핵심 사실 문장 — 최종 요약 입력용(원문 재요약 대신, #194)
     hypotheses: str
     hypothesis_signals: List[Dict[str, Any]]  # 가설별 사후 재검증 신호(강도·matched_signal·score·drop_reason) — 설명가능성/디버깅용
+    primary_hypothesis: Dict[str, Any]    # 1순위 가설 {target, feature, method} — 최종 요약 입력용(#194)
     final_summary: str
     key_charts: List[str]
     key_chart_captions: Dict[str, str]    # {파일명: 선정 이유 캡션} — 아티팩트 메타데이터로 실림(#71 B)

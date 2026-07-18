@@ -9,9 +9,12 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import (
+    append_errors, get_context, get_llm, split_marked_json,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import insight_prompt
+from DATA_Analyst_Assistant_Agent.agents.eda.prompts.insight import SUMMARY_FACTS_MARKER
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_integrity_text
 
@@ -50,77 +53,6 @@ try:  # 제공자에 따라 openai 예외가 없을 수 있어 방어적으로 i
 except Exception:  # noqa: BLE001
     class RateLimitError(Exception):
         pass
-
-
-# ─────────────────────────────
-# LLM 탐지 레이어 (열린 주의사항 탐지) — soft caution only, hard 제약 X
-# rule(reliability.py)이 못 잡는 문제(클래스 불균형·계절성 등)를 계산된 숫자에 근거해 추가한다.
-# ─────────────────────────────
-_LLM_CAUTION_MAX = 3
-_ALLOWED_SEVERITY = {"low", "medium", "high"}
-
-
-def _llm_infer_cautions(numeric_summary: Dict[str, Any], user_question: str, existing_codes: set) -> list:
-    """계산된 통계를 LLM에 보여주고 rule이 놓친 추가 주의사항을 탐지(source=llm_inferred).
-
-    가드레일: 스키마 검증 · evidence_keys 필수 · rule code 중복 제거 · 최대 3개 ·
-    blocked_operations/constraint_ids 절대 생성 안 함(hard contract = rule only).
-    실패/토큰 불가 시 [] 폴백(rule cautions는 그대로 유지).
-    """
-    try:
-        prompt = (
-            "너는 EDA 결과를 감사하는 데이터 품질 점검자다. 아래 '계산된 통계 요약'과 사용자 질문을 보고, "
-            "이미 발견된 주의사항 외에 분석 에이전트가 놓치면 안 될 추가 주의사항을 찾아라.\n"
-            "규칙:\n"
-            "- 통계에 실제로 근거가 있는 것만. 근거 없으면 만들지 마라(빈 리스트 허용).\n"
-            f"- 이미 있는 code는 다시 만들지 마라: {sorted(existing_codes)}\n"
-            "- data_level.is_aggregated가 true면 집계본이다: group_comparison의 min_group_n/max_group_n으로 "
-            "'표본 부족' 경고를 만들지 마라(그룹당 1행이라 1이 당연). 표본 신뢰도는 sample_reliability.low_n_groups를 근거로 하라.\n"
-            "- 예시 유형: 클래스 불균형, 시계열 계절성, 이중분포(bimodal), 절단/검열, 결측 편중.\n"
-            "- 각 항목은 soft 경고다. 분석을 '금지'하지 마라(권고까지만).\n"
-            f"- 최대 {_LLM_CAUTION_MAX}개.\n\n"
-            f"[사용자 질문]\n{user_question}\n\n"
-            f"[계산된 통계 요약]\n{json.dumps(numeric_summary, ensure_ascii=False, default=str, separators=(",", ":"))[:4000]}\n\n"
-            "아래 JSON 배열만 출력하라(설명 금지). 각 원소:\n"
-            '{"code":"UPPER_SNAKE","severity":"low|medium|high","message_ko":"한국어 설명",'
-            '"recommended_action":["english_tag"],"evidence_keys":["어느 통계를 봤는지"]}'
-        )
-        parsed = safe_json_parse(get_llm().invoke(prompt).content, [])
-    except Exception:  # noqa: BLE001
-        return []
-
-    if not isinstance(parsed, list):
-        return []
-
-    out, seen = [], set(existing_codes)
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        code = str(item.get("code", "")).strip().upper()
-        msg = str(item.get("message_ko", "")).strip()
-        ev = item.get("evidence_keys")
-        # 가드레일: code·message_ko·evidence_keys 필수 + code 중복 금지
-        if not code or not msg or not ev or code in seen:
-            continue
-        sev = item.get("severity", "low")
-        if sev not in _ALLOWED_SEVERITY:
-            sev = "low"
-        action = item.get("recommended_action") or []
-        action = action if isinstance(action, list) else [action]
-        ev = ev if isinstance(ev, list) else [ev]
-        out.append({
-            "code": code,
-            "source": "llm_inferred",                 # 강제(신뢰도 구분용)
-            "severity": sev,
-            "message_ko": msg,
-            "recommended_action": [str(a) for a in action][:5],
-            "evidence_keys": [str(e) for e in ev][:5],
-            # blocked_operations/constraint_ids 안 붙임 — hard 제약은 rule만
-        })
-        seen.add(code)
-        if len(out) >= _LLM_CAUTION_MAX:
-            break
-    return out
 
 
 def _jround(x, nd: int = 4):
@@ -548,19 +480,6 @@ def insight_node(state: EDAState) -> dict:
                 "details": integrity_text,  # 원문은 요약과 분리해 details 로(프롬프트/UI가 필요시 참조)
             }]
 
-        # LLM 천장(soft 탐지): rule이 못 잡은 추가 주의사항. 실패해도 rule cautions는 유지.
-        numeric_summary = {
-            "data_level":        {"is_aggregated": data_level.get("is_aggregated"),
-                                  "grain_hint": data_level.get("grain_hint")},
-            "sample_reliability": sample_reliability,   # 표본 신뢰도의 올바른 근거(min_group_n 아님)
-            "distribution":      dist_stats,
-            "group_comparison":  group_comparison,
-            "correlation_pairs": corr_pairs,
-            "time_result":       state.get("time_result"),
-        }
-        cautions = cautions + _llm_infer_cautions(
-            numeric_summary, state["user_question"], {c["code"] for c in cautions})
-
         # clustering_result 가 비어있으면(컨트롤러가 안 돌린 경우) skip 처리
         clustering = state.get("clustering_result") or {}
         statistical_metadata = {
@@ -630,12 +549,17 @@ def insight_node(state: EDAState) -> dict:
                 lambda: llm.invoke(prompt).content.strip(), "insight", fallback="인사이트 생성 실패"
             )
 
+    # 서술 뒤의 짧은 facts JSON만 분리한다. cautions는 위에서 계산한 결정론적 규칙 결과를 쓴다.
+    insight_result, facts = split_marked_json(insight_result, SUMMARY_FACTS_MARKER)
+    summary_facts = [str(f).strip() for f in facts if str(f).strip()][:6] if isinstance(facts, list) else []
+
     # 분석 노드들이 ctx에 누적한 차트 주문서를 state로 노출 + 아티팩트로 영속화.
     chart_requests = list(get_context().chart_requests)
     _persist_chart_requests(chart_requests)
 
     return {
         "insight_result": insight_result,
+        "summary_facts": summary_facts,
         "statistical_metadata": statistical_metadata,
         "data_level": data_level,
         "cautions": cautions,

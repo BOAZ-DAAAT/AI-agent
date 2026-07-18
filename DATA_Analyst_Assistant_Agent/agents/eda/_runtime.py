@@ -52,6 +52,7 @@ class EdaContext:
     count_col: Optional[str] = None
     target_col: Optional[str] = None                    # 분석 대상(결과변수) — 계약/플래너가 채움
     question_type: str = ""
+    user_question: str = ""                              # 질문 프레이밍 신호(예: '저조/최하위') 판단용
     priority_metrics: list = field(default_factory=list)
     chart_requests: list = field(default_factory=list)  # skill이 발행한 차트 주문서 누적(중복제거됨)
 
@@ -86,6 +87,26 @@ def safe_json_parse(text_value: str, fallback: dict) -> dict:
         return json.loads(cleaned)
     except Exception:
         return fallback
+
+
+def split_marked_json(text_value: str, marker: str):
+    """LLM 출력에서 marker 뒤에 붙은 JSON을 분리한다.
+
+    서술 프로즈 뒤에 구조화 필드(요약용 facts·우선 가설 등)를 함께 뱉게 하고, 여기서
+    프로즈와 JSON을 갈라 각각을 쓰기 위한 헬퍼. marker가 없거나 JSON 파싱이 실패하면
+    (원문 그대로, None)을 돌려주므로, 구조화 필드가 없어도 프로즈는 온전히 보존된다.
+    반환: (marker 앞 프로즈, 파싱된 JSON 또는 None)
+    """
+    text = text_value or ""
+    idx = text.rfind(marker)
+    if idx < 0:
+        return text.strip(), None
+    prose = text[:idx].strip()
+    tail = text[idx + len(marker):].replace("```json", "").replace("```", "").strip()
+    try:
+        return prose, json.loads(tail)
+    except Exception:
+        return prose, None
 
 
 def _chart_request_sig(req: dict) -> tuple:

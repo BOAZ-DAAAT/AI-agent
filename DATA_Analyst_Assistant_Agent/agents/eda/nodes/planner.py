@@ -59,9 +59,24 @@ def _data_shape(ctx) -> Dict[str, Any]:
 
 def planner_node(state: EDAState) -> dict:
     ctx = get_context()
-    shape = _data_shape(ctx)
     log = state.get("controller_log", [])
     round_idx = state.get("round", 0)
+
+    # ── 큐 소비: 1차 배치계획에서 아직 안 돌린 게 남아있으면 LLM 호출 없이 바로 꺼낸다
+    # (#194 — 매 라운드 왕복하며 1개씩 고르던 비용을 줄이기 위해, 첫 라운드에 세트를 미리 정해둠).
+    queue = list(state.get("analysis_queue", []) or [])
+    if queue:
+        choice = queue.pop(0)
+        entry = {"round": round_idx, "choice": choice, "reason": "1차 배치 계획에서 이어서 실행"}
+        return {
+            "next_analysis": choice,
+            "round": round_idx + 1,
+            "analysis_queue": queue,
+            "controller_log": log + [entry],
+            "analysis_plan": {"priority_metrics": ctx.priority_metrics, "controller_log": log + [entry]},
+        }
+
+    shape = _data_shape(ctx)
 
     # 이미 시도한 분석 (결과 비어도 재선택 방지)
     attempted = {e["choice"] for e in log if e.get("choice") and e["choice"] != "done"}
@@ -74,11 +89,14 @@ def planner_node(state: EDAState) -> dict:
             val = state.get(t["result_field"])
             completed_findings[t["name"]] = val if isinstance(val, str) else str(val)
 
+    new_queue: list[str] = []
+
     # ── 하드 멈춤: 도구 소진 / 라운드 캡 ──
     if not feasible or len(attempted) >= MAX_ANALYSES:
         choice, reason = "done", ("실행 가능한 분석 소진" if not feasible else f"최대 분석 {MAX_ANALYSES}회 도달")
     else:
         need_priority = round_idx == 0 or not ctx.priority_metrics
+        emit_batch = round_idx == 0 and not attempted  # 진짜 첫 결정일 때만 세트로 물어봄
         prompt = planner_prompt(
             user_question=state["user_question"],
             question_type=state.get("question_type", ""),
@@ -89,6 +107,7 @@ def planner_node(state: EDAState) -> dict:
             max_rounds=MAX_ANALYSES,
             need_priority=need_priority,
             codegen_selectable=True,   # 질문기준 발동: 도구로 못 푸는 파생계산이면 플래너가 codegen 선택
+            emit_batch=emit_batch,
         )
         fb = state.get("validation_feedback")
         if fb:
@@ -99,12 +118,27 @@ def planner_node(state: EDAState) -> dict:
         except Exception as exc:  # noqa: BLE001
             decision = {"next": "done", "reason": f"플래너 오류로 종료: {exc}"}
 
-        choice = decision.get("next", "done")
-        reason = decision.get("reason", "")
-        # 환각 방지: feasible 목록 + codegen(특수 카드) 밖 선택이면 done
-        allowed = {t["name"] for t in feasible} | {"codegen"}
-        if choice != "done" and choice not in allowed:
-            choice, reason = "done", f"유효하지 않은 선택({choice}) → 종료"
+        allowed = {t["name"] for t in feasible}
+        batch: list[str] = []
+        if emit_batch and isinstance(decision.get("next_batch"), list):
+            seen: set[str] = set()
+            for item in decision["next_batch"]:
+                if item in allowed and item not in seen:
+                    batch.append(item)
+                    seen.add(item)
+            batch = batch[: MAX_ANALYSES - len(attempted)]  # 안전 캡은 그대로 유지
+
+        if batch:
+            choice, new_queue = batch[0], batch[1:]
+            reason = decision.get("reason", "1차 배치 계획")
+        else:
+            # 배치가 비었거나(emit_batch=False, 또는 LLM이 codegen/done을 골랐을 때) 기존 단일선택 로직
+            choice = decision.get("next", "done")
+            reason = decision.get("reason", "")
+            # 환각 방지: feasible 목록 + codegen(특수 카드) 밖 선택이면 done
+            allowed_single = allowed | {"codegen"}
+            if choice != "done" and choice not in allowed_single:
+                choice, reason = "done", f"유효하지 않은 선택({choice}) → 종료"
 
         # 첫 라운드: priority_metrics 확정 (df에 실제 있는 컬럼만)
         if need_priority and decision.get("priority_metrics"):
@@ -118,6 +152,7 @@ def planner_node(state: EDAState) -> dict:
     return {
         "next_analysis": choice,
         "round": round_idx + 1,
+        "analysis_queue": new_queue,
         "controller_log": log + [entry],
         # 하위호환: 다운스트림(report 등)이 보던 analysis_plan 에 priority_metrics 보관
         "analysis_plan": {"priority_metrics": ctx.priority_metrics, "controller_log": log + [entry]},
