@@ -11,6 +11,7 @@ HYPOTHESIS_TYPE_GUIDE = True
 
 # 가설 프로즈 뒤에 붙일 1순위 가설(구조화) 구분자 — 노드가 이 마커 뒤 JSON을 분리해 최종 요약 입력으로 쓴다(#194).
 PRIMARY_HYPOTHESIS_MARKER = "===PRIMARY_HYPOTHESIS==="
+FINAL_SUMMARY_MARKER = "===FINAL_SUMMARY==="
 
 
 _TYPE_GUIDE_BLOCK = """
@@ -29,7 +30,8 @@ _TYPE_GUIDE_BLOCK = """
 def hypothesis_prompt(user_question: str, insight_result: str,
                       include_type_guide: bool = HYPOTHESIS_TYPE_GUIDE,
                       target_hint: str = "", data_level: dict = None,
-                      low_n_groups: list = None) -> str:
+                      low_n_groups: list = None,
+                      summary_facts: list = None) -> str:
     type_field = "유형: (회귀/분류/관계추론/그룹차이/군집/시계열 중 하나 — 아래 판별표 기준)\n" if include_type_guide else ""
     type_guide = _TYPE_GUIDE_BLOCK if include_type_guide else ""
     labels_note = "관찰:, 유형:, H0:, H1:, 검증방법:, 필요변수:, 현재데이터:" if include_type_guide \
@@ -57,6 +59,10 @@ def hypothesis_prompt(user_question: str, insight_result: str,
     guard_block = ("\n[데이터 한계 — 반드시 준수]\n" + "\n".join(f"- {x}" for x in guard_lines) + "\n"
                    if guard_lines else "")
 
+    facts = [str(f).strip() for f in (summary_facts or []) if str(f).strip()]
+    facts_text = "\n".join(f"- {f}" for f in facts) or "(제공된 핵심 사실 없음)"
+    facts_block = f"\n[최종 요약에 사용할 검증된 핵심 사실]\n{facts_text}\n"
+
     return f"""
 너는 데이터 분석 가설 설계자다. 네 가설은 다음 단계의 분석 에이전트(통계 검정, 모델링 수행)가 바로 실행할 수 있는 수준이어야 한다.
 
@@ -65,7 +71,7 @@ def hypothesis_prompt(user_question: str, insight_result: str,
 
 [핵심 인사이트 및 구조 해석]
 {insight_result}
-{target_block}{guard_block}{type_guide}
+{target_block}{guard_block}{facts_block}{type_guide}
 위 인사이트를 바탕으로 아래 형식으로 작성하라.
 마크다운 기호(###, **, * 등)는 절대 사용하지 마라. 일반 텍스트로만 작성하라.
 
@@ -108,45 +114,10 @@ H1: ...
 (다음 에이전트가 가장 먼저 검증할 1순위 가설을 구조화한 것이다. 위 [가설 1]의 핵심을 그대로 옮겨라):
 {PRIMARY_HYPOTHESIS_MARKER}
 {{"target": "종속변수 컬럼명", "feature": "설명변수 컬럼명", "method": "검증방법(예: Kruskal-Wallis)"}}
-"""
 
-
-def output_summary_prompt(summary_facts: list, primary_hypothesis: dict) -> str:
-    """다음 단계 전달용 요약 프롬프트.
-
-    긴 인사이트/가설 원문을 다시 먹이지 않고, insight가 미리 뽑아둔 짧은 핵심 사실(summary_facts)과
-    1순위 가설(primary_hypothesis)만 입력으로 받는다 — 원문 재요약 비용 제거(#194). 출력은 여전히
-    LLM이 쓰는 자연스러운 문단이라, 이 요약이 나가는 리포트/UI 품질은 유지된다.
-    """
-    facts = [str(f) for f in (summary_facts or []) if str(f).strip()]
-    facts_text = "\n".join(f"- {f}" for f in facts) or "(제공된 핵심 사실 없음 — 아래 가설 위주로 간결히 작성)"
-
-    ph = primary_hypothesis or {}
-    target = str(ph.get("target", "") or "")
-    feature = str(ph.get("feature", "") or "")
-    method = str(ph.get("method", "") or "")
-    if target and feature and method:
-        closing = f'"다음 에이전트는 {method}으로 {target}~{feature} 관계를 우선 검증하라"로 마무리'
-    else:
-        closing = '"다음 에이전트는 위 사실을 바탕으로 우선 검증할 가설을 선택하라"로 마무리'
-
-    return f"""
-아래 핵심 사실과 1순위 가설만 사용해, 다음 분석 에이전트에게 전달할 요약을 작성하라.
-마크다운 기호 사용 금지. 일반 텍스트로만 작성하라.
-아래에 제시된 것 이외의 새 수치를 절대 만들지 마라.
-
-[핵심 사실]
-{facts_text}
-
-[1순위 가설]
-target={target}, feature={feature}, method={method}
-
-작성 규칙:
-- 4~6문장으로 압축
-- 첫 문장: 데이터 구조의 핵심 특성 1가지 (핵심 사실의 수치 포함)
-- 중간 문장: 현재 데이터로 바로 검증 가능한 1순위 가설을 우선 언급 (검증방법 포함)
-- 마지막 문장: {closing}
-- 수치는 위 [핵심 사실]에 있는 것만 사용
-
-한국어로 작성하라.
+마지막으로 아래 구분선과 JSON 객체를 추가로 출력하라. summary는 다음 분석 에이전트에게 전달할
+4~6문장의 한국어 요약이다. 위 [최종 요약에 사용할 검증된 핵심 사실]의 수치만 사용하고,
+1순위 가설과 검증방법을 포함하라. 새 수치를 만들지 말고 마크다운 기호를 쓰지 마라.
+{FINAL_SUMMARY_MARKER}
+{{"summary": "핵심 사실과 1순위 가설을 압축한 전달용 요약"}}
 """

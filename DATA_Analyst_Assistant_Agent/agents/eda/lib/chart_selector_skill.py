@@ -97,7 +97,7 @@ def _ensure_preferred_survives(paths: list[str]) -> list[str]:
     return selected
 
 
-_VISUAL_CHECK_BATCH_SIZE = 4  # 배치당 이미지 수 — 단순 ok/issue 판정이라 여러 장 묶어도 정확도 저하가 적다
+_VISUAL_CHECK_BATCH_SIZE = 8  # 배치당 이미지 수 — 단순 ok/issue 판정이라 여러 장 묶어도 정확도 저하가 적다
                               # (분석 에이전트의 자유서술 판독과 달리 판정 자체가 단순해서 배치에 유리, #194)
 
 _VISUAL_CHECK_PROMPT = (
@@ -120,7 +120,7 @@ def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
     """최종 선정된 차트(보통 TOTAL_MAX 이하)만 멀티모달로 훑어 렌더링 결함을 거른다.
 
     비용 통제: 전체 후보가 아니라 이미 좁혀진 최종 목록에만, _VISUAL_CHECK_BATCH_SIZE장씩
-    묶어 호출한다(#194 — 1장당 1콜이던 걸 배치화, 최대 10장이면 3콜로 줄어듦).
+    묶어 호출한다(#194 — 1장당 1콜이던 걸 배치화, 최대 10장이면 2콜로 줄어듦).
     반환: (유지 경로, 드롭 메타 [{"chart","reason"}], 점검 자체가 실패한 횟수).
     check_failures를 dropped와 분리하는 이유 — 이미지 읽기/모델 호출/JSON 파싱이 실패해
     보수적으로 통과시킨 경우와, 모델이 실제로 "결함 있음"이라 판정해 드롭한 경우를

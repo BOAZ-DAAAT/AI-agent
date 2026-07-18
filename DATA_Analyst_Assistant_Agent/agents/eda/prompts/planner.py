@@ -38,7 +38,9 @@ def planner_prompt(
             '\n- ⚠️ codegen은 최후수단이다. 분포·비교·상관·시계열 도구로 답할 수 있는 질문이면 '
             "절대 codegen을 고르지 마라(도구 우선). 위 도구들로 구조적으로 계산이 불가능한 "
             "파생 계산이 질문의 핵심일 때만 codegen을 골라라. "
-            "이미 실행한 분석으로 질문에 충분히 답했다면 codegen이 아니라 done을 골라라."
+            "이미 실행한 분석으로 질문에 충분히 답했다면 codegen이 아니라 done을 골라라. "
+            "정식 통계검정(t검정, ANOVA, 카이제곱, 회귀모형 적합 등)의 실행은 다음 분석 에이전트의 역할이다. "
+            "검정 실행이나 p-value 계산을 위해 codegen을 고르지 말고, EDA 근거가 충분하면 done을 골라라."
         )
         codegen_next_hint = ', codegen'
     if completed_findings:

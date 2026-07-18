@@ -14,9 +14,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import (
 )
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import insight_prompt
-from DATA_Analyst_Assistant_Agent.agents.eda.prompts.insight import (
-    ALLOWED_CAUTION_SEVERITY, LLM_CAUTION_MAX, LLM_CAUTIONS_MARKER, SUMMARY_FACTS_MARKER,
-)
+from DATA_Analyst_Assistant_Agent.agents.eda.prompts.insight import SUMMARY_FACTS_MARKER
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_integrity_text
 
@@ -55,55 +53,6 @@ try:  # 제공자에 따라 openai 예외가 없을 수 있어 방어적으로 i
 except Exception:  # noqa: BLE001
     class RateLimitError(Exception):
         pass
-
-
-# ─────────────────────────────
-# LLM 탐지 레이어 (열린 주의사항 탐지) — soft caution only, hard 제약 X
-# rule(reliability.py)이 못 잡는 문제(클래스 불균형·계절성 등)를 계산된 숫자에 근거해 추가한다.
-# #194: 별도 LLM 콜이었던 걸 메인 insight 콜의 마커 출력으로 합쳤다 — 여긴 그 응답을
-# 검증만 한다(LLM 호출 없음, 순수 함수).
-# ─────────────────────────────
-
-
-def _validate_llm_cautions(parsed: Any, existing_codes: set) -> list:
-    """메인 insight 응답에서 분리된 LLM_CAUTIONS_MARKER 뒤 JSON을 검증한다(LLM 호출 없음).
-
-    가드레일: 스키마 검증 · evidence_keys 필수 · rule code 중복 제거 · 최대 3개 ·
-    blocked_operations/constraint_ids 절대 생성 안 함(hard contract = rule only).
-    파싱 실패/스키마 불일치 시 [] 폴백(rule cautions는 그대로 유지).
-    """
-    if not isinstance(parsed, list):
-        return []
-
-    out, seen = [], set(existing_codes)
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        code = str(item.get("code", "")).strip().upper()
-        msg = str(item.get("message_ko", "")).strip()
-        ev = item.get("evidence_keys")
-        # 가드레일: code·message_ko·evidence_keys 필수 + code 중복 금지
-        if not code or not msg or not ev or code in seen:
-            continue
-        sev = item.get("severity", "low")
-        if sev not in ALLOWED_CAUTION_SEVERITY:
-            sev = "low"
-        action = item.get("recommended_action") or []
-        action = action if isinstance(action, list) else [action]
-        ev = ev if isinstance(ev, list) else [ev]
-        out.append({
-            "code": code,
-            "source": "llm_inferred",                 # 강제(신뢰도 구분용)
-            "severity": sev,
-            "message_ko": msg,
-            "recommended_action": [str(a) for a in action][:5],
-            "evidence_keys": [str(e) for e in ev][:5],
-            # blocked_operations/constraint_ids 안 붙임 — hard 제약은 rule만
-        })
-        seen.add(code)
-        if len(out) >= LLM_CAUTION_MAX:
-            break
-    return out
 
 
 def _jround(x, nd: int = 4):
@@ -568,11 +517,7 @@ def insight_node(state: EDAState) -> dict:
 [시간 분석] {state.get('time_result', '해당 없음')}
 [클러스터링] {json.dumps(statistical_metadata.get('clustering', {}), ensure_ascii=False, default=str, separators=(',', ':'))}
 """
-    # LLM 천장(soft 탐지)은 더 이상 별도 콜이 아니다 — 메인 insight 콜의 마커 출력으로
-    # 합쳐졌다(#194). 이 code 목록은 그 콜에게 "이미 있으니 중복 만들지 마라"고 안내하는 용도.
-    rule_caution_codes = {c["code"] for c in cautions}
-    prompt = insight_prompt(state["user_question"], statistical_metadata, all_results,
-                            existing_caution_codes=sorted(rule_caution_codes))
+    prompt = insight_prompt(state["user_question"], statistical_metadata, all_results)
     fb = state.get("validation_feedback")
     if fb:
         prompt += f"\n[직전 검증 지적 — 반드시 보완하라]\n{fb}\n"
@@ -604,18 +549,9 @@ def insight_node(state: EDAState) -> dict:
                 lambda: llm.invoke(prompt).content.strip(), "insight", fallback="인사이트 생성 실패"
             )
 
-    # 프로즈 뒤에 순서대로 붙은 LLM_CAUTIONS_MARKER, SUMMARY_FACTS_MARKER(JSON)를 분리한다 —
-    # insight_result엔 프로즈만 남긴다(#194). 뒤에서부터(마지막 마커부터) 떼어내야 순서가 맞는다.
-    # 마커가 없거나 파싱 실패해도 프로즈는 온전히 보존되고 각 필드는 안전하게 빈 값으로 폴백된다.
-    prose, llm_cautions_raw = split_marked_json(insight_result, LLM_CAUTIONS_MARKER)
-    insight_result, facts = split_marked_json(prose, SUMMARY_FACTS_MARKER)
+    # 서술 뒤의 짧은 facts JSON만 분리한다. cautions는 위에서 계산한 결정론적 규칙 결과를 쓴다.
+    insight_result, facts = split_marked_json(insight_result, SUMMARY_FACTS_MARKER)
     summary_facts = [str(f).strip() for f in facts if str(f).strip()][:6] if isinstance(facts, list) else []
-
-    # 검증된 LLM 추론 cautions를 rule 기반 cautions에 합친다(호출 없음, 순수 검증만).
-    llm_cautions = _validate_llm_cautions(llm_cautions_raw, rule_caution_codes)
-    if llm_cautions:
-        cautions = cautions + llm_cautions
-        statistical_metadata["cautions"] = cautions
 
     # 분석 노드들이 ctx에 누적한 차트 주문서를 state로 노출 + 아티팩트로 영속화.
     chart_requests = list(get_context().chart_requests)

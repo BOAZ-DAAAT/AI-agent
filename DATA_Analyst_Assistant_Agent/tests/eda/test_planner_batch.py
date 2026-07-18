@@ -91,6 +91,7 @@ def test_empty_batch_falls_back_to_single_choice_codegen(monkeypatch):
 
     assert result["next_analysis"] == "codegen"
     assert result["analysis_queue"] == []
+    assert "검정 실행이나 p-value 계산을 위해 codegen을 고르지 말고" in fake_llm.prompts[0]
 
 
 def test_batch_filters_invalid_items_and_caps_at_max_analyses(monkeypatch):

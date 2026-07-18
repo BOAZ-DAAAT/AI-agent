@@ -43,18 +43,18 @@ def _make_pngs(tmp_path, names: list[str]) -> list[str]:
 
 
 def test_batches_into_groups_of_batch_size(tmp_path, monkeypatch):
-    names = [f"chart_{i}.png" for i in range(5)]  # 5장 → 배치 4 + 1 = 2콜
+    names = [f"chart_{i}.png" for i in range(10)]  # 10장 → 배치 8 + 2 = 2콜
     paths = _make_pngs(tmp_path, names)
 
     def reply_for(batch_names: list[str]) -> str:
         return json.dumps({n: {"ok": True, "issue": ""} for n in batch_names})
 
-    fake = _FakeModel([reply_for(names[:4]), reply_for(names[4:])])
+    fake = _FakeModel([reply_for(names[:8]), reply_for(names[8:])])
     monkeypatch.setattr(css, "_load_chart_reader_llm", lambda: fake)
 
     kept, dropped, check_failures = css._visual_sanity_check(paths)
 
-    assert len(fake.calls) == 2  # 1장당 1콜이 아니라 배치 2번
+    assert len(fake.calls) == 2
     assert sorted(os.path.basename(p) for p in kept) == sorted(names)
     assert dropped == []
     assert check_failures == 0
