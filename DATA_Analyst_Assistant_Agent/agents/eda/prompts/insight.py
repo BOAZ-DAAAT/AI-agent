@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
+# 프로즈 뒤에 붙일 구조화 필드 구분자 — 노드가 이 마커 뒤 JSON을 분리해 summary_facts로 쓴다(#194).
+SUMMARY_FACTS_MARKER = "===SUMMARY_FACTS==="
+
 
 def insight_prompt(user_question: str, statistical_metadata: Dict[str, Any], all_results: str) -> str:
     return f"""
@@ -59,4 +62,10 @@ def insight_prompt(user_question: str, statistical_metadata: Dict[str, Any], all
 - 한 줄로 간결하게
 
 한국어로 작성하라.
+
+마지막으로, 위 서술을 모두 끝낸 뒤 아래 구분선과 JSON 배열을 정확히 그대로 추가로 출력하라
+(이 배열은 다음 단계 요약에 쓰이는 핵심 사실 목록이다):
+{SUMMARY_FACTS_MARKER}
+["핵심 사실 3~6개. 각 항목은 위 [검증된 수치]에 실제로 존재하는 값만 담은 짧은 한 문장.",
+ "검증된 수치에 없는 조합(예: 그룹별로 따로 집계되지 않은 평균)은 새 숫자로 만들지 마라 — 그런 건 방향성만 서술하거나 아예 넣지 마라."]
 """

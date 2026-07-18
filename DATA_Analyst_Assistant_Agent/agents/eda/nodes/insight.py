@@ -9,9 +9,12 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_context, get_llm, safe_json_parse
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import (
+    append_errors, get_context, get_llm, safe_json_parse, split_marked_json,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts import insight_prompt
+from DATA_Analyst_Assistant_Agent.agents.eda.prompts.insight import SUMMARY_FACTS_MARKER
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 from DATA_Analyst_Assistant_Agent.agents.sql.validator.integrity_loader import load_scoped_integrity_text
 
@@ -630,12 +633,18 @@ def insight_node(state: EDAState) -> dict:
                 lambda: llm.invoke(prompt).content.strip(), "insight", fallback="인사이트 생성 실패"
             )
 
+    # 프로즈 뒤에 붙은 summary_facts(JSON)를 분리한다 — insight_result엔 프로즈만 남긴다(#194).
+    # 마커가 없거나 파싱 실패하면 facts=[]로 폴백(프로즈는 온전히 보존).
+    insight_result, facts = split_marked_json(insight_result, SUMMARY_FACTS_MARKER)
+    summary_facts = [str(f).strip() for f in facts if str(f).strip()][:6] if isinstance(facts, list) else []
+
     # 분석 노드들이 ctx에 누적한 차트 주문서를 state로 노출 + 아티팩트로 영속화.
     chart_requests = list(get_context().chart_requests)
     _persist_chart_requests(chart_requests)
 
     return {
         "insight_result": insight_result,
+        "summary_facts": summary_facts,
         "statistical_metadata": statistical_metadata,
         "data_level": data_level,
         "cautions": cautions,

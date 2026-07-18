@@ -9,6 +9,9 @@ from __future__ import annotations
 # ─────────────────────────────
 HYPOTHESIS_TYPE_GUIDE = True
 
+# 가설 프로즈 뒤에 붙일 1순위 가설(구조화) 구분자 — 노드가 이 마커 뒤 JSON을 분리해 최종 요약 입력으로 쓴다(#194).
+PRIMARY_HYPOTHESIS_MARKER = "===PRIMARY_HYPOTHESIS==="
+
 
 _TYPE_GUIDE_BLOCK = """
 [가설 유형 판별 — 먼저 target 성격으로 유형을 정하고, 그 유형에 맞는 검증방법만 써라]
@@ -100,26 +103,50 @@ H1: ...
 2. 통제 방법: 교란변수를 통제하기 위한 다음 분석 방법 제안 (예: 다중회귀로 확장, 층화 분석, 그룹별 하위분석 등)
 
 한국어로 작성하라.
+
+마지막으로, 위 서술을 모두 끝낸 뒤 아래 구분선과 JSON 객체를 정확히 그대로 추가로 출력하라
+(다음 에이전트가 가장 먼저 검증할 1순위 가설을 구조화한 것이다. 위 [가설 1]의 핵심을 그대로 옮겨라):
+{PRIMARY_HYPOTHESIS_MARKER}
+{{"target": "종속변수 컬럼명", "feature": "설명변수 컬럼명", "method": "검증방법(예: Kruskal-Wallis)"}}
 """
 
 
-def handoff_summary_prompt(insight_result: str, hypotheses: str) -> str:
+def output_summary_prompt(summary_facts: list, primary_hypothesis: dict) -> str:
+    """다음 단계 전달용 요약 프롬프트.
+
+    긴 인사이트/가설 원문을 다시 먹이지 않고, insight가 미리 뽑아둔 짧은 핵심 사실(summary_facts)과
+    1순위 가설(primary_hypothesis)만 입력으로 받는다 — 원문 재요약 비용 제거(#194). 출력은 여전히
+    LLM이 쓰는 자연스러운 문단이라, 이 요약이 나가는 리포트/UI 품질은 유지된다.
+    """
+    facts = [str(f) for f in (summary_facts or []) if str(f).strip()]
+    facts_text = "\n".join(f"- {f}" for f in facts) or "(제공된 핵심 사실 없음 — 아래 가설 위주로 간결히 작성)"
+
+    ph = primary_hypothesis or {}
+    target = str(ph.get("target", "") or "")
+    feature = str(ph.get("feature", "") or "")
+    method = str(ph.get("method", "") or "")
+    if target and feature and method:
+        closing = f'"다음 에이전트는 {method}으로 {target}~{feature} 관계를 우선 검증하라"로 마무리'
+    else:
+        closing = '"다음 에이전트는 위 사실을 바탕으로 우선 검증할 가설을 선택하라"로 마무리'
+
     return f"""
-아래 EDA 인사이트와 가설을 다음 분석 에이전트에게 전달할 핸드오프 요약으로 압축하라.
+아래 핵심 사실과 1순위 가설만 사용해, 다음 분석 에이전트에게 전달할 요약을 작성하라.
 마크다운 기호 사용 금지. 일반 텍스트로만 작성하라.
+아래에 제시된 것 이외의 새 수치를 절대 만들지 마라.
 
-[인사이트]
-{insight_result}
+[핵심 사실]
+{facts_text}
 
-[가설]
-{hypotheses}
+[1순위 가설]
+target={target}, feature={feature}, method={method}
 
 작성 규칙:
 - 4~6문장으로 압축
-- 첫 문장: 데이터 구조의 핵심 특성 1가지 (수치 포함)
-- 중간 문장: 현재 데이터로 바로 검증 가능한 가설을 우선 언급 (검증방법 포함)
-- 마지막 문장: "다음 에이전트는 [검증방법]으로 [target]~[feature] 관계를 우선 검증하라"로 마무리
-- 수치는 인사이트에서 확인된 것만 포함
+- 첫 문장: 데이터 구조의 핵심 특성 1가지 (핵심 사실의 수치 포함)
+- 중간 문장: 현재 데이터로 바로 검증 가능한 1순위 가설을 우선 언급 (검증방법 포함)
+- 마지막 문장: {closing}
+- 수치는 위 [핵심 사실]에 있는 것만 사용
 
 한국어로 작성하라.
 """

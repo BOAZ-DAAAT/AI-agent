@@ -15,8 +15,8 @@ from DATA_Analyst_Assistant_Agent.agents.eda.prompts.analysis import (
 )
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts.classify import classify_columns_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts.hypothesis import (
-    handoff_summary_prompt,
     hypothesis_prompt,
+    output_summary_prompt,
 )
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts.insight import insight_prompt
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts.planner import planner_prompt
@@ -35,5 +35,5 @@ __all__ = [
     "react_fix_prompt",
     "insight_prompt",
     "hypothesis_prompt",
-    "handoff_summary_prompt",
+    "output_summary_prompt",
 ]

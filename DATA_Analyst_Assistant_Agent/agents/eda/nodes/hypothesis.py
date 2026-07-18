@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import append_errors, get_context, get_llm
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import (
+    append_errors, get_context, get_llm, split_marked_json,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.tool_runner import run_node_with_retry
-from DATA_Analyst_Assistant_Agent.agents.eda.prompts import handoff_summary_prompt, hypothesis_prompt
+from DATA_Analyst_Assistant_Agent.agents.eda.prompts import hypothesis_prompt, output_summary_prompt
+from DATA_Analyst_Assistant_Agent.agents.eda.prompts.hypothesis import PRIMARY_HYPOTHESIS_MARKER
 from DATA_Analyst_Assistant_Agent.agents.eda.state import EDAState
 
 
@@ -45,6 +48,11 @@ def hypothesis_node(state: EDAState) -> dict:
         lambda: llm.invoke(prompt).content.strip(), "hypothesis", fallback="가설 생성 실패"
     )
 
+    # 프로즈 뒤에 붙은 1순위 가설(JSON)을 분리한다 — hypotheses엔 프로즈만 남긴다(#194).
+    # 이후 교정·재검증이 프로즈 구조를 파싱하므로, 반드시 마커 JSON을 먼저 떼어내야 한다.
+    hypotheses, primary_obj = split_marked_json(hypotheses, PRIMARY_HYPOTHESIS_MARKER)
+    primary_hypothesis = primary_obj if isinstance(primary_obj, dict) else {}
+
     # 결정론 게이트(LLM 아님): 불가능한 검정(집계본에 ANOVA/t검정)을 사실 기준으로 교정.
     # 요약 만들기 전에 고쳐야 가설+요약이 일관됨.
     from DATA_Analyst_Assistant_Agent.agents.eda.lib.reliability import correct_hypothesis_feasibility
@@ -55,13 +63,19 @@ def hypothesis_node(state: EDAState) -> dict:
     from DATA_Analyst_Assistant_Agent.agents.eda.lib.hypothesis_screening import screen_hypotheses
     hypotheses, hypothesis_signals = screen_hypotheses(hypotheses, state.get("statistical_metadata", {}) or {})
 
-    summary_prompt = handoff_summary_prompt(state.get("insight_result", ""), hypotheses)
+    # 최종 요약: 긴 원문 대신 insight가 뽑은 짧은 사실 + 1순위 가설만 입력으로 넘긴다(#194).
+    # summary_facts가 비면(파싱 실패 등) insight 프로즈 앞부분으로 폴백해 빈약한 요약을 막는다.
+    summary_facts = state.get("summary_facts", []) or []
+    if not summary_facts:
+        summary_facts = [(state.get("insight_result", "") or "")[:800]]
+    summary_prompt = output_summary_prompt(summary_facts, primary_hypothesis)
     final_summary, err2 = run_node_with_retry(
         lambda: llm.invoke(summary_prompt).content.strip(), "final_summary", fallback="요약 생성 실패"
     )
     return {
         "hypotheses": hypotheses,
         "hypothesis_signals": hypothesis_signals,
+        "primary_hypothesis": primary_hypothesis,
         "final_summary": final_summary,
         "analysis_target": target,
         "error_log": append_errors(state, err1, err2),
