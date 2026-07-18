@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import ValidationError, field_validator
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
@@ -26,16 +26,40 @@ from DATA_Analyst_Assistant_Agent.agents.sql.nodes.mart_design import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_sql_type(value: Any) -> Any:
+    """LLM이 반환한 SQL type 표기 변형을 내부 계약 값으로 정규화한다."""
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "select": "select",
+        "create_table_as": "create_table_as",
+        "create_table_as_select": "create_table_as",
+        "ctas": "create_table_as",
+    }
+    return aliases.get(normalized, normalized)
+
+
 class _SimpleSQLDraft(SQLDraft):
     """simple route가 생성할 수 있는 SQLDraft 계약."""
 
     sql_type: Literal["select"] = "select"
+
+    @field_validator("sql_type", mode="before")
+    @classmethod
+    def _normalize_sql_type(cls, value: Any) -> Any:
+        return _normalize_sql_type(value)
 
 
 class _ComprehensiveSQLDraft(SQLDraft):
     """comprehensive route가 생성할 수 있는 SQLDraft 계약."""
 
     sql_type: Literal["create_table_as"] = "create_table_as"
+
+    @field_validator("sql_type", mode="before")
+    @classmethod
+    def _normalize_sql_type(cls, value: Any) -> Any:
+        return _normalize_sql_type(value)
 
 
 def _with_context_diagnostics(

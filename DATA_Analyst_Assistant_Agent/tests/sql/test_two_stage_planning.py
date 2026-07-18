@@ -474,6 +474,27 @@ def test_comprehensive_generation_normalizes_business_grain_to_mart_design(monke
     assert getattr(captured["schema"], "model_fields")["sql_type"].annotation == Literal["create_table_as"]
 
 
+def test_sql_type_structured_output_accepts_case_and_ctas_aliases():
+    simple = generate_node._SimpleSQLDraft.model_validate(
+        {
+            "sql": "SELECT 1",
+            "sql_type": "SELECT",
+            "reasoning": "대문자 select 허용",
+        }
+    )
+    comprehensive = generate_node._ComprehensiveSQLDraft.model_validate(
+        {
+            "sql": "CREATE TABLE analytics.example AS SELECT 1",
+            "sql_type": "CREATE_TABLE_AS_SELECT",
+            "target_table": "analytics.example",
+            "reasoning": "CTAS 별칭 허용",
+        }
+    )
+
+    assert simple.sql_type == "select"
+    assert comprehensive.sql_type == "create_table_as"
+
+
 def test_legacy_mart_design_is_discarded_before_sql_generation():
     state = base_state(
         plan=comprehensive_plan(),
