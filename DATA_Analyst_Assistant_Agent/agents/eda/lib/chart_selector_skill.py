@@ -327,13 +327,19 @@ def _call_llm_remove(
 3. 이 차트로 확인 가능한 구체적 결론 — "~~인 걸 확인 가능하다"/"~~였다" 형식으로,
    반드시 [분석 결과 요약]·[통계 메타데이터]에 실제로 있는 수치·패턴만 써라(새 숫자 생성 금지)
 (이 캡션은 아티팩트 메타데이터로 남아 다음 에이전트가 차트를 읽을 때 참고한다).
+
+중요: remove와 keep_captions는 반드시 서로 겹치지 않아야 한다(같은 파일명이 두 곳에
+동시에 들어가면 안 됨). keep_captions를 먼저 확정하고, remove에는 keep_captions에
+없는 파일명만 적어라. "쓸모는 있지만 우선순위가 낮다"는 이유만으로 캡션을 쓴 파일을
+remove에도 넣지 마라 — 남길지 뺄지는 하나로만 결정해야 한다.
+JSON의 키도 반드시 이 순서로 써라(keep_captions를 먼저 확정한 뒤 remove를 채우기 위해):
 {{
+  "keep_captions": {{
+    "파일명3.png": "state별 재구매율 순위를 보여주는 막대차트다. 가설1(지역별 차이)의 근거로 골랐다. 상위 3개 주의 재구매율이 평균보다 15%p 높아, 지역별 편차가 뚜렷하다는 걸 확인 가능하다."
+  }},
   "remove": ["파일명1.png", "파일명2.png"],
   "reason": {{
     "파일명1.png": "제거 이유"
-  }},
-  "keep_captions": {{
-    "파일명3.png": "state별 재구매율 순위를 보여주는 막대차트다. 가설1(지역별 차이)의 근거로 골랐다. 상위 3개 주의 재구매율이 평균보다 15%p 높아, 지역별 편차가 뚜렷하다는 걸 확인 가능하다."
   }}
 }}
 """
@@ -409,8 +415,10 @@ def run_chart_selector_skill(
         hypotheses=hypotheses,
     )
 
-    to_remove = set(result.get("remove", []))
     captions = {k: str(v) for k, v in (result.get("keep_captions") or {}).items()}
+    # LLM이 같은 응답 안에서 remove와 keep_captions에 같은 파일명을 동시에 넣는
+    # 자기모순을 낼 때가 있다(run-019f7700 실사례) — 캡션을 쓴 파일은 remove보다 우선해 보존한다.
+    to_remove = set(result.get("remove", [])) - set(captions)
     filtered = [p for p in valid_paths if os.path.basename(p) not in to_remove]
 
     # ── 3단계: 8개 초과 시 LLM이 추가 제거 ──
@@ -432,8 +440,9 @@ def run_chart_selector_skill(
             hypotheses=hypotheses,
         )
 
-        to_remove2 = set(result2.get("remove", []))
-        captions.update({k: str(v) for k, v in (result2.get("keep_captions") or {}).items()})
+        new_captions = {k: str(v) for k, v in (result2.get("keep_captions") or {}).items()}
+        captions.update(new_captions)
+        to_remove2 = set(result2.get("remove", [])) - set(new_captions)
         filtered = [p for p in filtered if os.path.basename(p) not in to_remove2]
 
     final = _ensure_preferred_survives(filtered)
