@@ -19,6 +19,18 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 
 AgentName = Literal["sql_agent", "eda_agent", "analysis_agent", "insight"]
 AgentStatusValue = Literal["success", "warning", "failed", "approval_required"]
+NodeExecutionStatus = Literal["running", "waiting", "completed", "failed"]
+ActiveNodeStatus = Literal["running", "waiting"]
+NodeLifecycleEventType = Literal[
+    "agent.started",
+    "agent.progress",
+    "agent.retrying",
+    "agent.waiting",
+    "agent.resumed",
+    "agent.completed",
+    "agent.discarded",
+    "agent.failed",
+]
 NextAction = Literal[
     "clarify",
     "create_plan",
@@ -93,6 +105,7 @@ class ActiveNodeExecution(BaseModel):
     parent_node_id: str | None = None
     node_sequence: int = Field(ge=1)
     attempt: int = Field(default=1, ge=1)
+    status: ActiveNodeStatus = "running"
 
 
 class PendingApproval(BaseModel):
@@ -465,6 +478,9 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
 
         normalized: SupervisorState = {
             **state,
+            "active_node": normalized_active_node,
+            "last_completed_node_id": normalized_last_completed_node_id,
+            "node_sequence": normalized_node_sequence,
             "pending_approval": normalized_pending_approval,
             "pending_result": state.get("pending_result"),
             "result_history": list(state.get("result_history", [])),
@@ -512,6 +528,9 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
     normalized = {
         **state,
+        "active_node": None,
+        "last_completed_node_id": None,
+        "node_sequence": 0,
         "state_schema_version": 6,
         "validation_history": [],
         "pending_result": None,
