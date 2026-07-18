@@ -1,8 +1,10 @@
 import os
 import json
 import base64
+import io
 
 from langchain_core.messages import HumanMessage
+from PIL import Image
 
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
@@ -116,6 +118,24 @@ def _chunked(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+_VISUAL_CHECK_MAX_DIM = 900  # 긴 변 기준 리사이즈 픽셀 상한(#194)
+                              # 단순 ok/issue 판정(범례 겹침·축 라벨 판독)엔 원본 고해상도가 불필요하고,
+                              # 비전 토큰은 이미지 해상도에 비례해 커지므로 축소가 곧 토큰 절감이다.
+
+
+def _encode_chart_image(path: str, max_dim: int = _VISUAL_CHECK_MAX_DIM) -> str:
+    """시각 결함 판정용으로 긴 변을 max_dim 이하로 리사이즈한 뒤 base64 PNG로 인코딩한다."""
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
     """최종 선정된 차트(보통 TOTAL_MAX 이하)만 멀티모달로 훑어 렌더링 결함을 거른다.
 
@@ -139,8 +159,7 @@ def _visual_sanity_check(paths: list[str]) -> tuple[list[str], list[dict], int]:
         batch_names: list[str] = []
         for p in batch:
             try:
-                with open(p, "rb") as f:
-                    encoded = base64.b64encode(f.read()).decode("ascii")
+                encoded = _encode_chart_image(p)
             except Exception:
                 kept.append(p)
                 check_failures += 1

@@ -54,10 +54,12 @@ def build_app():
     for name in _ANALYSIS_NODE_FN:
         graph.add_edge(name, "planner")
 
-    # codegen 성공 → insight(정상 파이프라인) / 도메인 밖 → 종료
+    # codegen 성공 → insight(정상 파이프라인) / 도메인 밖인데 분석 도구가 남았으면 → planner로
+    # 복귀(정상 분석 경로에 한 번 더 기회, #194) / 진짜 도메인 밖(도구도 소진) → 종료
     # (out_of_domain인데 insight·hypothesis가 계속 돌면 그럴듯한 요약이 섞이므로 바로 END)
     graph.add_conditional_edges(
-        "codegen", route_after_codegen, {"insight": "insight", "end": END})
+        "codegen", route_after_codegen,
+        {"insight": "insight", "planner": "planner", "end": END})
 
     graph.add_edge("insight",        "hypothesis")
     graph.add_edge("hypothesis",     "validator")

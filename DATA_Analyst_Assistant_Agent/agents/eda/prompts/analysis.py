@@ -7,6 +7,19 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+# 노드가 이 마커 뒤 JSON 배열을 분리해 insight 입력용 facts로 쓴다(#194 후속).
+# prompts는 nodes에 의존하면 안 되므로(순환임포트) 여기가 정의 위치이고, tool_runner.py가 이걸 가져간다.
+ANALYSIS_FACTS_MARKER = "===ANALYSIS_FACTS==="
+
+_FACTS_BLOCK = f"""
+마지막으로, 위 요약을 모두 끝낸 뒤 아래 구분선과 JSON 배열을 정확히 그대로 추가로 출력하라
+(이 배열은 insight 단계가 원문 대신 참고하는 핵심 사실 목록이다):
+{ANALYSIS_FACTS_MARKER}
+["핵심 사실 1(한 문장, 200자 이내, 위 결과에 실제 존재하는 근거만, 원인·인과관계 추정 금지)",
+ "핵심 사실 2 (다른 항목과 중복 금지, 필요하면 핵심 수치 포함)"]
+2~4개만 작성하라.
+"""
+
 
 def inspect_prompt(user_question: str, grain: str, result_json: str) -> str:
     return f"""
@@ -24,7 +37,7 @@ def inspect_prompt(user_question: str, grain: str, result_json: str) -> str:
 3. grain 확인
 4. 분석 가능한 지표 목록 정리
 결과를 한국어로 요약하라.
-"""
+{_FACTS_BLOCK}"""
 
 
 def quality_prompt(user_question: str, inspect_result: str, result_json: str) -> str:
@@ -39,7 +52,7 @@ def quality_prompt(user_question: str, inspect_result: str, result_json: str) ->
 {result_json}
 
 위 결과를 종합하여 한국어로 요약하라. 특히 분석 시 주의해야 할 품질 이슈를 명시하라.
-"""
+{_FACTS_BLOCK}"""
 
 
 def distribution_prompt(user_question: str, inspect_result: str, plan: Dict[str, Any], result_json: str) -> str:
@@ -56,7 +69,7 @@ def distribution_prompt(user_question: str, inspect_result: str, plan: Dict[str,
 {result_json}
 
 우선 분석 지표를 중심으로 분포 형태, 치우침, 분산 정도를 한국어로 요약하라.
-"""
+{_FACTS_BLOCK}"""
 
 
 def comparison_prompt(user_question: str, inspect_result: str, plan: Dict[str, Any], result_json: str) -> str:
@@ -73,7 +86,7 @@ def comparison_prompt(user_question: str, inspect_result: str, plan: Dict[str, A
 {result_json}
 
 우선 분석 지표를 중심으로 어떤 그룹이 강하고 약한지 한국어로 요약하라.
-"""
+{_FACTS_BLOCK}"""
 
 
 def relationship_prompt(user_question: str, inspect_result: str, plan: Dict[str, Any], result_json: str) -> str:
@@ -90,7 +103,7 @@ def relationship_prompt(user_question: str, inspect_result: str, plan: Dict[str,
 {result_json}
 
 우선 분석 지표와 관련된 상관관계, trade-off, 주목할 패턴을 한국어로 요약하라.
-"""
+{_FACTS_BLOCK}"""
 
 
 def time_prompt(user_question: str, inspect_result: str, result_json: str) -> str:
@@ -105,4 +118,4 @@ def time_prompt(user_question: str, inspect_result: str, result_json: str) -> st
 {result_json}
 
 추세, 계절성, 특이 시점을 한국어로 요약하라.
-"""
+{_FACTS_BLOCK}"""

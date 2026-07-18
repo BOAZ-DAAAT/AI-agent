@@ -110,6 +110,22 @@ def test_batch_filters_invalid_items_and_caps_at_max_analyses(monkeypatch):
     assert len(total_planned) <= planner_mod.MAX_ANALYSES
 
 
+def test_declines_to_reselect_codegen_after_already_attempted(monkeypatch):
+    # codegen이 이미 한 번(0라운드) 시도됐는데 LLM이 또 codegen을 고르면 무효 처리하고 done으로 종료
+    # (route_after_codegen이 planner로 되돌릴 때 왕복 루프가 생기지 않게 하는 가드, #194)
+    fake_llm = _FakeLLM([json.dumps({"next": "codegen", "reason": "그래도 codegen이 나을 것 같음"})])
+    monkeypatch.setattr(planner_mod, "get_llm", lambda: fake_llm)
+
+    state = _state(
+        round=1,
+        controller_log=[{"round": 0, "choice": "codegen", "reason": "..."}],
+    )
+    result = planner_mod.planner_node(state)
+
+    assert result["next_analysis"] == "done"
+    assert "유효하지 않은 선택" in result["controller_log"][-1]["reason"]
+
+
 def test_non_first_round_does_not_emit_batch(monkeypatch):
     fake_llm = _FakeLLM([json.dumps({"next": "distribution", "reason": "재검토"})])
     monkeypatch.setattr(planner_mod, "get_llm", lambda: fake_llm)

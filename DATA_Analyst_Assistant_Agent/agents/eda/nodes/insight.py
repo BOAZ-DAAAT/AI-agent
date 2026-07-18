@@ -508,15 +508,23 @@ def insight_node(state: EDAState) -> dict:
         if codegen.get("status") == "success":
             statistical_metadata["adhoc_analysis"] = codegen
 
-    all_results = f"""
-[구조 탐색] {state.get('inspect_result', '해당 없음')}
-[품질 점검] {state.get('quality_result', '해당 없음')}
-[분포 분석] {state.get('distribution_result', '해당 없음')}
-[그룹 비교] {state.get('comparison_result', '해당 없음')}
-[관계 탐색] {state.get('relationship_result', '해당 없음')}
-[시간 분석] {state.get('time_result', '해당 없음')}
-[클러스터링] {json.dumps(statistical_metadata.get('clustering', {}), ensure_ascii=False, default=str, separators=(',', ':'))}
-"""
+    def _facts_block(facts_key: str, result_key: str, label: str) -> str:
+        # 원문 대신 각 노드가 뽑은 짧은 facts로 insight 입력을 줄인다(#194 후속).
+        # facts가 비어있으면(노드 미실행 등) 원문으로 폴백 — 정보 완전 누락 방지.
+        facts = state.get(facts_key) or []
+        if facts:
+            return f"[{label}]\n" + "\n".join(f"- {f}" for f in facts)
+        return f"[{label}] {state.get(result_key, '해당 없음')}"
+
+    # 클러스터링은 이미 statistical_metadata.clustering에 있어 여기서 중복하지 않는다.
+    all_results = "\n\n".join([
+        _facts_block("inspect_facts", "inspect_result", "구조 탐색"),
+        _facts_block("quality_facts", "quality_result", "품질 점검"),
+        _facts_block("distribution_facts", "distribution_result", "분포 분석"),
+        _facts_block("comparison_facts", "comparison_result", "그룹 비교"),
+        _facts_block("relationship_facts", "relationship_result", "관계 탐색"),
+        _facts_block("time_facts", "time_result", "시간 분석"),
+    ])
     prompt = insight_prompt(state["user_question"], statistical_metadata, all_results)
     fb = state.get("validation_feedback")
     if fb:
@@ -528,6 +536,9 @@ def insight_node(state: EDAState) -> dict:
         err = None
     except Exception as e:  # noqa: BLE001
         if isinstance(e, RateLimitError):
+            # all_results가 이미 facts 기반이라 이 재-축소는 대개 효과가 작다(#194 후속).
+            # RateLimit의 실제 원인이 statistical_metadata(수치 JSON) 크기라면 이 폴백으로
+            # 해결 안 됨 — TODO: statistical_metadata 전용 slim projection 도입 시 재설계.
             truncated_results = "\n".join([
                 f"[{label}] {text[:300]}..."
                 for label, text in [

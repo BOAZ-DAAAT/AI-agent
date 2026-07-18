@@ -188,6 +188,47 @@ def test_llm_audit_non_capped_retry_does_not_add_caution(monkeypatch) -> None:
     assert "cautions" not in update
 
 
+def test_analysis_facts_included_in_llm_audit_prompt(monkeypatch) -> None:
+    """#194 후속 — statistical_metadata엔 없어도 분석노드 facts에 있는 수치는
+    '지어낸 것'이 아니라고 판단할 근거를 validator 프롬프트가 받는지 확인한다.
+    (run-019f756b 실제 사례: distribution_node가 grouped_box로 계산한 그룹별
+    수치가 statistical_metadata.group_comparison엔 안 들어가 오탐이 났었음)"""
+    captured: dict = {}
+
+    class _CapturingLLM(_FakeLLM):
+        def invoke(self, prompt: str):
+            captured["prompt"] = prompt
+            return super().invoke(prompt)
+
+    reply = '{"status":"pass","retry_target":"none","reason":"정상","feedback":""}'
+    monkeypatch.setattr(validator_mod, "get_llm", lambda: _CapturingLLM(reply))
+
+    state = _llm_audit_state()
+    state["distribution_facts"] = ["가격대별 리뷰점수 분포는 모두 중앙값 4, Q1=2, Q3=5(IQR=3)로 유사하다."]
+
+    validator_node(state)
+
+    assert "가격대별 리뷰점수 분포는 모두 중앙값 4" in captured["prompt"]
+    assert "분석 노드별 핵심 사실" in captured["prompt"]
+
+
+def test_missing_analysis_facts_renders_placeholder(monkeypatch) -> None:
+    """분석노드 facts가 하나도 없는 state(구버전 호환)에서도 프롬프트 생성이 안 깨진다."""
+    captured: dict = {}
+
+    class _CapturingLLM(_FakeLLM):
+        def invoke(self, prompt: str):
+            captured["prompt"] = prompt
+            return super().invoke(prompt)
+
+    reply = '{"status":"pass","retry_target":"none","reason":"정상","feedback":""}'
+    monkeypatch.setattr(validator_mod, "get_llm", lambda: _CapturingLLM(reply))
+
+    validator_node(_llm_audit_state())
+
+    assert "(없음)" in captured["prompt"]
+
+
 def test_run_eda_self_check_flags_validator_failure() -> None:
     cautions = [{
         "code": "EDA_SELF_VALIDATION_FAILED",

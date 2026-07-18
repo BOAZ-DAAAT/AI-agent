@@ -32,6 +32,17 @@ def _completed_analyses(state: EDAState) -> list:
     return sorted({e["choice"] for e in log if e.get("choice") and e["choice"] != "done"})
 
 
+_FACTS_FIELDS = ["inspect_facts", "quality_facts", "distribution_facts",
+                 "comparison_facts", "relationship_facts", "time_facts"]
+
+
+def _all_analysis_facts(state: EDAState) -> dict:
+    """분석노드 6개가 결정론적으로 계산해 뽑은 facts를 모은다 — statistical_metadata에
+    안 흘러들어간 그룹별 수치(예: 분포노드의 grouped_box)도 여기엔 있어, validator가
+    이걸 '없는 값'으로 오판(false positive)하지 않게 한다."""
+    return {k: state.get(k) for k in _FACTS_FIELDS if state.get(k)}
+
+
 def _deterministic_fail(state: EDAState):
     """코드로 잡히는 명백한 실패 → (retry_target, reason, failure_code) 또는 None."""
     insight = (state.get("insight_result") or "").strip()
@@ -111,6 +122,7 @@ def validator_node(state: EDAState) -> dict:
             insight_result=state.get("insight_result", ""),
             hypotheses=state.get("hypotheses", ""),
             final_summary=state.get("final_summary", ""),
+            analysis_facts=_all_analysis_facts(state),
         )
         try:
             raw = get_llm().invoke(prompt).content.strip()
