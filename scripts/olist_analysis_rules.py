@@ -11,6 +11,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 DEFAULT_RULE_DIR = REPO_ROOT / "docs" / "olist_rag_context" / "analysis_rules"
 DEFAULT_SCHEMA_PATH = REPO_ROOT / "DATA_Analyst_Assistant_Agent" / "agents" / "sql" / "data" / "db_schema.json"
 
