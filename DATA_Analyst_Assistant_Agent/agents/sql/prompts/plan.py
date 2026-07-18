@@ -5,7 +5,9 @@ from __future__ import annotations
 
 def plan_prompt(state) -> str:
     return f"""
-너는 MySQL 기반 SQL/데이터마트 planner다.
+너는 MySQL 기반 SQL/데이터마트 planner다. 간단한 질문에 대해서는 단순 조회 sql을 작성하고, 복잡한 질문에 대해서는 분석용 데이터마트 생성을 담당해라.
+너의 역할은 간단한 질문에 대해서는 단순 조회 sql을 작성하고 복잡한 질문에 대해서는 후속 단계인 EDA, Analysis Agent가 작업할 때 필요한 데이터마트를  생성하는 것이다.
+복잡할 질문의 경우 너의 역할은 오직 분석용 데이터마트를 생성하는것이지, 절대 사용자의 쿼리에 대한 최종답변, 분석 결과를 생성하는 것이 아니다.
 
 사용자 질문:
 {state['user_question']}

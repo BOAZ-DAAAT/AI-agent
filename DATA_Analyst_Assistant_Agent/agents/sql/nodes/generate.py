@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import ValidationError
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
@@ -12,7 +13,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import (
     normalize_generated_sql,
     require_route_kind,
     retry_feedback_text,
-    try_llm_json,
+    invoke_llm_structured,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
 from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import build_generation_context
@@ -23,6 +24,18 @@ from DATA_Analyst_Assistant_Agent.agents.sql.nodes.mart_design import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SimpleSQLDraft(SQLDraft):
+    """simple route가 생성할 수 있는 SQLDraft 계약."""
+
+    sql_type: Literal["select"] = "select"
+
+
+class _ComprehensiveSQLDraft(SQLDraft):
+    """comprehensive route가 생성할 수 있는 SQLDraft 계약."""
+
+    sql_type: Literal["create_table_as"] = "create_table_as"
 
 
 def _with_context_diagnostics(
@@ -113,49 +126,69 @@ def generate_sql(state: AgentState):
             retryable=True,
         )
     prompt = (
-        prompts.generate_mart_prompt(context_result.context_json)
+        prompts.generate_mart_prompt(context_result.context)
         if route_kind == "comprehensive"
-        else prompts.generate_query_prompt(context_result.context_json)
+        else prompts.generate_query_prompt(context_result.context)
     )
     diagnostics = dict(context_result.diagnostics)
     diagnostics["final_prompt_chars"] = len(prompt)
-    response = try_llm_json(prompt)
-    if not response:
+    response_model = _ComprehensiveSQLDraft if route_kind == "comprehensive" else _SimpleSQLDraft
+    try:
+        response = invoke_llm_structured(prompt, response_model)
+    except ValidationError as exc:
         return _with_context_diagnostics(
             state,
             _generation_failure(
                 state,
-                reason_code="llm_empty_response",
+                reason_code="structured_output_contract_violation",
+                detail=f"LLM SQL 응답이 structured output 계약을 만족하지 않습니다: {exc.errors()[0]['type']}",
+                retryable=True,
+            ),
+            diagnostics,
+        )
+    except Exception as exc:
+        return _with_context_diagnostics(
+            state,
+            _generation_failure(
+                state,
+                reason_code="structured_output_call_failed",
+                detail=f"LLM structured output 호출에 실패했습니다: {type(exc).__name__}",
+                retryable=True,
+            ),
+            diagnostics,
+        )
+
+    if response is None or response == "" or response == {}:
+        return _with_context_diagnostics(
+            state,
+            _generation_failure(
+                state,
+                reason_code="structured_output_empty_response",
                 detail="LLM이 SQL 초안을 반환하지 않았습니다.",
                 retryable=True,
             ),
             diagnostics,
         )
 
-    cleaned = response.strip().replace("```json", "").replace("```", "").strip()
     try:
-        parsed = json.loads(cleaned)
-    except Exception:
-        return _with_context_diagnostics(
-            state,
-            _generation_failure(
-                state,
-                reason_code="llm_json_parse_failed",
-                detail="LLM SQL 응답을 JSON으로 파싱하지 못했습니다.",
-                retryable=True,
-            ),
-            diagnostics,
+        response_payload = response.model_dump() if isinstance(response, SQLDraft) else response
+        parsed = response_model.model_validate(response_payload).model_dump()
+    except ValidationError as exc:
+        raw_sql_type = response.get("sql_type") if isinstance(response, dict) else None
+        expected_sql_type = "create_table_as" if route_kind == "comprehensive" else "select"
+        reason_code = (
+            "sql_route_kind_mismatch"
+            if raw_sql_type in {"select", "create_table_as"} and raw_sql_type != expected_sql_type
+            else "structured_output_contract_violation"
         )
-
-    if not isinstance(parsed, dict):
+        detail = (
+            f"{route_kind} route와 sql_type={raw_sql_type}이 일치하지 않습니다."
+            if reason_code == "sql_route_kind_mismatch"
+            else f"LLM SQL 응답이 structured output 계약을 만족하지 않습니다: {exc.errors()[0]['type']}"
+        )
         return _with_context_diagnostics(
             state,
-            _generation_failure(
-                state,
-                reason_code="llm_json_not_object",
-                detail="LLM SQL 응답이 JSON object가 아닙니다.",
-                retryable=True,
-            ),
+            _generation_failure(state, reason_code=reason_code, detail=detail, retryable=True),
             diagnostics,
         )
 

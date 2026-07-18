@@ -1,117 +1,95 @@
-"""SQL 생성(generate_sql) 프롬프트 — 마트/조회 두 가지."""
+"""SQL 생성 프롬프트: 검증된 컨텍스트를 짧은 우선순위 계약으로 전달한다."""
 
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA
+from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import (
+    ComprehensiveSQLGenerationContext,
+    SimpleSQLGenerationContext,
+)
 
 
-def generate_mart_prompt(generation_context_json: str) -> str:
-    return f"""
-너는 MySQL SQL 작성기다. 데이터마트 생성 SQL을 작성한다.
-
-SQL 생성 컨텍스트(compact JSON):
-{generation_context_json}
-
-규칙:
-- CREATE TABLE ... AS SELECT 형태만 허용
-- 타겟 스키마는 반드시 {ALLOWED_MART_SCHEMA}
-- source는 실제 존재 테이블만 사용
-- 사용자 질문보다 확정된 mart_design을 우선 계약으로 사용
-- mart_design의 target_table, grain_columns, source_grains, deduplication_keys,
-  grain_strategy, column_plan, metric_support를 임의로 변경하지 말 것
-
-- source 테이블에는 schema/database prefix를 절대 붙이지 말 것
-- source 테이블은 customers, orders처럼 bare table name만 사용
-- raw_data.*, source.*, public.*, olist.*, 세션 DB명 prefix는 금지
-- schema prefix가 허용되는 것은 target_table의 {ALLOWED_MART_SCHEMA}.* 뿐
-
-- 데이터마트는 최종 리포트용 요약 결과가 아니라 재사용 가능한 기반 테이블로 작성
-- 기본적으로 가능한 한 원본 데이터의 행 수준 또는 mart_design에 선언된 공통 grain을 유지
-- 우선 조인, 정제, 표준화, 중복 제거, 필수 파생 컬럼 추가로 해결
-- preserve_common_grain이면 집계하지 않고 선언된 공통 grain을 보존
-- aggregate_to_common_grain이면 mart_design에 선언된 집계 계약만 사용
-- source_grains가 더 세밀한 원천은 deduplication_keys와
-  각 column_plan.aggregation_method에 따라 공통 grain으로 집계하거나 중복 제거
-- mart_design에 명시되지 않은 임의의 집계는 금지
-- 집계를 사용했다면 row-level 또는 공통 grain 보존이 부적절한 이유를 reasoning에 명시
-
-- mart_design.grain_columns가 최종 결과의 한 행을 유일하게 식별하도록 작성
-- 최종 SELECT에는 column_plan의 output_column만 선언된 순서와 alias로 정확히 출력
-- calculation_rule의 자연어 의미를 SQL로 구현하되 임의의 새 출력 컬럼을 추가하지 말 것
-
-- metric_support의 downstream_calculation을 후속 단계에서 수행할 수 있도록
-  required_mart_columns를 보존
-- 질문 분석 결과의 required_columns와 business_keys는 원천 컬럼 참조와
-  조인 조건을 결정하는 데 사용하되 mart_design 자체를 변경하지 말 것
-
-- 재사용 가능한 원자적 파생값은 포함할 수 있음
-- 비율, 순위, 최종 재구매 판정, 카테고리별 요약 지표 등
-  최종 분석 또는 리포트 성격의 파생값은 생성하지 말 것
-- 모호한 기준은 reasoning에 명시
-- Treat integrity_failures/GE failures as data quality guidance, not as automatic table or column bans.
-- Apply an integrity failure only when it is directly related to selected_tables, required_columns, joins, filters, output columns, grain, or aggregation. Ignore unrelated failures.
-- PK/FK/uniqueness failures should guide fanout prevention, pre-aggregation, deduplication, grain checks, and postcheck design; they do not by themselves prohibit using the table.
-- Type/datetime failures should guide CAST or explicit conversion only when the affected column is used in a filter, join, ordering, or calculation.
-- Do not invent schema objects to satisfy integrity failures; use only provided source tables and columns.
-- precheck_sql에는 원천 데이터 건수/기간 확인용 SELECT
-- postcheck_sql은 타겟 마트에 대한 단일 SELECT이며 정확히 한 행을 반환
-- postcheck_sql은 전체 행 수 AS row_count, grain_columns 기준 2행 이상인 grain 그룹 수 AS duplicate_grain_count, grain 컬럼 중 하나라도 NULL인 행 수 AS null_grain_count를 모두 제공
-- DROP, ALTER, TRUNCATE 금지
-- source_column_refs에는 실제 원천 table.column만 작성하고, 계산 alias나 최종 출력 alias는 넣지 말 것
-- derived_columns에는 계산식으로 만든 alias만, output_columns에는 최종 SELECT에 노출되는 컬럼만 작성
-- 반드시 JSON만 출력
-
-출력 형식:
-{{
-  "sql": "...",
-  "sql_type": "create_table_as",
-  "target_table": "{ALLOWED_MART_SCHEMA}.xxx",
-  "source_tables": ["..."],
-  "source_column_refs": ["table.column"],
-  "derived_columns": ["계산식 alias"],
-  "output_columns": ["최종 노출 컬럼"],
-  "business_grain": "mart_design.grain과 동일한 값",
-  "precheck_sql": "SELECT ...",
-  "postcheck_sql": "SELECT ...",
-  "reasoning": "..."
-}}
-"""
+def _context_json(context: SimpleSQLGenerationContext | ComprehensiveSQLGenerationContext) -> str:
+    return context.model_dump_json(exclude_none=True, by_alias=True)
 
 
-def generate_query_prompt(generation_context_json: str) -> str:
-    return f"""
-너는 MySQL SQL 작성기다. 조회 SQL을 작성한다.
+def _integrity_rule(context: SimpleSQLGenerationContext | ComprehensiveSQLGenerationContext) -> str:
+    if not context.integrity_failures:
+        return ""
+    return (
+        "\n- 관련 무결성 실패만 팬아웃 방지·중복 제거·타입 변환에 반영한다. "
+        "테이블/컬럼을 금지하거나 새 식별자를 만들지 않는다."
+    )
 
-SQL 생성 컨텍스트(compact JSON):
-{generation_context_json}
 
-규칙:
- - MySQL SELECT SQL만 생성
- - WITH 절 허용
- - 필요하면 여러 개의 SELECT/WITH 문을 세미콜론으로 구분해 출력할 수 있다
- - 각 statement는 반드시 SELECT 또는 WITH 로 시작해야 한다
- - simple 경로에서는 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/CREATE 금지
- - 이전에 특정 statement가 실패했다면 전체를 무작정 다시 쓰지 말고 실패 statement를 우선 수정하라
- - 질문에 없는 조건 임의 추가 금지
- - 질문 분석 결과의 required_columns를 SELECT 컬럼 선택의 우선 근거로 사용
- - 질문 분석 결과의 business_keys를 조인 조건과 식별자 선택의 우선 근거로 사용
- - 정합성 문제가 있는 컬럼/테이블 주의
- - source_column_refs에는 실제 원천 table.column만 작성하고, 계산 alias나 최종 출력 alias는 넣지 말 것
- - derived_columns에는 계산식으로 만든 alias만, output_columns에는 최종 SELECT에 노출되는 컬럼만 작성
- - 반드시 JSON만 출력
+def generate_mart_prompt(context: ComprehensiveSQLGenerationContext) -> str:
+    """comprehensive route의 마트 생성 계약을 구성한다."""
+    if not isinstance(context, ComprehensiveSQLGenerationContext):
+        raise TypeError("마트 프롬프트에는 ComprehensiveSQLGenerationContext가 필요합니다")
 
-출력 형식:
-{{
-  "sql": "SELECT ...",
-  "sql_type": "select",
-  "target_table": null,
-  "source_tables": ["..."],
-  "source_column_refs": ["table.column"],
-  "derived_columns": ["계산식 alias"],
-  "output_columns": ["최종 노출 컬럼"],
-  "business_grain": null,
-  "precheck_sql": null,
-  "postcheck_sql": null,
-  "reasoning": "..."
-}}
-"""
+    if context.aggregation_policy == "preserve_common_grain":
+        aggregation_rule = "- preserve_common_grain: 집계 없이 final_grain을 보존한다."
+    else:
+        aggregation_rule = (
+            "- aggregate_to_common_grain: column_plan.aggregation_method와 "
+            "deduplication_keys로만 final_grain에 집계한다."
+        )
+
+    return f"""역할
+MySQL 재사용 데이터마트 SQL을 작성한다.
+
+계약 우선순위
+1. mart_design(target_table, source_grains, final_grain, column_plan, metric_support, aggregation_policy)
+2. schema와 selected_tables
+3. user_question
+4. previous_feedback
+
+생성 컨텍스트
+{_context_json(context)}
+
+핵심 불변 조건
+- comprehensive route이며 CREATE TABLE ... AS SELECT 한 문장만 생성한다.
+- target은 {ALLOWED_MART_SCHEMA}.*만, source는 selected_tables의 bare table name만 사용한다.
+- final_grain을 보존하고 grain_columns가 행을 식별하게 한다.
+- 최종 컬럼은 column_plan.output_column의 순서·alias·계산 계약과 정확히 일치시킨다.
+- metric_support.required_mart_columns를 보존하며 임의 컬럼·집계·필터를 추가하지 않는다.
+- source_column_refs는 실제 source table.column, derived_columns는 계산 alias, output_columns는 최종 컬럼만 기록한다.
+- DROP, ALTER, TRUNCATE와 최종 리포트용 비율·순위·판정 지표를 생성하지 않는다.
+
+조건부 규칙
+{aggregation_rule}
+- precheck_sql은 원천 건수/기간 SELECT로 작성한다.
+- postcheck_sql은 target을 검사하는 한 행 SELECT로 row_count, duplicate_grain_count, null_grain_count를 반환한다.{_integrity_rule(context)}
+- previous_feedback이 있으면 관련 실패만 수정한다.
+
+SQLDraft 스키마에 맞춰 응답한다."""
+
+
+def generate_query_prompt(context: SimpleSQLGenerationContext) -> str:
+    """simple route의 조회 생성 계약을 구성한다."""
+    if not isinstance(context, SimpleSQLGenerationContext):
+        raise TypeError("조회 프롬프트에는 SimpleSQLGenerationContext가 필요합니다")
+
+    return f"""역할
+MySQL 조회 SQL을 작성한다.
+
+계약 우선순위
+1. schema와 selected_tables
+2. user_question
+3. previous_feedback
+
+생성 컨텍스트
+{_context_json(context)}
+
+핵심 불변 조건
+- simple route이며 SELECT 또는 WITH statement만 생성한다. 여러 statement는 세미콜론으로 구분할 수 있다.
+- source는 selected_tables에 있고 schema에 존재하는 bare table/column만 사용한다.
+- required_columns는 출력, business_keys는 조인·식별의 우선 근거로 사용한다.
+- 질문에 없는 컬럼·집계·필터를 임의로 추가하지 않는다.
+- INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE를 사용하지 않는다.
+- source_column_refs는 실제 source table.column, derived_columns는 계산 alias, output_columns는 최종 컬럼만 기록한다.{_integrity_rule(context)}
+
+조건부 규칙
+- previous_feedback이 있으면 실패 statement를 우선 수정한다.
+
+SQLDraft 스키마에 맞춰 응답한다."""

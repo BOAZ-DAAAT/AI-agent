@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, clean_sql, get_llm
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import extract_sql_aliases
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, SQLDraft
@@ -76,6 +78,11 @@ def try_llm_json(prompt: str) -> Optional[str]:
         return get_llm().invoke(prompt).content
     except Exception:
         return None
+
+
+def invoke_llm_structured(prompt: str, schema: type[BaseModel]) -> Any:
+    """LLM provider의 structured output을 사용해 검증 가능한 응답을 받는다."""
+    return get_llm().with_structured_output(schema).invoke(prompt)
 
 
 def empty_sql_draft(state: AgentState, *, reasoning: str) -> dict[str, Any]:
