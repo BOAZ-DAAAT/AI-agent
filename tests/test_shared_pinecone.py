@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from DATA_Analyst_Assistant_Agent.shared.pinecone import (
+    PineconeConfigurationError,
+    PineconeSearchError,
+    PineconeSettings,
+    get_pinecone_index,
+    search_company_context,
+)
+
+
+def _settings(**overrides) -> PineconeSettings:
+    values = {
+        "api_key": "test-key",
+        "index_name": "olist",
+        "namespace": "olist-rag-v1",
+        "text_field": "text",
+        "top_k": 5,
+        "timeout_seconds": 10.0,
+    }
+    values.update(overrides)
+    return PineconeSettings(**values)
+
+
+def test_settings_load_pinecone_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PINECONE_API_KEY", "env-key")
+    monkeypatch.setenv("PINECONE_INDEX_NAME", "olist-context")
+    monkeypatch.setenv("PINECONE_NAMESPACE", "company-v2")
+    monkeypatch.setenv("PINECONE_TEXT_FIELD", "content")
+    monkeypatch.setenv("PINECONE_TOP_K", "7")
+    monkeypatch.setenv("PINECONE_TIMEOUT_SECONDS", "3.5")
+
+    settings = PineconeSettings.from_env()
+
+    assert settings.api_key == "env-key"
+    assert settings.index_name == "olist-context"
+    assert settings.namespace == "company-v2"
+    assert settings.text_field == "content"
+    assert settings.top_k == 7
+    assert settings.timeout_seconds == 3.5
+
+
+def test_settings_reject_missing_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("PINECONE_API_KEY", raising=False)
+
+    with pytest.raises(PineconeConfigurationError, match="PINECONE_API_KEY"):
+        PineconeSettings.from_env()
+
+
+def test_get_pinecone_index_reuses_client_for_same_settings(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    index = object()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def Index(self, index_name: str):
+            calls.append((self.api_key, index_name))
+            return index
+
+    import DATA_Analyst_Assistant_Agent.shared.pinecone as pinecone_module
+
+    monkeypatch.setattr(pinecone_module, "Pinecone", FakeClient)
+    pinecone_module._get_cached_index.cache_clear()
+
+    assert get_pinecone_index(_settings()) is index
+    assert get_pinecone_index(_settings()) is index
+    assert calls == [("test-key", "olist")]
+    pinecone_module._get_cached_index.cache_clear()
+
+
+def test_search_uses_integrated_embedding_and_normalizes_hits() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def search(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                result=SimpleNamespace(
+                    hits=[
+                        SimpleNamespace(
+                            id="olist-logistics-001__chunk_000",
+                            score=0.87,
+                            fields={
+                                "text": "배송 지연은 약속 준수 관점에서 해석한다.",
+                                "document_id": "olist-logistics-001",
+                                "title": "Olist 물류 의사결정 원칙",
+                                "department": "logistics",
+                            },
+                        )
+                    ]
+                )
+            )
+
+    index = FakeIndex()
+    metadata_filter = {"department": {"$eq": "logistics"}}
+
+    hits = search_company_context(
+        "배송 지연을 분석할 때 무엇을 고려해야 해?",
+        top_k=3,
+        metadata_filter=metadata_filter,
+        settings=_settings(),
+        index=index,
+    )
+
+    assert index.kwargs["namespace"] == "olist-rag-v1"
+    assert index.kwargs["inputs"] == {"text": "배송 지연을 분석할 때 무엇을 고려해야 해?"}
+    assert index.kwargs["top_k"] == 3
+    assert index.kwargs["filter"] == metadata_filter
+    assert index.kwargs["timeout"] == 10.0
+    assert "text" in index.kwargs["fields"]
+    assert hits[0].record_id == "olist-logistics-001__chunk_000"
+    assert hits[0].document_id == "olist-logistics-001"
+    assert hits[0].title == "Olist 물류 의사결정 원칙"
+    assert hits[0].text == "배송 지연은 약속 준수 관점에서 해석한다."
+    assert hits[0].metadata["department"] == "logistics"
+
+
+def test_search_requests_only_the_configured_text_field() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.fields = []
+
+        def search(self, **kwargs):
+            self.fields = kwargs["fields"]
+            return SimpleNamespace(result=SimpleNamespace(hits=[]))
+
+    index = FakeIndex()
+
+    search_company_context("배송", settings=_settings(text_field="content"), index=index)
+
+    assert "content" in index.fields
+    assert "text" not in index.fields
+
+
+@pytest.mark.parametrize("query", ["", "   "])
+def test_search_rejects_empty_query(query: str) -> None:
+    with pytest.raises(ValueError, match="검색어"):
+        search_company_context(query, settings=_settings(), index=object())
+
+
+def test_search_wraps_pinecone_errors() -> None:
+    class FailingIndex:
+        def search(self, **_kwargs):
+            raise RuntimeError("network down")
+
+    with pytest.raises(PineconeSearchError, match="Pinecone 문맥 검색에 실패") as exc_info:
+        search_company_context("배송", settings=_settings(), index=FailingIndex())
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
