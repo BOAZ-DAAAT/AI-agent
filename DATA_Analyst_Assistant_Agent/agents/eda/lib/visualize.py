@@ -662,8 +662,9 @@ def plot_bubble(df: pd.DataFrame, key_col: str = None, measure_cols: list = None
     if sub[y_col].min() >= 0:
         ax.set_ylim(bottom=0)
 
-    size_label  = f"  |크기: {size_col}"  if size_col  else ""
-    color_label = f"  |색: {color_col}" if color_col else ""
+    # 한글은 title.family=DejaVu Sans(한글 글리프 없음)에서 빈 박스로 깨진다 — 영어로 고정.
+    size_label  = f"  |size: {size_col}"  if size_col  else ""
+    color_label = f"  |color: {color_col}" if color_col else ""
     _apply_style(ax, f"Bubble: {x_col} vs {y_col}{size_label}{color_label}",
                  xlabel=x_col, ylabel=y_col)
     fig.tight_layout()
