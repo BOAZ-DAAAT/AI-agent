@@ -1,10 +1,38 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.eda.agent import run_eda_self_check
+from DATA_Analyst_Assistant_Agent.agents.eda.nodes import validator as validator_mod
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import (
     MAX_VALIDATION_RETRIES,
     validator_node,
 )
+
+
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeLLM:
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    def invoke(self, prompt: str):
+        return _FakeResponse(self.reply)
+
+
+def _llm_audit_state() -> dict:
+    """결정론 체크를 통과하는(=LLM 감사로 진입하는) 정상형 state."""
+    return {
+        "user_question": "카테고리별 가격대별 리뷰점수 차이 검정",
+        "validation_retries": MAX_VALIDATION_RETRIES,
+        "insight_result": "가격대가 높을수록 평점이 3.575로 가장 높다.",
+        "hypotheses": "가설 텍스트",
+        "final_summary": "요약",
+        "controller_log": [{"choice": "comparison"}],
+        "statistical_metadata": {"group_comparison": {"price": {}}},
+        "cautions": [],
+    }
 
 
 def _capped_fail_state() -> dict:
@@ -122,6 +150,42 @@ def test_missing_statistical_metadata_early_stops_without_retry() -> None:
     assert update["validation_result"]["status"] == "pass"
     assert update["validation_result"]["failure_code"] == "missing_statistical_metadata"
     assert "validation_retries" not in update
+
+
+def test_llm_audit_capped_retry_surfaces_as_caution(monkeypatch) -> None:
+    """#194 — LLM 감사(환각 등)가 캡 소진으로 강제통과돼도, 결정론적 실패와 동일하게
+    caution이 남아야 분석에이전트가 '검증 미완료'를 알 수 있다(이전엔 여기만 조용히 사라졌음)."""
+    reply = (
+        '{"status":"retry","retry_target":"insight",'
+        '"reason":"검증된 수치에 없는 3.575를 인용함 -> 환각 가능",'
+        '"feedback":"수치를 검증된 것만 인용하라"}'
+    )
+    monkeypatch.setattr(validator_mod, "get_llm", lambda: _FakeLLM(reply))
+
+    update = validator_node(_llm_audit_state())
+
+    verdict = update["validation_result"]
+    assert verdict["status"] == "pass"
+    assert verdict["retryable"] is False
+    assert verdict["failure_code"] == "llm_audit_unresolved"
+    codes = [c["code"] for c in update["cautions"]]
+    assert "EDA_SELF_VALIDATION_FAILED" in codes
+    caution = next(c for c in update["cautions"] if c["code"] == "EDA_SELF_VALIDATION_FAILED")
+    assert "3.575" in caution["message_ko"]
+
+
+def test_llm_audit_non_capped_retry_does_not_add_caution(monkeypatch) -> None:
+    """캡에 안 걸렸으면(재시도 가치 있음) 여전히 그냥 retry만 하고 caution은 안 붙는다."""
+    reply = '{"status":"retry","retry_target":"insight","reason":"환각 의심","feedback":"수정하라"}'
+    monkeypatch.setattr(validator_mod, "get_llm", lambda: _FakeLLM(reply))
+
+    state = _llm_audit_state()
+    state["validation_retries"] = 0
+
+    update = validator_node(state)
+
+    assert update["validation_result"]["status"] == "retry"
+    assert "cautions" not in update
 
 
 def test_run_eda_self_check_flags_validator_failure() -> None:
