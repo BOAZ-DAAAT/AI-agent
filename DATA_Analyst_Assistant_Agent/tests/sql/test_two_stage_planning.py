@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 
@@ -413,7 +414,7 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
         }
     )
     context_result = build_generation_context(state, "simple", "")
-    query_prompt = generate_query_prompt(context_result.context_json)
+    query_prompt = generate_query_prompt(context_result.context)
     mart_prompt = mart_design_prompt(state)
 
     for prompt_text in (query_prompt, mart_prompt):
@@ -422,11 +423,11 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
         assert "customers.customer_unique_id" in prompt_text
 
 
-def test_mart_generation_prompt_contains_complete_design_and_postcheck_contract():
+def test_mart_generation_prompt_contains_design_and_postcheck_semantics():
     state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
 
     context_result = build_generation_context(state, "comprehensive", "")
-    prompt_text = generate_mart_prompt(context_result.context_json)
+    prompt_text = generate_mart_prompt(context_result.context)
 
     for expected in (
         "customer_unique_id × order_id × category",
@@ -435,35 +436,42 @@ def test_mart_generation_prompt_contains_complete_design_and_postcheck_contract(
         "column_plan",
         "aggregation_method",
         "metric_support",
-        "최종 재구매 판정",
+        "임의 컬럼·집계·필터",
         "row_count",
         "duplicate_grain_count",
         "null_grain_count",
-        "정확히 한 행",
+        "한 행 SELECT",
     ):
         assert expected in prompt_text
 
 
 def test_comprehensive_generation_normalizes_business_grain_to_mart_design(monkeypatch):
     state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
-    monkeypatch.setattr(generate_node, "try_llm_json", lambda _: json.dumps({
-        "sql": "CREATE TABLE analytics.customer_order_category_mart AS SELECT 1 AS customer_unique_id, 1 AS order_id, 'x' AS category, 10 AS item_amount_sum",
-        "sql_type": "create_table_as",
-        "target_table": "customer_order_category_mart",
-        "source_tables": ["customers", "orders", "order_items"],
-        "source_column_refs": ["customers.customer_unique_id", "orders.order_id", "order_items.category", "order_items.price"],
-        "derived_columns": ["item_amount_sum"],
-        "output_columns": ["customer_unique_id", "order_id", "category", "item_amount_sum"],
-        "business_grain": "LLM이 임의로 바꾼 grain",
-        "precheck_sql": "SELECT COUNT(*) FROM orders",
-        "postcheck_sql": "SELECT 1 AS row_count, 0 AS duplicate_grain_count, 0 AS null_grain_count FROM customer_order_category_mart",
-        "reasoning": "계약 구현",
-    }, ensure_ascii=False))
+    captured: dict[str, object] = {}
+
+    def fake_structured_output(_prompt, schema):
+        captured["schema"] = schema
+        return {
+            "sql": "CREATE TABLE analytics.customer_order_category_mart AS SELECT 1 AS customer_unique_id, 1 AS order_id, 'x' AS category, 10 AS item_amount_sum",
+            "sql_type": "create_table_as",
+            "target_table": "customer_order_category_mart",
+            "source_tables": ["customers", "orders", "order_items"],
+            "source_column_refs": ["customers.customer_unique_id", "orders.order_id", "order_items.category", "order_items.price"],
+            "derived_columns": ["item_amount_sum"],
+            "output_columns": ["customer_unique_id", "order_id", "category", "item_amount_sum"],
+            "business_grain": "LLM이 임의로 바꾼 grain",
+            "precheck_sql": "SELECT COUNT(*) FROM orders",
+            "postcheck_sql": "SELECT 1 AS row_count, 0 AS duplicate_grain_count, 0 AS null_grain_count FROM customer_order_category_mart",
+            "reasoning": "계약 구현",
+        }
+
+    monkeypatch.setattr(generate_node, "invoke_llm_structured", fake_structured_output)
 
     result = generate_node.generate_sql(state)
 
     assert result["sql_draft"]["business_grain"] == mart_design_payload()["grain"]
     assert result["sql_draft"]["target_table"] == "analytics.customer_order_category_mart"
+    assert getattr(captured["schema"], "model_fields")["sql_type"].annotation == Literal["create_table_as"]
 
 
 def test_legacy_mart_design_is_discarded_before_sql_generation():
@@ -560,6 +568,15 @@ def test_final_plan_failure_restarts_from_question_planning(monkeypatch):
             self.content = content
 
     class LLM:
+        def with_structured_output(self, schema_model):
+            parent = self
+
+            class Structured:
+                def invoke(self, prompt_text):
+                    return schema_model.model_validate_json(parent.invoke(prompt_text).content)
+
+            return Structured()
+
         def invoke(self, prompt_text):
             if "MySQL 기반 SQL/데이터마트 planner" in prompt_text:
                 calls["question"] += 1
@@ -581,7 +598,7 @@ def test_final_plan_failure_restarts_from_question_planning(monkeypatch):
                     "business_keys": {"orders": "orders.order_id"},
                     "reasoning": "주문 식별자로 집계한다.",
                 }, ensure_ascii=False))
-            if "MySQL SQL 작성기다. 조회 SQL" in prompt_text:
+            if "MySQL 조회 SQL" in prompt_text:
                 calls["sql"] += 1
                 return Response(json.dumps({
                     "sql": "SELECT COUNT(*) AS order_count FROM orders;",
@@ -620,6 +637,15 @@ def test_mart_design_failure_retries_only_design_stage(monkeypatch):
             self.content = content
 
     class LLM:
+        def with_structured_output(self, schema_model):
+            parent = self
+
+            class Structured:
+                def invoke(self, prompt_text):
+                    return schema_model.model_validate_json(parent.invoke(prompt_text).content)
+
+            return Structured()
+
         def invoke(self, prompt_text):
             if "MySQL 기반 SQL/데이터마트 planner" in prompt_text:
                 calls["question"] += 1
@@ -642,7 +668,7 @@ def test_mart_design_failure_retries_only_design_stage(monkeypatch):
                 if calls["design"] == 1:
                     return Response("{}")
                 return Response(json.dumps(mart_design_payload(), ensure_ascii=False))
-            if "데이터마트 생성 SQL" in prompt_text:
+            if "MySQL 재사용 데이터마트 SQL" in prompt_text:
                 calls["sql"] += 1
                 return Response(json.dumps({
                     "sql": "CREATE TABLE analytics.customer_order_category_mart AS SELECT c.customer_unique_id, o.order_id, oi.category, SUM(oi.price) AS item_amount_sum FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id GROUP BY c.customer_unique_id, o.order_id, oi.category",
@@ -713,8 +739,8 @@ def test_repurchase_customer_key_reaches_sql_generation_prompt(monkeypatch):
     prompts_seen: list[str] = []
     monkeypatch.setattr(
         generate_node,
-        "try_llm_json",
-        lambda prompt_text: prompts_seen.append(prompt_text) or json.dumps({
+        "invoke_llm_structured",
+        lambda prompt_text, _schema: prompts_seen.append(prompt_text) or {
             "sql": "SELECT COUNT(DISTINCT c.customer_unique_id) FROM customers c JOIN orders o ON o.customer_id = c.customer_id;",
             "sql_type": "select",
             "source_tables": ["customers", "orders"],
@@ -722,7 +748,7 @@ def test_repurchase_customer_key_reaches_sql_generation_prompt(monkeypatch):
             "derived_columns": [],
             "output_columns": ["repurchase_customers"],
             "reasoning": "실고객 키 사용",
-        }),
+        },
     )
 
     generate_node.generate_sql(state)

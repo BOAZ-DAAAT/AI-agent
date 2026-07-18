@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +14,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import (
     build_generation_context,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes import generate as generate_node
+from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import (
+    generate_mart_prompt,
+    generate_query_prompt,
+)
 
 
 def _schema() -> dict:
@@ -293,9 +298,9 @@ def test_generate_sql_records_diagnostics_without_mutating_full_schema(monkeypat
     original_schema = state["schema_text"]
     captured: dict[str, str] = {}
 
-    def fake_llm(prompt: str) -> str:
+    def fake_llm(prompt: str, _schema: object) -> dict:
         captured["prompt"] = prompt
-        return json.dumps({
+        return {
             "sql": "SELECT SUM(o.amount) AS amount_sum FROM orders o",
             "sql_type": "select",
             "source_tables": ["orders"],
@@ -303,9 +308,9 @@ def test_generate_sql_records_diagnostics_without_mutating_full_schema(monkeypat
             "derived_columns": ["amount_sum"],
             "output_columns": ["amount_sum"],
             "reasoning": "합계 계산",
-        }, ensure_ascii=False)
+        }
 
-    monkeypatch.setattr(generate_node, "try_llm_json", fake_llm)
+    monkeypatch.setattr(generate_node, "invoke_llm_structured", fake_llm)
     result = generate_node.generate_sql(state)
 
     assert state["schema_text"] == original_schema
@@ -321,7 +326,11 @@ def test_generate_sql_records_diagnostics_without_mutating_full_schema(monkeypat
 def test_invalid_context_uses_existing_generation_failure_contract(monkeypatch):
     state = _simple_state()
     state["plan"] = {**state["plan"], "required_columns": []}
-    monkeypatch.setattr(generate_node, "try_llm_json", lambda _: pytest.fail("LLM을 호출하면 안 됩니다"))
+    monkeypatch.setattr(
+        generate_node,
+        "invoke_llm_structured",
+        lambda *_: pytest.fail("LLM을 호출하면 안 됩니다"),
+    )
 
     result = generate_node.generate_sql(state)
 
@@ -341,3 +350,112 @@ def test_fixture_contexts_reduce_dynamic_characters_by_at_least_thirty_percent()
 
     assert all(reduction >= 0.30 for reduction in reductions)
     assert sum(reductions) / len(reductions) >= 0.30
+
+
+def test_generation_prompts_keep_semantic_contract_and_conditional_rules():
+    simple_context = build_generation_context(_simple_state(integrity_text=""), "simple", "").context
+    aggregate_context = build_generation_context(_comprehensive_state(), "comprehensive", "재시도").context
+    preserve_context = aggregate_context.model_copy(update={"aggregation_policy": "preserve_common_grain"})
+
+    query_prompt = generate_query_prompt(simple_context)
+    aggregate_prompt = generate_mart_prompt(aggregate_context)
+    preserve_prompt = generate_mart_prompt(preserve_context)
+
+    assert query_prompt.index("schema와 selected_tables") < query_prompt.index("user_question")
+    assert query_prompt.index("user_question") < query_prompt.index("previous_feedback")
+    for token in ("simple route", "bare table/column", "required_columns", "business_keys", "임의로 추가하지 않는다"):
+        assert token in query_prompt
+    assert "관련 무결성 실패만" not in query_prompt
+
+    priorities = [
+        "mart_design(target_table",
+        "schema와 selected_tables",
+        "user_question",
+        "previous_feedback",
+    ]
+    assert [aggregate_prompt.index(item) for item in priorities] == sorted(
+        aggregate_prompt.index(item) for item in priorities
+    )
+    for token in (
+        "comprehensive route",
+        "analytics.*",
+        "final_grain",
+        "grain_columns",
+        "column_plan.output_column",
+        "임의 컬럼·집계·필터",
+    ):
+        assert token in aggregate_prompt
+    assert "aggregate_to_common_grain:" in aggregate_prompt
+    assert "preserve_common_grain:" not in aggregate_prompt
+    assert "preserve_common_grain:" in preserve_prompt
+    assert "aggregate_to_common_grain:" not in preserve_prompt
+    assert "관련 무결성 실패만" in aggregate_prompt
+
+
+def test_static_generation_prompts_are_at_least_thirty_five_percent_shorter():
+    query_context = build_generation_context(_simple_state(integrity_text=""), "simple", "").context
+    mart_context = build_generation_context(_comprehensive_state(integrity_text=""), "comprehensive", "").context
+    query_prompt = generate_query_prompt(query_context)
+    mart_prompt = generate_mart_prompt(mart_context)
+
+    query_static_chars = len(query_prompt) - len(query_context.model_dump_json(exclude_none=True, by_alias=True))
+    mart_static_chars = len(mart_prompt) - len(mart_context.model_dump_json(exclude_none=True, by_alias=True))
+
+    assert query_static_chars <= int(983 * 0.65)
+    assert mart_static_chars <= int(3045 * 0.65)
+
+
+def _simple_sql_response(**overrides) -> dict:
+    response = {
+        "sql": "SELECT SUM(amount) AS amount_sum FROM orders",
+        "sql_type": "select",
+        "source_tables": ["orders"],
+        "source_column_refs": ["orders.amount"],
+        "derived_columns": ["amount_sum"],
+        "output_columns": ["amount_sum"],
+        "reasoning": "주문 금액 합계",
+    }
+    response.update(overrides)
+    return response
+
+
+def test_structured_output_normal_response_uses_simple_route_schema(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_invoke(prompt: str, schema: object) -> dict:
+        captured.update(prompt=prompt, schema=schema)
+        return _simple_sql_response()
+
+    monkeypatch.setattr(generate_node, "invoke_llm_structured", fake_invoke)
+    result = generate_node.generate_sql(_simple_state())
+
+    assert result["generation_failure_reason"] == ""
+    assert result["sql_draft"]["sql_type"] == "select"
+    assert getattr(captured["schema"], "model_fields")["sql_type"].annotation == Literal["select"]
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_reason"),
+    [
+        (None, "structured_output_empty_response"),
+        ({"sql_type": "select", "reasoning": "SQL 누락"}, "structured_output_contract_violation"),
+        (_simple_sql_response(sql_type="create_table_as"), "sql_route_kind_mismatch"),
+    ],
+)
+def test_structured_output_failures_keep_retry_contract(monkeypatch, response, expected_reason):
+    monkeypatch.setattr(generate_node, "invoke_llm_structured", lambda *_: response)
+    result = generate_node.generate_sql(_simple_state())
+
+    assert result["generation_failure_reason"] == expected_reason
+    assert result["retry_hint"]["reason_code"] == "sql_generation_failed"
+    assert result["retry_hint"]["details"]["generation_reason_code"] == expected_reason
+
+
+def test_structured_output_model_exception_has_distinct_reason(monkeypatch):
+    def raise_model_error(*_args):
+        raise RuntimeError("provider failure")
+
+    monkeypatch.setattr(generate_node, "invoke_llm_structured", raise_model_error)
+    result = generate_node.generate_sql(_simple_state())
+
+    assert result["generation_failure_reason"] == "structured_output_call_failed"
