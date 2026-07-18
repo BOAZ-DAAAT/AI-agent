@@ -39,7 +39,7 @@ _ACTION_BY_AGENT: dict[AgentName, NextAction] = {
     "sql_agent": "call_sql_agent",
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
-    "insight_agent": "call_insight_agent",
+    "insight": "call_insight",
 }
 _AGENT_BY_ACTION: dict[str, AgentName] = {
     action: agent for agent, action in _ACTION_BY_AGENT.items()
@@ -564,7 +564,7 @@ def _commit_semantic_recovery(
         )
 
     attempts = dict(recovered.get("semantic_recovery_attempts", {}))
-    if result.agent == "insight_agent" and int(attempts.get("insight_agent", 0)) >= 1:
+    if result.agent == "insight" and int(attempts.get("insight", 0)) >= 1:
         reason = "제한적 인사이트 후보가 Semantic 검증을 통과하지 못했습니다."
         recovered["limitations"] = _append_unique(recovered.get("limitations", []), reason)
         recovered = _append_recovery_event(
@@ -574,9 +574,9 @@ def _commit_semantic_recovery(
             reason,
             {
                 **metadata,
-                "agent": "insight_agent",
-                "action": "call_insight_agent",
-                "attempt": int(attempts.get("insight_agent", 0)),
+                "agent": "insight",
+                "action": "call_insight",
+                "attempt": int(attempts.get("insight", 0)),
             },
         )
         return _finish_semantic_recovery(
@@ -733,7 +733,7 @@ def _schedule_limited_insight_or_finish(
             correction_reasons=correction_reasons,
         )
 
-    insight_attempt = int(attempts.get("insight_agent", 0))
+    insight_attempt = int(attempts.get("insight", 0))
     if insight_attempt >= 1:
         reason = "제한적 인사이트 Semantic 복구 예산이 이미 소진되었습니다."
         state["limitations"] = _append_unique(state.get("limitations", []), reason)
@@ -745,8 +745,8 @@ def _schedule_limited_insight_or_finish(
             {
                 "candidate_id": record.candidate_id,
                 "validation_id": record.validation_id,
-                "agent": "insight_agent",
-                "action": "call_insight_agent",
+                "agent": "insight",
+                "action": "call_insight",
                 "attempt": insight_attempt,
             },
         )
@@ -761,9 +761,9 @@ def _schedule_limited_insight_or_finish(
             correction_reasons=correction_reasons,
         )
 
-    attempts["insight_agent"] = 1
+    attempts["insight"] = 1
     state["semantic_recovery_attempts"] = attempts
-    state["next_action"] = "call_insight_agent"
+    state["next_action"] = "call_insight"
     state["terminal_state"] = "running"
     state["limitations"] = _append_unique(
         state.get("limitations", []),
@@ -774,7 +774,7 @@ def _schedule_limited_insight_or_finish(
         record,
         original_action=original_action,
         path=path,
-        actual_action="call_insight_agent",
+        actual_action="call_insight",
         attempt_before=0,
         attempt_after=1,
         fallback_reason=fallback_reason,
@@ -788,8 +788,8 @@ def _schedule_limited_insight_or_finish(
         {
             "candidate_id": record.candidate_id,
             "validation_id": record.validation_id,
-            "agent": "insight_agent",
-            "action": "call_insight_agent",
+            "agent": "insight",
+            "action": "call_insight",
             "attempt": 1,
             "fallback_reason": fallback_reason,
         },
@@ -902,7 +902,7 @@ def _append_recovery_event(
 
 
 def _next_action(result: AgentCompactResult, record: ValidationRecord) -> NextAction:
-    if result.agent == "insight_agent":
+    if result.agent == "insight":
         return "finalize"
     semantic = next((check.details for check in record.checks if check.name == "semantic"), {})
     recommendation = str(semantic.get("recommended_next_action") or "")
@@ -920,7 +920,7 @@ def _semantic_action_allowed(agent: str, action: str) -> bool:
         "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
         "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
         "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
-        "insight_agent": {"call_insight_agent"},
+        "insight": {"call_insight"},
     }
     return action in allowed.get(agent, set())
 

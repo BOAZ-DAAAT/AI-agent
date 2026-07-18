@@ -17,11 +17,11 @@ from DATA_Analyst_Assistant_Agent.agents.eda._runtime import MAX_NODE_RETRIES, g
 # ─────────────────────────────
 # 재시도 헬퍼
 # ─────────────────────────────
-def run_node_with_retry(fn, node_name: str, fallback="분석 스킵 (오류로 인해 생략됨)", max_retries: int = MAX_NODE_RETRIES):
+def run_node_with_retry(fn, node_name: str, fallback="분석 스킵 (오류로 인해 생략됨)"):
     """노드 실행 함수를 감싸 에러 시 재시도하고, 모두 실패하면 fallback을 반환한다.
     반환값: (result, error_message or None)"""
     last_error = None
-    for _ in range(max_retries + 1):
+    for _ in range(MAX_NODE_RETRIES + 1):
         try:
             return fn(), None
         except Exception as e:  # noqa: BLE001

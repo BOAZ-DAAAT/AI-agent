@@ -51,7 +51,6 @@ def base_state(**overrides):
         "validation_findings": [],
         "retry_hint": {},
         "retry_count": 0,
-        "max_retries": 2,
         "feedback": "",
         "error": "",
         "failed_statement_index": None,
@@ -563,7 +562,6 @@ def graph_state(**overrides):
         "retry_hint": {},
         "validation_summary": {},
         "retry_count": 0,
-        "max_retries": 1,
         "feedback": "",
         "error": "",
         "generation_source": "llm",
@@ -716,7 +714,7 @@ def test_mart_design_failure_retries_only_design_stage(monkeypatch):
     monkeypatch.setattr(planner_support, "get_llm", lambda: LLM())
     monkeypatch.setattr(execute, "can_use_live_db", lambda: False)
 
-    result = build_app().invoke(graph_state(max_retries=2))
+    result = build_app().invoke(graph_state())
 
     assert calls == {"question": 1, "final": 1, "design": 2, "sql": 1}
     assert result["retry_count"] == 1

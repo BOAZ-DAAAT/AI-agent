@@ -251,10 +251,10 @@ def test_numeric_only_review_options_are_rejected_before_critic() -> None:
 
 
 def test_repeated_critic_failure_stops_early() -> None:
-    gen = _FakeModel([_GOOD_CODE, _GOOD_CODE, _GOOD_CODE])
-    crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")] * 3)
+    gen = _FakeModel([_GOOD_CODE, _GOOD_CODE])
+    crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")] * 2)
     outcome = run_analysis(
-        _intent(), _context(), _df(), code_generator_model=gen, critic_model=crit, max_attempts=3
+        _intent(), _context(), _df(), code_generator_model=gen, critic_model=crit, max_attempts=2
     )
     assert outcome.status == "failed"
     assert outcome.attempts == 2

@@ -36,7 +36,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     GeneratedAnalysisCode,
 )
 
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = 2
 
 
 @dataclass

@@ -19,7 +19,7 @@ from typing import Any, List, Optional
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
 
-MAX_NODE_RETRIES = 2  # 노드당 최대 재시도 횟수
+MAX_NODE_RETRIES = 1  # 노드당 최대 재시도 횟수
 
 
 # -----------------------------

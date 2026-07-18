@@ -599,7 +599,7 @@ def _build_index_html(report_markdown: str, artifacts: dict[str, list[dict[str, 
     sql_plan = _artifact_json(_first_artifact(artifacts, "sql_agent", "sql_lang_graph_result"))
     eda = _artifact_json(_first_artifact(artifacts, "eda_agent", "eda_summary"))
     analysis = _artifact_json(_first_artifact(artifacts, "analysis_agent", "analysis_result"))
-    insight = _artifact_json(_first_artifact(artifacts, "insight_agent", "insight_payload"))
+    insight = _artifact_json(_first_artifact(artifacts, "insight", "insight_payload"))
     columns, rows = _read_csv_artifact(sql_item)
     artifact_index = _artifact_index(artifacts)
 

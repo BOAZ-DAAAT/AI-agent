@@ -1,6 +1,6 @@
 """SQL 에이전트 공용 런타임.
 
-- 설정 상수 (MAX_RETRIES / ALLOWED_MART_SCHEMA / ALLOW_MART_WRITE)
+- 설정 상수 (ALLOWED_MART_SCHEMA / ALLOW_MART_WRITE)
 - 엔진/LLM 메모이즈 접근자 (get_engine / get_llm)
 - SQL 안전성·파싱·포맷 헬퍼
 
@@ -24,7 +24,6 @@ from DATA_Analyst_Assistant_Agent.agents.sql.self_check import mysql_dialect_err
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드 + DB_*/MYSQL_* 별칭 정규화)
 
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", 2))
 ALLOWED_MART_SCHEMA = os.getenv("ALLOWED_MART_SCHEMA", "analytics")
 ALLOW_MART_WRITE = os.getenv("ALLOW_MART_WRITE", "true").lower() == "true"
 MYSQL_DIALECT_NAME = "MySQL 8.x"

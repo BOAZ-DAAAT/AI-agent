@@ -117,11 +117,11 @@ _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "sql_agent": "call_sql_agent",
     "eda_agent": "call_eda_agent",
     "analysis_agent": "call_analysis_agent",
-    "insight_agent": "call_insight_agent",
+    "insight": "call_insight",
 }
 
 _KNOWN_AGENTS: set[AgentName] = {
-    "sql_agent", "eda_agent", "analysis_agent", "insight_agent",
+    "sql_agent", "eda_agent", "analysis_agent", "insight",
 }
 _EVIDENCE_AGENTS: set[AgentName] = {"sql_agent", "eda_agent", "analysis_agent"}
 
@@ -155,17 +155,17 @@ def _check_completion_readiness(state: SupervisorState) -> CompletionReadinessDe
             reason="검증·승격된 SQL, EDA, 분석 근거가 없어 완료할 수 없습니다.",
         )
 
-    insight_completed = "insight_agent" in state.get("completed_agents", [])
-    has_insight_artifact = _has_valid_accepted_artifact(state, "insight_agent")
+    insight_completed = "insight" in state.get("completed_agents", [])
+    has_insight_artifact = _has_valid_accepted_artifact(state, "insight")
     if insight_completed and not has_insight_artifact:
         return CompletionReadinessDecision(
             status="invalid",
-            reason="insight_agent 완료 표식은 있지만 승격된 인사이트 아티팩트가 없습니다.",
+            reason="insight 완료 표식은 있지만 승격된 인사이트 아티팩트가 없습니다.",
         )
     if has_insight_artifact and not insight_completed:
         return CompletionReadinessDecision(
             status="invalid",
-            reason="승격된 인사이트 아티팩트는 있지만 insight_agent 완료 표식이 없습니다.",
+            reason="승격된 인사이트 아티팩트는 있지만 insight 완료 표식이 없습니다.",
         )
     if not insight_completed:
         return CompletionReadinessDecision(
@@ -220,11 +220,11 @@ def guard_agent_preconditions(agent: AgentName | str, state: SupervisorState) ->
             reason="분석을 실행하려면 먼저 SQL 또는 EDA 산출물이 필요합니다.",
         )
 
-    if agent == "insight_agent":
+    if agent == "insight":
         if _has_completed_evidence(state):
             return GuardDecision(
                 allowed=True,
-                next_action="call_insight_agent",
+                next_action="call_insight",
                 reason="SQL, EDA, 분석 중 하나 이상의 근거 산출물이 있어 인사이트를 생성할 수 있습니다.",
             )
         return GuardDecision(

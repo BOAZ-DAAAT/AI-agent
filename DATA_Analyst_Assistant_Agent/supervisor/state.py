@@ -17,7 +17,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 )
 
 
-AgentName = Literal["sql_agent", "eda_agent", "analysis_agent", "insight_agent"]
+AgentName = Literal["sql_agent", "eda_agent", "analysis_agent", "insight"]
 AgentStatusValue = Literal["success", "warning", "failed", "approval_required"]
 NextAction = Literal[
     "clarify",
@@ -26,7 +26,7 @@ NextAction = Literal[
     "call_sql_agent",
     "call_eda_agent",
     "call_analysis_agent",
-    "call_insight_agent",
+    "call_insight",
     "collect_analysis_review",
     "finalize",
     "fail",

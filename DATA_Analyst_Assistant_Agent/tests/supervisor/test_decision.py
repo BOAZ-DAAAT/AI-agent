@@ -427,7 +427,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "sql_agent",
         "eda_agent",
         "analysis_agent",
-        "insight_agent",
+        "insight",
     }
 
 
@@ -624,7 +624,7 @@ def test_context_derives_legacy_payload_keys_from_validation_history() -> None:
                     "findings": [],
                     "details": {
                         "semantic_valid": True,
-                        "recommended_next_action": "call_report_agent",
+                        "recommended_next_action": "finalize",
                     },
                 },
             ],

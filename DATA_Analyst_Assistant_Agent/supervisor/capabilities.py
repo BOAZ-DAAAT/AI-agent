@@ -74,8 +74,8 @@ DEFAULT_AGENT_CAPABILITIES: list[AgentCapability] = [
         ],
     ),
     AgentCapability(
-        agent="insight_agent",
-        action="call_insight_agent",
+        agent="insight",
+        action="call_insight",
         description="상류 근거를 종합해 사용자 질문에 대한 직답과 핵심 인사이트, 근거 차트를 생성합니다.",
         when_to_use="분석 근거가 준비된 뒤, 사용자 질문 전체에 대한 최종 답을 종합해야 할 때 자동으로(결정론적으로) 실행됩니다. LLM이 호출 여부를 판단하지 않습니다.",
         requires_any_artifacts_from=["sql_agent", "eda_agent", "analysis_agent"],

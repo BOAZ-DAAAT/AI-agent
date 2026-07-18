@@ -4,8 +4,8 @@ import json
 from types import SimpleNamespace
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import ApprovalRequirement, ValidationFinding
+from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
-    make_resolve_validation_node,
     make_validate_candidate_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -359,7 +359,7 @@ def test_resolve_validation_records_and_rejects_retry_candidate_once() -> None:
     state = _state(result)
     validated = make_validate_candidate_node(SemanticModel(_semantic_success()))(state)
 
-    resolved = make_resolve_validation_node(None)({**state, **validated})
+    resolved = commit_candidate({**state, **validated}, None)
 
     assert len(resolved["validation_history"]) == 1
     assert len(resolved["rejected_results"]) == 1

@@ -24,11 +24,11 @@ from DATA_Analyst_Assistant_Agent.supervisor.insight.loop import run_insight_loo
 from DATA_Analyst_Assistant_Agent.supervisor.insight.schemas import ChartEntry, InsightResult
 from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, LocalCheck, OrchestrationState, ValidationBlock
 
-_TOOL_NAME = "insight_agent.react_loop"
+_TOOL_NAME = "insight.react_loop"
 
 
 class InsightGenerator:
-    name = "insight_agent"
+    name = "insight"
 
     def run(self, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:
         context = runtime.context(state, node_name=self.name, tool_name=_TOOL_NAME)
