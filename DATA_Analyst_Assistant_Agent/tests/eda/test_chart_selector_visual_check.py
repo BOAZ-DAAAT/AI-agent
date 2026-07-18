@@ -34,10 +34,12 @@ def _fake_api_key(monkeypatch):
 
 
 def _make_pngs(tmp_path, names: list[str]) -> list[str]:
+    from PIL import Image
+
     paths = []
     for name in names:
         p = tmp_path / name
-        p.write_bytes(b"fake-png-bytes")
+        Image.new("RGB", (20, 20), color="white").save(p, format="PNG")
         paths.append(str(p))
     return paths
 
