@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from pinecone import Pinecone
 
@@ -29,6 +30,11 @@ DEFAULT_RETURN_FIELDS = (
     "source_path",
     "chunk_index",
     "chunk_count",
+    "query_type",
+    "rule_id",
+    "rule",
+    "rule_name",
+    "rule_metadata",
 )
 
 
@@ -38,6 +44,10 @@ class PineconeConfigurationError(ValueError):
 
 class PineconeSearchError(RuntimeError):
     """Raised when Pinecone rejects or cannot complete a context search."""
+
+
+class PineconeUpsertError(RuntimeError):
+    """Raised when Pinecone rejects or cannot complete a context upsert."""
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,9 @@ class CompanyContextHit:
     metadata: dict[str, Any]
 
 
+CompanyContextRecord = dict[str, Any]
+
+
 @lru_cache(maxsize=4)
 def _get_cached_index(api_key: str, index_name: str) -> Any:
     return Pinecone(api_key=api_key).Index(index_name)
@@ -141,6 +154,35 @@ def search_company_context(
     return [_normalize_hit(hit, resolved.text_field) for hit in _response_hits(response)]
 
 
+def upsert_company_context(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    settings: PineconeSettings | None = None,
+    index: Any | None = None,
+) -> Any:
+    """Upsert JSON-serializable company-context records using integrated embedding.
+
+    Each record is normalized to Pinecone's integrated-embedding record shape:
+    ``{"_id": stable_id, settings.text_field: text, **metadata}``.
+    """
+
+    resolved = settings or PineconeSettings.from_env()
+    normalized_records = [
+        _normalize_upsert_record(record, resolved.text_field) for record in records
+    ]
+    if not normalized_records:
+        raise ValueError("Pinecone 업서트 레코드는 1개 이상이어야 합니다.")
+
+    upsert_index = index or get_pinecone_index(resolved)
+    try:
+        return upsert_index.upsert_records(
+            namespace=resolved.namespace,
+            records=normalized_records,
+        )
+    except Exception as exc:
+        raise PineconeUpsertError(f"Pinecone 문맥 업서트에 실패했습니다: {exc}") from exc
+
+
 def _response_hits(response: Any) -> list[Any]:
     result = _read_value(response, "result", {})
     hits = _read_value(result, "hits", [])
@@ -158,6 +200,68 @@ def _normalize_hit(hit: Any, text_field: str) -> CompanyContextHit:
         title=str(fields.get("title") or ""),
         metadata=fields,
     )
+
+
+def _normalize_upsert_record(record: Mapping[str, Any], text_field: str) -> CompanyContextRecord:
+    raw = _as_dict(record)
+    if not raw:
+        raise ValueError("Pinecone 업서트 레코드는 비어 있을 수 없습니다.")
+
+    metadata = _as_dict(raw.get("metadata", {}))
+    for key, value in raw.items():
+        if key in {"_id", "id", "record_id", "metadata", text_field}:
+            continue
+        if key == "text" and text_field != "text":
+            continue
+        metadata[key] = value
+
+    record_text = raw.get(text_field)
+    if record_text is None and text_field != "text":
+        record_text = raw.get("text")
+    normalized_text = str(record_text or "").strip()
+    if not normalized_text:
+        raise ValueError("Pinecone 업서트 레코드 text는 비어 있을 수 없습니다.")
+
+    record_id = (
+        raw.get("_id")
+        or raw.get("record_id")
+        or raw.get("id")
+        or _stable_record_id(metadata)
+    )
+    if not str(record_id or "").strip():
+        raise ValueError("Pinecone 업서트 레코드 _id를 만들 수 없습니다.")
+
+    normalized: CompanyContextRecord = {
+        "_id": str(record_id).strip(),
+        text_field: normalized_text,
+    }
+    safe_metadata = _json_serializable_dict(metadata)
+    safe_metadata.pop("_id", None)
+    safe_metadata.pop(text_field, None)
+    normalized.update(safe_metadata)
+    return normalized
+
+
+def _stable_record_id(metadata: Mapping[str, Any]) -> str:
+    document_id = str(metadata.get("document_id") or "").strip()
+    if not document_id:
+        return ""
+
+    chunk_index = metadata.get("chunk_index")
+    if chunk_index is None:
+        return document_id
+
+    try:
+        return f"{document_id}__chunk_{int(chunk_index):03d}"
+    except (TypeError, ValueError):
+        return f"{document_id}__chunk_{str(chunk_index).strip()}"
+
+
+def _json_serializable_dict(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(json.dumps(dict(value), ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Pinecone 업서트 metadata는 JSON 직렬화 가능해야 합니다.") from exc
 
 
 def _read_value(value: Any, key: str, default: Any) -> Any:

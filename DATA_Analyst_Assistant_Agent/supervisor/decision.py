@@ -66,6 +66,14 @@ class AnalysisPlanDecision(BaseModel):
     reason: str = ""
 
 
+class AnalysisRuleExtractionDecision(BaseModel):
+    applicable: bool
+    rules: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_question: str = ""
+    reason: str = ""
+
+
 class ExecutionGuardDecision(BaseModel):
     allowed: bool
     next_action: LLMSelectableNextAction
@@ -140,6 +148,7 @@ def build_clarification_context(state: SupervisorState) -> dict[str, Any]:
             "user_turns": list(state.get("user_turns", []))[-3:],
             "datasource_id": state.get("datasource_id"),
             "catalog_summary": state.get("catalog_summary"),
+            "analysis_rule_context": state.get("analysis_rule_context"),
         },
         max_text=500,
         max_items=8,
@@ -154,6 +163,7 @@ def build_plan_context(state: SupervisorState) -> dict[str, Any]:
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
             "datasource_id": state.get("datasource_id"),
             "catalog_summary": state.get("catalog_summary"),
+            "analysis_rule_context": state.get("analysis_rule_context"),
             "existing_plan": state.get("analysis_plan") or {},
             "retry_counts": state.get("retry_counts", {}),
             "completed_agents": list(state.get("completed_agents", [])),

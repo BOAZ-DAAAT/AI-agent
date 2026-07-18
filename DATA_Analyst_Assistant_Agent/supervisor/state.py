@@ -112,6 +112,8 @@ class SupervisorState(TypedDict, total=False):
     clarified_query: str
     needs_clarification: bool
     clarification_question: str
+    analysis_rule_context: dict[str, Any] | None
+    analysis_rule_retrieval: dict[str, Any]
     analysis_plan: dict[str, Any]
     current_step: str
     next_action: NextAction
@@ -177,6 +179,8 @@ def empty_supervisor_state(
         "clarified_query": "",
         "needs_clarification": False,
         "clarification_question": "",
+        "analysis_rule_context": None,
+        "analysis_rule_retrieval": {"status": "not_started"},
         "analysis_plan": {},
         "current_step": "created",
         "next_action": "create_plan",
@@ -203,7 +207,7 @@ def empty_supervisor_state(
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 5,
+        "state_schema_version": 6,
         "semantic_retry_counts": {},
         "semantic_recovery_attempts": {},
         "limitations": [],
@@ -434,7 +438,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             },
             "run_events": list(state.get("run_events", [])),
             "validation_history": validation_history,
-            "state_schema_version": 5,
+            "state_schema_version": 6,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
             "analysis_selection_response": (
@@ -445,6 +449,14 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             ),
             "analysis_review_decisions": (
                 list(state.get("analysis_review_decisions", [])) if schema_version >= 5 else []
+            ),
+            "analysis_rule_context": (
+                state.get("analysis_rule_context") if schema_version >= 6 else None
+            ),
+            "analysis_rule_retrieval": (
+                dict(state.get("analysis_rule_retrieval") or {"status": "not_started"})
+                if schema_version >= 6
+                else {"status": "not_started"}
             ),
         }
         normalized.pop("validation_results", None)
@@ -458,7 +470,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             quarantined.append({"agent": agent, **dict(artifact), "quarantine_reason": "legacy_unvalidated"})
     normalized = {
         **state,
-        "state_schema_version": 5,
+        "state_schema_version": 6,
         "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),
@@ -476,6 +488,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "analysis_selection_response": None,
         "analysis_selection_review_request": None,
         "analysis_review_decisions": [],
+        "analysis_rule_context": None,
+        "analysis_rule_retrieval": {"status": "not_started"},
     }
     return _ensure_json_serializable(normalized)
 
@@ -660,6 +674,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             dimension=plan_payload.get("dimension") or None,
             filters=[str(item) for item in (plan_payload.get("filters") or []) if str(item).strip()],
             requires_mart_review=bool(plan_payload.get("requires_mart_review", False)),
+            query_rules=dict(plan_payload.get("query_rules") or {}),
             route_kind=route_kind,
             generated_sql=generated_sql,
             source_sql=source_sql,

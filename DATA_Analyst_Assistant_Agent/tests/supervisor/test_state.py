@@ -42,7 +42,9 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert "validation_results" not in state
     assert "evidence_validation_results" not in state
     assert "semantic_validation_results" not in state
-    assert state["state_schema_version"] == 5
+    assert state["state_schema_version"] == 6
+    assert state["analysis_rule_context"] is None
+    assert state["analysis_rule_retrieval"] == {"status": "not_started"}
     assert state["analysis_selection_response"] is None
     assert state["analysis_selection_review_request"] is None
     assert state["analysis_review_decisions"] == []
@@ -87,7 +89,7 @@ def test_normalize_v2_validation_arrays_into_v4_history() -> None:
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 5
+    assert normalized["state_schema_version"] == 6
     assert normalized["analysis_selection_response"] is None
     assert normalized["analysis_selection_review_request"] is None
     assert normalized["analysis_review_decisions"] == []
@@ -146,7 +148,7 @@ def test_normalize_v2_pending_approval_preserves_candidate_hashes() -> None:
         "expected_resume": {"approved": "boolean"},
     }
     assert normalized["pending_result"] == state["pending_result"]
-    assert normalized["state_schema_version"] == 5
+    assert normalized["state_schema_version"] == 6
 
 
 def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_history() -> None:
@@ -170,7 +172,7 @@ def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_hi
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 5
+    assert normalized["state_schema_version"] == 6
     assert normalized["semantic_retry_counts"] == {"candidate_001": 1}
     assert normalized["semantic_recovery_attempts"] == {}
     assert normalized["limitations"] == []
@@ -199,7 +201,7 @@ def test_normalize_v4_analysis_approval_does_not_retrofit_native_review() -> Non
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 5
+    assert normalized["state_schema_version"] == 6
     assert normalized["analysis_selection_response"] is None
     assert normalized["analysis_selection_review_request"] is None
     assert normalized["analysis_review_decisions"] == []
@@ -372,6 +374,7 @@ def test_analysis_plan_sql_defaults_are_empty() -> None:
 
     assert plan.generated_sql == ""
     assert plan.source_sql == ""
+    assert plan.query_rules == {}
 
 
 def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> None:
@@ -389,6 +392,10 @@ def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> Non
         "dimension": "customer_unique_id",
         "filters": ["Monetary 상위 25%", "평균 리뷰 점수 하위 25%"],
         "requires_mart_review": True,
+        "query_rules": {
+            "document_id": "customer_value",
+            "entity_grain": ["customer_unique_id 기준"],
+        },
     }
 
     orchestration = to_orchestration_state(state)
@@ -399,6 +406,10 @@ def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> Non
     assert orchestration.plan.dimension == "customer_unique_id"
     assert orchestration.plan.filters == ["Monetary 상위 25%", "평균 리뷰 점수 하위 25%"]
     assert orchestration.plan.requires_mart_review is True
+    assert orchestration.plan.query_rules == {
+        "document_id": "customer_value",
+        "entity_grain": ["customer_unique_id 기준"],
+    }
 
 
 def test_to_orchestration_state_without_plan_preserves_failure_context() -> None:
@@ -662,7 +673,7 @@ def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_
     normalized = normalize_supervisor_state(legacy)
     normalized_twice = normalize_supervisor_state(normalized)
 
-    assert normalized["state_schema_version"] == 5
+    assert normalized["state_schema_version"] == 6
     assert normalized["accepted_evidence"] == {}
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []

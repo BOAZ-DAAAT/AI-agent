@@ -380,6 +380,10 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "goal": "매출 분석" * 1000,
         "steps": [{"name": f"step_{index}", "detail": "상세 설명" * 500} for index in range(20)],
     }
+    state["analysis_rule_context"] = {
+        "document_id": "sales_orders",
+        "default_metrics": ["매출은 order_payments.payment_value 합계"],
+    }
     state["validation_results"] = [
         {"agent": "sql_agent", "message": "검증 메시지" * 500, "nested": {"detail": "중첩" * 500}}
         for _ in range(20)
@@ -484,6 +488,10 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "goal": "매출 분석" * 1000,
         "steps": [{"name": f"step_{index}", "detail": "상세 설명" * 500} for index in range(20)],
     }
+    state["analysis_rule_context"] = {
+        "document_id": "sales_orders",
+        "default_metrics": ["매출은 order_payments.payment_value 합계"],
+    }
     state["last_agent_result"] = AgentCompactResult(
         agent="sql_agent",
         status="success",
@@ -513,7 +521,9 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
     ]
 
     assert "latest_user_query" in contexts[0]
+    assert contexts[0]["analysis_rule_context"]["document_id"] == "sales_orders"
     assert "query" in contexts[1]
+    assert contexts[1]["analysis_rule_context"]["document_id"] == "sales_orders"
     assert "available_next_actions" in contexts[2]
     assert "agent_capabilities" in contexts[2]
     assert "requested_next_action" in contexts[3]

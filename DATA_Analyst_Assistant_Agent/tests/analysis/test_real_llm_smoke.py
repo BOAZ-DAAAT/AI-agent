@@ -1,6 +1,6 @@
-"""Opt-in real-LLM smoke tests. Run with RUN_REAL_LLM=1.
+"""Opt-in real-LLM smoke tests. Run with --run-real-llm.
 
-    RUN_REAL_LLM=1 pytest <this file> -s
+    pytest <this file> --run-real-llm -s
 
 Split into two live checks that avoid pd.date_range (which segfaults on this
 Windows/numpy build, both in test data and in generated code):
@@ -26,7 +26,8 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_ana
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
 
 pytestmark = pytest.mark.skipif(
-    not os.getenv("RUN_REAL_LLM"), reason="set RUN_REAL_LLM=1 to run live-model smoke test"
+    os.getenv("RUN_REAL_LLM") != "1",
+    reason="pass --run-real-llm to run live-model smoke test",
 )
 
 

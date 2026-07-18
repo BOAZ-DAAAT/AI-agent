@@ -42,6 +42,8 @@ class SQLAgent:
                 "filters": state.plan.filters,
                 "requires_mart_review": state.plan.requires_mart_review,
             }
+            if state.plan.query_rules:
+                supervisor_plan_context["query_rules"] = state.plan.query_rules
         clarification_request = ""
         if retry_context:
             feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")

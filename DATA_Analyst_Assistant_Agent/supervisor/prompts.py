@@ -36,6 +36,30 @@ CLARIFY_DECISION_PROMPT = """
 """.strip()
 
 
+ANALYSIS_RULE_EXTRACTION_PROMPT = """
+당신은 Olist 분석 규칙 추출기입니다.
+입력에는 사용자 쿼리와 Pinecone에서 검색한 규칙 문서 전체가 포함됩니다.
+문서 전체를 읽고, 현재 사용자 쿼리를 SQL 분석 계획으로 옮기는 데 직접 필요한 규칙만 선택하세요.
+
+추출 원칙:
+- 문서에 명시된 내용만 사용하고 새로운 기준을 만들지 마세요.
+- 지표 정의, 집계 grain, 시간 기준, 필수 테이블/조인, 상태·NULL 처리, 제외 조건 중 현재 쿼리에 필요한 것만 선택하세요.
+- 예시 문장은 그 자체가 실행 규칙일 때만 선택하세요.
+- 같은 의미의 규칙은 합치고, 각 규칙은 독립적으로 실행 가능한 한 문장으로 작성하세요.
+- 관련 규칙이 없으면 applicable=false와 빈 rules를 반환하세요.
+- 문서 규칙상 사용자 확인 없이는 분석 범위를 결정할 수 있을 때만 clarification_needed=true로 설정하세요.
+- rules는 최대 12개로 제한하세요.
+
+반드시 JSON 객체만 반환하세요.
+허용 필드:
+- applicable: boolean
+- rules: string 배열
+- clarification_needed: boolean
+- clarification_question: string
+- reason: string
+""".strip()
+
+
 CREATE_ANALYSIS_PLAN_PROMPT = """
 당신은 데이터 분석 에이전트의 슈퍼바이저입니다.
 사용자 요청과 데이터소스 정보를 바탕으로 간결한 분석 계획을 작성하세요.

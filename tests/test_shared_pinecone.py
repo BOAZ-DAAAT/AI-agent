@@ -5,11 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from DATA_Analyst_Assistant_Agent.shared.pinecone import (
+    PineconeUpsertError,
     PineconeConfigurationError,
     PineconeSearchError,
     PineconeSettings,
     get_pinecone_index,
     search_company_context,
+    upsert_company_context,
 )
 
 
@@ -72,6 +74,113 @@ def test_get_pinecone_index_reuses_client_for_same_settings(monkeypatch) -> None
     assert get_pinecone_index(_settings()) is index
     assert calls == [("test-key", "olist")]
     pinecone_module._get_cached_index.cache_clear()
+
+
+def test_upsert_company_context_uses_integrated_embedding_records() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def upsert_records(self, **kwargs):
+            self.kwargs = kwargs
+            return {"upserted_count": len(kwargs["records"])}
+
+    index = FakeIndex()
+
+    result = upsert_company_context(
+        [
+            {
+                "document_id": "analysis-rule-001",
+                "title": "매출 분석 규칙",
+                "text": "매출 분석은 주문 상태와 취소 여부를 먼저 확인한다.",
+                "query_type": "analysis_rule",
+                "rule_id": "revenue-status-rule",
+                "chunk_index": 0,
+            }
+        ],
+        settings=_settings(),
+        index=index,
+    )
+
+    assert result == {"upserted_count": 1}
+    assert index.kwargs["namespace"] == "olist-rag-v1"
+    assert index.kwargs["records"] == [
+        {
+            "_id": "analysis-rule-001__chunk_000",
+            "text": "매출 분석은 주문 상태와 취소 여부를 먼저 확인한다.",
+            "document_id": "analysis-rule-001",
+            "title": "매출 분석 규칙",
+            "query_type": "analysis_rule",
+            "rule_id": "revenue-status-rule",
+            "chunk_index": 0,
+        }
+    ]
+
+
+def test_upsert_company_context_accepts_nested_metadata_and_custom_text_field() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.records = None
+
+        def upsert_records(self, **kwargs):
+            self.records = kwargs["records"]
+            return None
+
+    index = FakeIndex()
+
+    upsert_company_context(
+        [
+            {
+                "record_id": "rule-custom-id",
+                "content": "분석 규칙 본문",
+                "metadata": {
+                    "document_id": "analysis-rule-002",
+                    "rule": {"metric": "gmv", "grain": "monthly"},
+                    "enabled": True,
+                },
+            }
+        ],
+        settings=_settings(text_field="content"),
+        index=index,
+    )
+
+    assert index.records == [
+        {
+            "_id": "rule-custom-id",
+            "content": "분석 규칙 본문",
+            "document_id": "analysis-rule-002",
+            "rule": {"metric": "gmv", "grain": "monthly"},
+            "enabled": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {},
+        {"document_id": "doc", "chunk_index": 0, "text": "   "},
+        {"text": "본문만 있고 식별자가 없음"},
+    ],
+)
+def test_upsert_company_context_rejects_invalid_records(record: dict) -> None:
+    with pytest.raises(ValueError):
+        upsert_company_context([record], settings=_settings(), index=object())
+
+
+def test_upsert_company_context_wraps_pinecone_errors() -> None:
+    class FailingIndex:
+        def upsert_records(self, **_kwargs):
+            raise RuntimeError("network down")
+
+    with pytest.raises(PineconeUpsertError, match="Pinecone 문맥 업서트에 실패") as exc_info:
+        upsert_company_context(
+            [{"_id": "record-1", "text": "본문"}],
+            settings=_settings(),
+            index=FailingIndex(),
+        )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 def test_search_uses_integrated_embedding_and_normalizes_hits() -> None:
@@ -137,6 +246,51 @@ def test_search_requests_only_the_configured_text_field() -> None:
 
     assert "content" in index.fields
     assert "text" not in index.fields
+
+
+def test_search_preserves_analysis_rule_metadata_with_top_k_one() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def search(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                result=SimpleNamespace(
+                    hits=[
+                        {
+                            "id": "analysis-rule-001__chunk_000",
+                            "score": 0.91,
+                            "fields": {
+                                "text": "매출 분석은 취소 주문 제외 여부를 명시한다.",
+                                "document_id": "analysis-rule-001",
+                                "title": "매출 분석 규칙",
+                                "query_type": "analysis_rule",
+                                "rule_id": "revenue-status-rule",
+                                "rule": {"metric": "revenue", "exclude_cancelled": True},
+                            },
+                        }
+                    ]
+                )
+            )
+
+    index = FakeIndex()
+
+    hits = search_company_context(
+        "매출 분석 규칙",
+        top_k=1,
+        metadata_filter={"query_type": {"$eq": "analysis_rule"}},
+        settings=_settings(),
+        index=index,
+    )
+
+    assert index.kwargs["top_k"] == 1
+    assert "query_type" in index.kwargs["fields"]
+    assert "rule_id" in index.kwargs["fields"]
+    assert "rule" in index.kwargs["fields"]
+    assert hits[0].metadata["query_type"] == "analysis_rule"
+    assert hits[0].metadata["rule_id"] == "revenue-status-rule"
+    assert hits[0].metadata["rule"] == {"metric": "revenue", "exclude_cancelled": True}
 
 
 @pytest.mark.parametrize("query", ["", "   "])
