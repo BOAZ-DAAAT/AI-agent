@@ -86,6 +86,15 @@ class StepSummary(BaseModel):
     next_action: str = ""
 
 
+# 현재 실행 중인 에이전트 작업 노드와 상태를 관리
+class ActiveNodeExecution(BaseModel):
+    node_id: str
+    agent_name: AgentName
+    parent_node_id: str | None = None
+    node_sequence: int = Field(ge=1)
+    attempt: int = Field(default=1, ge=1)
+
+
 class PendingApproval(BaseModel):
     approval_id: str
     agent: AgentName
@@ -148,6 +157,11 @@ class SupervisorState(TypedDict, total=False):
     analysis_selection_response: dict[str, Any] | None
     analysis_selection_review_request: dict[str, Any] | None
     analysis_review_decisions: list[dict[str, Any]]
+
+    # 노드 상태 State
+    active_node: dict[str, Any] | None
+    last_completed_node_id: str | None
+    node_sequence: int
 
 
 def _ensure_json_serializable(state: SupervisorState) -> SupervisorState:
@@ -212,6 +226,12 @@ def empty_supervisor_state(
         "semantic_recovery_attempts": {},
         "limitations": [],
         "run_events": [],
+        
+        # 노드 관련
+        "active_node": None,
+        "last_completed_node_id": None,
+        "node_sequence": 0,
+
         "analysis_selection_response": None,
         "analysis_selection_review_request": None,
         "analysis_review_decisions": [],
@@ -421,6 +441,28 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                     **legacy_resume_fields,
                 }
             ).model_dump(mode="json")
+
+        # v6: 노드 관련 필드 기본값
+        active_node = state.get("active_node")
+        normalized_active_node = (
+            ActiveNodeExecution.model_validate(active_node).model_dump(mode="json")
+            if isinstance(active_node, dict)
+            else None
+        )
+
+        last_completed_node_id = state.get("last_completed_node_id")
+        normalized_last_completed_node_id = (
+            str(last_completed_node_id)
+            if last_completed_node_id
+            else None
+        )
+
+        normalized_node_sequence = max(
+            int(state.get("node_sequence", 0) or 0),
+            0,
+        )
+        
+
         normalized: SupervisorState = {
             **state,
             "pending_approval": normalized_pending_approval,
