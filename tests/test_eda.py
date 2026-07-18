@@ -358,7 +358,7 @@ def test_resolve_target_ignores_column_not_in_df():
 # tool_runner.run_node_with_retry (재시도 로직, 가짜 콜러블로 검증)
 # ─────────────────────────────
 def test_run_node_with_retry_succeeds_first_try():
-    result, err = run_node_with_retry(lambda: "ok", "node", max_retries=2)
+    result, err = run_node_with_retry(lambda: "ok", "node")
     assert result == "ok"
     assert err is None
 
@@ -372,7 +372,7 @@ def test_run_node_with_retry_recovers_after_some_failures():
             raise ValueError("일시 실패")
         return "recovered"
 
-    result, err = run_node_with_retry(flaky, "node", max_retries=3)
+    result, err = run_node_with_retry(flaky, "node")
     assert result == "recovered"
     assert err is None
 
@@ -381,7 +381,7 @@ def test_run_node_with_retry_returns_fallback_when_all_fail():
     def always_fail():
         raise RuntimeError("boom")
 
-    result, err = run_node_with_retry(always_fail, "node", fallback="FALLBACK", max_retries=1)
+    result, err = run_node_with_retry(always_fail, "node", fallback="FALLBACK")
     assert result == "FALLBACK"
     assert err is not None and "boom" in err
 

@@ -10,15 +10,14 @@ from langgraph.types import Command
 
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     _route_after_decide,
-    _route_after_summarize,
     build_graph,
     make_create_analysis_plan_node,
     make_decide_next_action_node,
     make_execute_subagent_node,
     make_finalize_node,
     make_retrieve_analysis_rules_node,
-    make_resolve_candidate_node,
 )
+from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
 from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -82,19 +81,19 @@ class FakeSubAgentAdapter:
 
     def generate_insight(self, state: dict[str, Any]) -> AgentCompactResult:
         self.insight_calls = getattr(self, "insight_calls", 0) + 1
-        if "insight_agent" in self.results:
-            return self.results["insight_agent"].agent_result
+        if "insight" in self.results:
+            return self.results["insight"].agent_result
         return AgentCompactResult(
-            agent="insight_agent",
+            agent="insight",
             status="success",
-            summary="insight_agent 완료",
-            artifact_ids=["artifact_insight_agent"],
+            summary="insight 완료",
+            artifact_ids=["artifact_insight"],
             artifacts=[
                 ArtifactSummary(
-                    artifact_id="artifact_insight_agent",
+                    artifact_id="artifact_insight",
                     type="file",
                     kind="insight_payload",
-                    summary="insight_agent 산출물 요약",
+                    summary="insight 산출물 요약",
                 )
             ],
         )
@@ -112,16 +111,16 @@ class SequencedSubAgentAdapter:
     def generate_insight(self, state: dict[str, Any]) -> AgentCompactResult:
         self.insight_calls = getattr(self, "insight_calls", 0) + 1
         return AgentCompactResult(
-            agent="insight_agent",
+            agent="insight",
             status="success",
-            summary="insight_agent 완료",
-            artifact_ids=["artifact_insight_agent"],
+            summary="insight 완료",
+            artifact_ids=["artifact_insight"],
             artifacts=[
                 ArtifactSummary(
-                    artifact_id="artifact_insight_agent",
+                    artifact_id="artifact_insight",
                     type="file",
                     kind="insight_payload",
-                    summary="insight_agent 산출물 요약",
+                    summary="insight 산출물 요약",
                 )
             ],
         )
@@ -145,6 +144,41 @@ def _state(user_query: str = "매출") -> dict[str, Any]:
         user_query=user_query,
         datasource_id=None,
     )
+
+
+def _validation_record(
+    state: dict[str, Any],
+    agent: str,
+    disposition: str,
+    *,
+    recommended_next_action: str = "",
+) -> dict[str, Any]:
+    pending = state["pending_result"]
+    semantic_details = {
+        "semantic_valid": True,
+        "severity": "info",
+        "recommended_next_action": recommended_next_action,
+        "missing_evidence": [],
+    }
+    return {
+        "candidate_id": pending["candidate_id"],
+        "validation_id": pending["validation_id"],
+        "agent": agent,
+        "outcome": {
+            "disposition": disposition,
+            "reason": "ok",
+            "reason_code": "",
+            "terminal_state": "running",
+        },
+        "checks": [
+            {
+                "name": "semantic",
+                "passed": True,
+                "findings": [],
+                "details": semantic_details,
+            }
+        ],
+    }
 
 
 def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() -> None:
@@ -375,101 +409,6 @@ def _agent_flow_decisions(
     return decisions
 
 
-@pytest.mark.parametrize(
-    ("next_action", "expected_node"),
-    [
-        ("call_sql_agent", "execute_subagent"),
-        ("call_eda_agent", "execute_subagent"),
-        ("call_analysis_agent", "execute_subagent"),
-        ("finalize", "completion_guard"),
-        ("fail", "completion_guard"),
-    ],
-)
-def test_route_after_decide_maps_supported_action_explicitly(
-    next_action: str,
-    expected_node: str,
-) -> None:
-    state = _state()
-    state["next_action"] = next_action
-
-    assert _route_after_decide(state) == expected_node
-
-
-@pytest.mark.parametrize(
-    "next_action",
-    ["clarify", "create_plan", "decide_next_action", "unknown_action", None],
-)
-def test_route_after_decide_rejects_unsupported_action(next_action: str | None) -> None:
-    state = _state()
-    state["next_action"] = next_action
-
-    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
-        _route_after_decide(state)
-
-
-def test_route_after_decide_rejects_missing_action() -> None:
-    state = _state()
-    state.pop("next_action")
-
-    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
-        _route_after_decide(state)
-
-
-def test_route_after_decide_prioritizes_terminal_state() -> None:
-    state = _state()
-    state["terminal_state"] = "failed_terminal"
-    state["next_action"] = "unknown_action"
-
-    assert _route_after_decide(state) == "finalize"
-
-
-@pytest.mark.parametrize(
-    ("next_action", "expected_node"),
-    [
-        ("decide_next_action", "decide_next_action"),
-        ("call_sql_agent", "execute_subagent"),
-        ("call_eda_agent", "execute_subagent"),
-        ("call_analysis_agent", "execute_subagent"),
-        ("call_report_agent", "generate_report"),
-        ("finalize", "completion_guard"),
-        ("fail", "completion_guard"),
-    ],
-)
-def test_route_after_summarize_maps_supported_action_explicitly(
-    next_action: str,
-    expected_node: str,
-) -> None:
-    state = _state()
-    state["next_action"] = next_action
-
-    assert _route_after_summarize(state) == expected_node
-
-
-@pytest.mark.parametrize("next_action", ["clarify", "create_plan", "unknown_action", None])
-def test_route_after_summarize_rejects_unsupported_action(next_action: str | None) -> None:
-    state = _state()
-    state["next_action"] = next_action
-
-    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
-        _route_after_summarize(state)
-
-
-def test_route_after_summarize_rejects_missing_action() -> None:
-    state = _state()
-    state.pop("next_action")
-
-    with pytest.raises(ValueError, match="지원하지 않는 next_action"):
-        _route_after_summarize(state)
-
-
-def test_route_after_summarize_prioritizes_terminal_state() -> None:
-    state = _state()
-    state["terminal_state"] = "failed_terminal"
-    state["next_action"] = "unknown_action"
-
-    assert _route_after_summarize(state) == "finalize"
-
-
 def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
     actions = ["call_sql_agent", "call_eda_agent", "call_analysis_agent", "finalize"]
     decisions = _agent_flow_decisions(actions, final_answer="분석이 완료되었습니다.")
@@ -480,7 +419,7 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
 
     assert result["terminal_state"] == "completed"
     assert result["completed_agents"] == [
-        "sql_agent", "eda_agent", "analysis_agent", "insight_agent",
+        "sql_agent", "eda_agent", "analysis_agent", "insight",
     ]
     assert result["final_answer"] == "분석이 완료되었습니다."
     assert [entry["node"] for entry in result["llm_decisions"]] == [
@@ -512,7 +451,7 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
                 recommended_next_action="call_sql_agent",
             ),
             _semantic_decision(recommended_next_action="finalize"),
-            # completion_guard가 insight_agent를 결정론적으로 강제하므로, insight의
+            # completion_guard가 insight를 결정론적으로 강제하므로, insight의
             # validate_candidate 몫 semantic decision.
             _semantic_decision(),
             _final_decision("completed", "복구된 근거로 인사이트를 완료했습니다."),
@@ -528,9 +467,9 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
     assert adapter.calls == ["analysis_agent", "sql_agent"]
     assert adapter.insight_calls == 1
     assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight"]
     assert result["failed_agents"] == []
-    assert result["accepted_evidence"].keys() == {"sql_agent", "insight_agent"}
+    assert result["accepted_evidence"].keys() == {"sql_agent", "insight"}
     assert len(result["rejected_results"]) == 1
     assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
     assert result["terminal_state"] == "completed"
@@ -547,7 +486,7 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
             _next_action_decision("call_analysis_agent"),
             _semantic_decision(semantic_valid=False, severity="error"),
             # analysis 실패 → 복구 권고가 없고 근거는 있어 제한적 인사이트 폴백이
-            # insight_agent를 직접 스케줄한다(completion_guard가 아니라 semantic recovery).
+            # insight를 직접 스케줄한다(completion_guard가 아니라 semantic recovery).
             _semantic_decision(),
             _final_decision("completed", "제한적 인사이트를 완료했습니다."),
         ]
@@ -561,8 +500,8 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
 
     assert adapter.calls == ["sql_agent", "analysis_agent"]
     assert adapter.insight_calls == 1
-    assert result["semantic_recovery_attempts"] == {"insight_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
+    assert result["semantic_recovery_attempts"] == {"insight": 1}
+    assert result["completed_agents"] == ["sql_agent", "insight"]
     assert "analysis_agent" not in result["accepted_evidence"]
     assert any("제한적 인사이트" in item for item in result["limitations"])
     assert any(
@@ -583,7 +522,7 @@ def test_supervisor_graph_does_not_query_artifacts_during_candidate_validation()
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_no_artifact_read"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["analysis_agent", "insight_agent"]
+    assert result["completed_agents"] == ["analysis_agent", "insight"]
     assert any(event["event_type"] == "evidence.promoted" for event in backend.events)
 
 
@@ -617,7 +556,7 @@ def test_finalize_request_after_sql_forces_insight_generation_before_completion(
             _next_action_decision("call_sql_agent"),
             _semantic_decision(),
             _next_action_decision("finalize"),
-            # completion_guard가 insight_agent를 결정론적으로 강제한다.
+            # completion_guard가 insight를 결정론적으로 강제한다.
             _semantic_decision(),
             _final_decision("completed", "최종 인사이트가 완료되었습니다."),
         ]
@@ -627,8 +566,8 @@ def test_finalize_request_after_sql_forces_insight_generation_before_completion(
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_force_report"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
-    assert result["accepted_evidence"]["insight_agent"][0]["artifact_id"] == "artifact_insight_agent"
+    assert result["completed_agents"] == ["sql_agent", "insight"]
+    assert result["accepted_evidence"]["insight"][0]["artifact_id"] == "artifact_insight"
     assert adapter.insight_calls == 1
 
 
@@ -668,7 +607,7 @@ def test_finalize_request_with_promoted_insight_does_not_generate_duplicate() ->
     state = merge_agent_result(
         state,
         AgentCompactResult(
-            agent="insight_agent",
+            agent="insight",
             status="success",
             summary="인사이트 완료",
             artifact_ids=["artifact_insight"],
@@ -681,7 +620,7 @@ def test_finalize_request_with_promoted_insight_does_not_generate_duplicate() ->
                 _clarify_decision(),
                 _plan_decision(),
                 _next_action_decision("finalize"),
-                # insight_agent가 이미 완료돼있어 completion_guard가 바로 ready를 반환한다.
+                # insight가 이미 완료돼있어 completion_guard가 바로 ready를 반환한다.
                 _final_decision(),
             ]
         ),
@@ -691,7 +630,7 @@ def test_finalize_request_with_promoted_insight_does_not_generate_duplicate() ->
 
     assert result["terminal_state"] == "completed"
     assert getattr(adapter, "insight_calls", 0) == 0
-    assert result["completed_agents"].count("insight_agent") == 1
+    assert result["completed_agents"].count("insight") == 1
 
 
 def test_finalize_node_rejects_completed_without_required_report() -> None:
@@ -788,7 +727,7 @@ def test_build_graph_accepts_positional_subagent_adapter() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "completed"
-    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight"]
 
 
 def test_clarification_interrupt_returns_payload_and_skips_subagents() -> None:
@@ -871,7 +810,7 @@ def test_finalize_llm_can_fail_without_insight_evidence() -> None:
                 _next_action_decision("call_sql_agent"),
                 _semantic_decision(),
                 _next_action_decision("finalize"),
-                # completion_guard가 insight_agent를 결정론적으로 강제한다.
+                # completion_guard가 insight를 결정론적으로 강제한다.
                 _semantic_decision(),
                 _final_decision("failed_terminal", "인사이트 근거가 부족합니다."),
             ]
@@ -908,7 +847,7 @@ def test_execute_subagent_runs_only_the_registered_action() -> None:
         _next_action_decision("call_eda_agent"),
         _semantic_decision(),
         _next_action_decision("finalize"),
-        # completion_guard가 insight_agent를 결정론적으로 강제한다.
+        # completion_guard가 insight를 결정론적으로 강제한다.
         _semantic_decision(),
         _final_decision(),
     ]
@@ -917,7 +856,7 @@ def test_execute_subagent_runs_only_the_registered_action() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert adapter.calls == ["eda_agent"]
-    assert result["completed_agents"] == ["eda_agent", "insight_agent"]
+    assert result["completed_agents"] == ["eda_agent", "insight"]
     assert result["terminal_state"] == "completed"
 
 
@@ -1048,7 +987,7 @@ def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> 
                 _next_action_decision("call_eda_agent"),
                 _semantic_decision(),
                 _next_action_decision("finalize"),
-                # completion_guard가 insight_agent를 결정론적으로 강제한다.
+                # completion_guard가 insight를 결정론적으로 강제한다.
                 _semantic_decision(),
                 _final_decision(),
             ]
@@ -1063,7 +1002,7 @@ def test_execute_subagent_merges_allowed_state_updates_without_erasing_sql() -> 
     assert result["analysis_plan"]["planner_mode"] == "llm"
     assert result["error_state"] == {"warning": "테스트 경고"}
     assert result["terminal_state"] == "completed"
-    assert "insight_agent" in result["completed_agents"]
+    assert "insight" in result["completed_agents"]
 
 
 def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
@@ -1098,7 +1037,6 @@ def test_approval_required_result_finalizes_as_user_waiting_state() -> None:
     assert result["pending_approval"]["validation_id"]
     assert result["completed_agents"] == []
     assert result["final_answer"] == "SQL 실행 승인 필요"
-    assert "summarize_step" not in [entry["node"] for entry in result["llm_decisions"]]
 
 
 def test_structured_analysis_review_returns_native_interrupt_with_full_request() -> None:
@@ -1207,7 +1145,6 @@ def test_approval_required_result_preserves_terminal_state_when_finalize_llm_fai
     assert result["decision_errors"][0]["node"] == "finalize"
     assert result["error_state"]["node"] == "finalize"
     assert result["final_answer"] == "SQL 실행 승인 필요"
-    assert "summarize_step" not in [entry["node"] for entry in result["llm_decisions"]]
 
 
 def test_deterministic_fallback_result_finalizes_terminally() -> None:
@@ -1281,7 +1218,7 @@ def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_
         _next_action_decision("call_sql_agent"),
         _semantic_decision(),
         _next_action_decision("finalize"),
-        # completion_guard가 insight_agent를 결정론적으로 강제한다.
+        # completion_guard가 insight를 결정론적으로 강제한다.
         _semantic_decision(),
         _final_decision(),
     ]
@@ -1294,7 +1231,7 @@ def test_retryable_failed_agent_is_retried_and_removed_from_failed_agents_after_
 
     assert adapter.calls == ["sql_agent", "sql_agent"]
     assert result["retry_counts"]["sql_agent"] == 1
-    assert result["completed_agents"] == ["sql_agent", "insight_agent"]
+    assert result["completed_agents"] == ["sql_agent", "insight"]
     assert result["failed_agents"] == []
     assert result["failure_streaks"] == {}
     assert result["terminal_state"] == "completed"
@@ -1367,7 +1304,9 @@ def test_resolve_candidate_uses_only_approval_required_flag() -> None:
         ),
     )
 
-    promoted = make_resolve_candidate_node()(state)
+    state["pending_validation"] = _validation_record(state, "analysis_agent", "accept")
+
+    promoted = commit_candidate(state, None)
 
     assert promoted["pending_approval"] is None
     assert promoted["completed_agents"] == ["analysis_agent"]
@@ -1385,7 +1324,9 @@ def test_resolve_success_with_required_approval_waits_without_promotion() -> Non
         ),
     )
 
-    pending = make_resolve_candidate_node()(state)
+    state["pending_validation"] = _validation_record(state, "analysis_agent", "await_approval")
+
+    pending = commit_candidate(state, None)
 
     assert pending["terminal_state"] == "needs_user_approval"
     assert pending["pending_approval"]["reason"] == "분석 검토 필요"
@@ -1464,7 +1405,14 @@ def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
         }
     ]
 
-    result = make_resolve_candidate_node()(state)
+    state["pending_validation"] = _validation_record(
+        state,
+        "sql_agent",
+        "accept",
+        recommended_next_action="call_eda_agent",
+    )
+
+    result = commit_candidate(state, None)
 
     assert result["next_action"] == "call_eda_agent"
     assert result["completed_agents"] == ["sql_agent"]

@@ -68,7 +68,6 @@ def repair_state(**overrides):
         "validation_findings": [{"category": "execution_error", "detail": "Unknown column orders.total"}],
         "retry_hint": {"reason_code": "execution_error", "retryable": True},
         "retry_count": 1,
-        "max_retries": 2,
         "feedback": "컬럼 오류",
         "error": "(1054, Unknown column 'orders.total')",
         "statement_results": [{"index": 0, "sql": "SELECT 1", "row_count": 1, "columns": ["1"], "rows": [(1,)]}],

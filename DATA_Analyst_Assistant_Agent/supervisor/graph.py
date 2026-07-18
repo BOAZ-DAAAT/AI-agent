@@ -40,19 +40,14 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     AgentName,
     NextAction,
-    PendingApproval,
     StepSummary,
     SupervisorState,
     artifact_ids_by_agent,
-    promote_pending_result,
     reject_pending_result,
     stage_candidate_result,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.supervisor.validation import (
-    ValidationCheckResult,
-    ValidationOutcome,
-    ValidationRecord,
     _check_completion_readiness,
     contract_check_from_decision,
     outcome_from_contract_decision,
@@ -83,10 +78,10 @@ ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     "call_sql_agent": "sql_agent",
     "call_eda_agent": "eda_agent",
     "call_analysis_agent": "analysis_agent",
-    "call_insight_agent": "insight_agent",
+    "call_insight": "insight",
 }
 
-_NODE_ONLY_AGENTS = {"insight_agent"}
+_NODE_ONLY_AGENTS = {"insight"}
 
 SUBAGENT_ACTION_TO_AGENT: dict[NextAction, AgentName] = {
     action: agent
@@ -566,7 +561,7 @@ def make_completion_guard_node():
             }
         if decision.status == "insight_required":
             return {
-                "next_action": "call_insight_agent",
+                "next_action": "call_insight",
                 "current_step": "completion_guard",
             }
         return {
@@ -593,9 +588,9 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
             )
 
         action = state.get("next_action")
-        if action == "call_insight_agent":
+        if action == "call_insight":
             return {
-                "next_action": "call_insight_agent",
+                "next_action": "call_insight",
                 "current_step": "execute_subagent",
             }
 
@@ -713,9 +708,9 @@ def make_generate_insight_node(insight_generator: Any):
             getattr(insight_generator, "backend_adapter", None),
             state,
             "node.started",
-            "insight_agent 실행을 시작했습니다.",
-            node_name="insight_agent",
-            metadata={"agent_name": "insight_agent", "action": "call_insight_agent"},
+            "insight 실행을 시작했습니다.",
+            node_name="insight",
+            metadata={"agent_name": "insight", "action": "call_insight"},
         )
         evidence_ids = artifact_ids_by_agent(state)
         has_evidence = any(
@@ -732,7 +727,7 @@ def make_generate_insight_node(insight_generator: Any):
             except Exception as exc:
                 result = _failed_insight_result(f"인사이트 생성 또는 저장에 실패했습니다: {exc}")
 
-        if result.agent != "insight_agent":
+        if result.agent != "insight":
             result = _failed_insight_result(
                 f"인사이트 생성기가 잘못된 agent 결과를 반환했습니다: {result.agent}"
             )
@@ -741,17 +736,17 @@ def make_generate_insight_node(insight_generator: Any):
             **stage_candidate_result(state, result, {}),
             "last_agent_result": result.model_dump(mode="json"),
             "terminal_state": "running",
-            "next_action": "call_insight_agent",
+            "next_action": "call_insight",
             "current_step": "generate_insight",
         }
         _emit_run_event(
             getattr(insight_generator, "backend_adapter", None),
             state,
             "result.staged",
-            "insight_agent 후보 결과를 격리했습니다.",
-            node_name="insight_agent",
+            "insight 후보 결과를 격리했습니다.",
+            node_name="insight",
             metadata={
-                "agent_name": "insight_agent",
+                "agent_name": "insight",
                 "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
             },
         )
@@ -759,11 +754,11 @@ def make_generate_insight_node(insight_generator: Any):
             getattr(insight_generator, "backend_adapter", None),
             state,
             "node.failed" if result.status == "failed" else "node.completed",
-            result.error or "insight_agent 실행이 완료되었습니다.",
-            node_name="insight_agent",
+            result.error or "insight 실행이 완료되었습니다.",
+            node_name="insight",
             metadata={
-                "agent_name": "insight_agent",
-                "action": "call_insight_agent",
+                "agent_name": "insight",
+                "action": "call_insight",
                 "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
             },
         )
@@ -774,7 +769,7 @@ def make_generate_insight_node(insight_generator: Any):
 
 def _failed_insight_result(message: str) -> AgentCompactResult:
     return AgentCompactResult(
-        agent="insight_agent",
+        agent="insight",
         status="failed",
         summary=message,
         retryable=False,
@@ -782,197 +777,11 @@ def _failed_insight_result(message: str) -> AgentCompactResult:
     )
 
 
-def make_stage_candidate_node():
-    def stage_candidate_node(state: SupervisorState) -> SupervisorState:
-        pending = state.get("pending_result")
-        if not isinstance(pending, dict) or not isinstance(pending.get("result"), dict):
-            return _terminal_failure_updates(state, "stage_candidate", "격리할 후보 결과가 없습니다.")
-        return {"current_step": "stage_candidate"}
-
-    return stage_candidate_node
-
-
 def make_validate_candidate_node(model: Any | None):
     def validate_candidate_node(state: SupervisorState) -> SupervisorState:
         return validate_candidate(state, model)
 
     return validate_candidate_node
-
-
-def _validation_candidate_updates(
-    state: SupervisorState,
-    result: AgentCompactResult,
-    checks: list[ValidationCheckResult],
-    outcome: ValidationOutcome,
-) -> SupervisorState:
-    pending = state.get("pending_result") or {}
-    record = ValidationRecord(
-        candidate_id=str(pending.get("candidate_id") or ""),
-        validation_id=str(pending.get("validation_id") or ""),
-        agent=result.agent,
-        outcome=outcome,
-        checks=checks,
-    )
-    return {
-        "pending_validation": record.model_dump(mode="json"),
-        "current_step": "validate_candidate",
-    }
-
-
-def make_resolve_validation_node(backend_adapter: Any | None = None):
-    def resolve_validation_node(state: SupervisorState) -> SupervisorState:
-        payload = state.get("pending_validation")
-        if not isinstance(payload, dict):
-            return _terminal_failure_updates(
-                state,
-                "resolve_validation",
-                "해결할 통합 검증 결과가 없습니다.",
-            )
-        record = ValidationRecord.model_validate(payload)
-        history = list(state.get("validation_history", []))
-        history.append(record.model_dump(mode="json"))
-        updates: SupervisorState = {
-            "validation_history": history,
-            "pending_validation": None,
-            "current_step": "resolve_validation",
-        }
-
-        result_check = next((check for check in record.checks if check.name == "result"), None)
-        failure_streak = result_check.details.get("failure_streak") if result_check else None
-        if isinstance(failure_streak, dict):
-            streaks = {agent: dict(item) for agent, item in state.get("failure_streaks", {}).items()}
-            streaks[record.agent] = dict(failure_streak)
-            updates["failure_streaks"] = streaks
-
-        disposition = record.outcome.disposition
-        if disposition in {"accept", "accept_with_limitations", "await_approval"}:
-            updates["terminal_state"] = "running"
-            return updates
-
-        rejected = reject_pending_result(
-            {**state, **updates},
-            record.outcome.reason,
-            metadata={
-                "agent": record.agent,
-                "reason_code": record.outcome.reason_code,
-                "disposition": disposition,
-            },
-        )
-        updates.update(rejected)
-        updates["pending_validation"] = None
-        updates["current_step"] = "resolve_validation"
-        if disposition == "retry":
-            retry_counts = dict(state.get("retry_counts", {}))
-            retry_counts[record.agent] = int(retry_counts.get(record.agent, 0)) + 1
-            updates["retry_counts"] = retry_counts
-            updates["next_action"] = _action_for_agent(record.agent)
-            updates["terminal_state"] = "running"
-        else:
-            failed = list(updates.get("failed_agents", state.get("failed_agents", [])))
-            if record.agent not in failed:
-                failed.append(record.agent)
-            updates["failed_agents"] = failed
-            updates["next_action"] = "finalize"
-            updates["terminal_state"] = record.outcome.terminal_state
-            updates["final_answer"] = record.outcome.reason
-        _emit_run_event(
-            backend_adapter,
-            state,
-            "validation.rejected",
-            record.outcome.reason,
-            metadata={
-                "candidate_id": record.candidate_id,
-                "validation_id": record.validation_id,
-                "agent": record.agent,
-                "reason_code": record.outcome.reason_code,
-                "disposition": disposition,
-            },
-        )
-        return updates
-
-    return resolve_validation_node
-
-
-def _action_for_agent(agent: AgentName) -> NextAction:
-    return {
-        "sql_agent": "call_sql_agent",
-        "eda_agent": "call_eda_agent",
-        "analysis_agent": "call_analysis_agent",
-        "insight_agent": "call_insight_agent",
-    }[agent]
-
-
-def make_resolve_candidate_node(backend_adapter: Any | None = None):
-    def resolve_candidate_node(state: SupervisorState) -> SupervisorState:
-        if state.get("terminal_state") in TERMINAL_STATES:
-            return {"current_step": "resolve_candidate"}
-        pending = state.get("pending_result")
-        if not isinstance(pending, dict):
-            return _terminal_failure_updates(state, "resolve_candidate", "승격할 후보 결과가 없습니다.")
-        result = AgentCompactResult.model_validate(pending.get("result") or {})
-        if result.approval.required:
-            approval = PendingApproval(
-                approval_id=f"{state['current_run_id']}:{result.agent}:approval",
-                agent=result.agent,
-                reason=result.approval.reason or result.summary,
-                approval_type=result.approval.approval_type or "agent_approval",
-                candidate_id=str(pending.get("candidate_id", "")),
-                validation_id=str(pending.get("validation_id", "")),
-                content_hashes=dict(pending.get("content_hashes") or {}),
-            ).model_dump(mode="json")
-            return {
-                "pending_approval": approval,
-                "terminal_state": SupervisorTerminalState.needs_user_approval.value,
-                "next_action": "finalize",
-                "final_answer": approval["reason"],
-                "current_step": "resolve_candidate",
-            }
-        promoted = promote_pending_result(state)
-        promoted["current_step"] = "resolve_candidate"
-        latest_record = (state.get("validation_history") or [{}])[-1]
-        semantic_result = next(
-            (
-                check.get("details", {})
-                for check in latest_record.get("checks", [])
-                if check.get("name") == "semantic"
-            ),
-            {},
-        )
-        recommended_action = str(semantic_result.get("recommended_next_action") or "")
-        if result.agent == "insight_agent":
-            promoted["next_action"] = "finalize"
-        elif _semantic_action_allowed(result.agent, recommended_action) and recommended_action:
-            promoted["next_action"] = recommended_action
-        else:
-            promoted["next_action"] = "decide_next_action"
-        _emit_run_event(
-            backend_adapter,
-            state,
-            "evidence.promoted",
-            f"{result.agent} 후보 근거를 승격했습니다.",
-            artifact_ids=list(result.artifact_ids),
-            metadata={
-                "candidate_id": pending.get("candidate_id"),
-                "validation_id": pending.get("validation_id"),
-            },
-        )
-        return promoted
-
-    return resolve_candidate_node
-
-
-def _semantic_action_allowed(agent: str, action: str) -> bool:
-    if not action:
-        return True
-    if action in {"decide_next_action", "finalize", "fail"}:
-        return True
-    allowed_by_agent = {
-        "sql_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
-        "eda_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
-        "analysis_agent": {"call_sql_agent", "call_eda_agent", "call_analysis_agent"},
-        "insight_agent": {"call_insight_agent"},
-    }
-    return action in allowed_by_agent.get(agent, set())
 
 
 def _emit_run_event(
@@ -1046,10 +855,6 @@ def collect_clarification_node(state: SupervisorState) -> SupervisorState:
     return make_collect_clarification_node()(state)
 
 
-def resolve_candidate_node(state: SupervisorState) -> SupervisorState:
-    return make_resolve_candidate_node()(state)
-
-
 def finalize_node(state: SupervisorState) -> SupervisorState:
     return make_finalize_node(None)(state)
 
@@ -1112,6 +917,7 @@ def build_graph(
         _route_after_decide,
         {
             "execute_subagent": "execute_subagent",
+            "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
@@ -1280,6 +1086,8 @@ def _route_after_decide(state: SupervisorState) -> str:
         return "finalize"
 
     next_action = state.get("next_action")
+    if next_action == "call_insight":
+        return "generate_insight"
     if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
     if next_action in {"finalize", "fail"}:
@@ -1295,7 +1103,7 @@ def _route_after_execute(state: SupervisorState) -> str:
         return "validate_candidate"
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
-    if state.get("next_action") == "call_insight_agent":
+    if state.get("next_action") == "call_insight":
         return "generate_insight"
     return "completion_guard"
 
@@ -1308,7 +1116,7 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
         return "collect_analysis_review"
     if next_action == "decide_next_action":
         return "decide_next_action"
-    if next_action == "call_insight_agent":
+    if next_action == "call_insight":
         return "generate_insight"
     if next_action in SUBAGENT_ACTION_TO_AGENT:
         return "execute_subagent"
@@ -1317,47 +1125,8 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
     raise ValueError(f"commit_candidate 이후 지원하지 않는 next_action입니다: {next_action!r}")
 
 
-def _route_after_resolve_validation(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES:
-        return "finalize"
-    latest = (state.get("validation_history") or [{}])[-1]
-    disposition = (latest.get("outcome") or {}).get("disposition")
-    if disposition == "retry":
-        return "summarize_step"
-    if disposition == "reject":
-        return "finalize"
-    return "resolve_candidate"
-
-
-def _route_after_resolve_candidate(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES:
-        return "finalize"
-    if state.get("next_action") == "finalize":
-        return "completion_guard"
-    return "summarize_step"
-
-
-def _route_after_summarize(state: SupervisorState) -> str:
-    if state.get("terminal_state") in TERMINAL_STATES:
-        return "finalize"
-
-    next_action = state.get("next_action")
-    if next_action == "decide_next_action":
-        return "decide_next_action"
-    if next_action == "call_report_agent":
-        return "generate_report"
-    if next_action in SUBAGENT_ACTION_TO_AGENT:
-        return "execute_subagent"
-    if next_action in {"finalize", "fail"}:
-        return "completion_guard"
-
-    raise ValueError(
-        f"summarize_step 이후 지원하지 않는 next_action입니다: {next_action!r}"
-    )
-
-
 def _route_after_completion_guard(state: SupervisorState) -> str:
-    if state.get("next_action") == "call_insight_agent":
+    if state.get("next_action") == "call_insight":
         return "generate_insight"
     return "finalize"
 

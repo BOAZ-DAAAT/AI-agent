@@ -333,7 +333,7 @@ def test_markdown_embeds_chart_and_labels_sources():
 def test_agent_run_registers_report_payload_and_chart(monkeypatch, tmp_path):
     adapter = FakeAdapter({"s1": (ArtifactType.sql_result, _CSV)})
     envelope = _run_agent(monkeypatch, tmp_path, adapter)
-    assert envelope.agent_name == "insight_agent"
+    assert envelope.agent_name == "insight"
     assert "900.0" in envelope.summary
     filenames = [r["filename"] for r in adapter.registered]
     assert "final_report.md" in filenames and "insight_payload.json" in filenames

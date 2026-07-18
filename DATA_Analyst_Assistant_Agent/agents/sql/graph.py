@@ -7,6 +7,8 @@ from langgraph.graph import END, START, StateGraph
 from DATA_Analyst_Assistant_Agent.agents.sql import nodes
 from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState
 
+SQL_MAX_RETRIES = 1
+
 
 def route_after_plan(state: AgentState):
     validation = state.get("validation") or {}
@@ -14,7 +16,7 @@ def route_after_plan(state: AgentState):
         return "refresh"
     if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
-    if state["retry_count"] >= state["max_retries"]:
+    if state["retry_count"] >= SQL_MAX_RETRIES:
         return "finalize"
     return "retry"
 
@@ -25,7 +27,7 @@ def route_after_mart_design(state: AgentState):
         return "generate"
     if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
-    if state["retry_count"] >= state["max_retries"]:
+    if state["retry_count"] >= SQL_MAX_RETRIES:
         return "finalize"
     return "retry"
 
@@ -45,7 +47,7 @@ def route_after_schema_refresh(state: AgentState):
         return "finalize_plan"
     if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
-    if state["retry_count"] >= state["max_retries"]:
+    if state["retry_count"] >= SQL_MAX_RETRIES:
         return "finalize"
     return "retry"
 
@@ -55,7 +57,7 @@ def route_after_finalize_table_plan(state: AgentState):
     if validation.get("result") == "invalid":
         if not (state.get("retry_hint") or {}).get("retryable", True):
             return "finalize"
-        if state["retry_count"] >= state["max_retries"]:
+        if state["retry_count"] >= SQL_MAX_RETRIES:
             return "finalize"
         return "retry"
     return route_after_refresh_context(state)
@@ -70,7 +72,7 @@ def route_after_validation(state: AgentState):
         return "finalize"
     if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
-    if state["retry_count"] >= state["max_retries"]:
+    if state["retry_count"] >= SQL_MAX_RETRIES:
         return "finalize"
     return "retry"
 

@@ -113,9 +113,9 @@ def test_completion_readiness_ready_after_insight_evidence() -> None:
     state = _state()
     state["accepted_evidence"] = {
         "sql_agent": [{"artifact_id": "artifact_sql"}],
-        "insight_agent": [{"artifact_id": "artifact_insight"}],
+        "insight": [{"artifact_id": "artifact_insight"}],
     }
-    state["completed_agents"] = ["sql_agent", "insight_agent"]
+    state["completed_agents"] = ["sql_agent", "insight"]
 
     decision = _check_completion_readiness(state)
 
@@ -146,7 +146,7 @@ def test_guard_blocks_insight_when_only_completed_agent_exists_without_artifact(
     state = _state()
     state["completed_agents"] = ["analysis_agent"]
 
-    decision = guard_agent_preconditions("insight_agent", state)
+    decision = guard_agent_preconditions("insight", state)
 
     assert decision.allowed is False
     assert decision.next_action == "call_analysis_agent"
@@ -164,10 +164,10 @@ def test_guard_allows_insight_after_evidence_artifact() -> None:
         ),
     )
 
-    decision = guard_agent_preconditions("insight_agent", state)
+    decision = guard_agent_preconditions("insight", state)
 
     assert decision.allowed is True
-    assert decision.next_action == "call_insight_agent"
+    assert decision.next_action == "call_insight"
 
 
 def test_validate_failed_retryable_result_routes_to_same_agent() -> None:

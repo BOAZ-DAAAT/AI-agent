@@ -81,7 +81,7 @@ def test_normalize_v2_validation_arrays_into_v4_history() -> None:
                     "semantic_valid": True,
                     "severity": "info",
                     "reason": "의미 검증 통과",
-                    "recommended_next_action": "call_report_agent",
+                    "recommended_next_action": "finalize",
                 }
             ],
         }

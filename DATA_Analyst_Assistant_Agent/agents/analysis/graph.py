@@ -49,7 +49,6 @@ class AnalysisWorkflowState(TypedDict, total=False):
     progress_callback: Callable[[str, str, int], None] | None
     chart_artifact_loader: Any | None
     chart_reader: Any | None
-    max_attempts: int
     analysis_context: AnalysisContext
     intent: AnalysisIntent
     outcome: AnalysisOutcome
@@ -88,7 +87,7 @@ def analyze_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             state["dataframe"],
             code_generator_model=state.get("code_generator_model"),
             critic_model=state.get("critic_model"),
-            max_attempts=state.get("max_attempts", 3),
+            max_attempts=state["orchestration_state"].max_retry_per_agent + 1,
             progress_callback=state.get("progress_callback"),
         )
         return {"outcome": outcome, "error": "", "terminal_reason": ""}
@@ -226,7 +225,6 @@ def run_analysis_workflow(
         "progress_callback": progress_callback,
         "chart_artifact_loader": chart_artifact_loader,
         "chart_reader": chart_reader,
-        "max_attempts": state.max_retry_per_agent + 2,
         "error": "",
     }, config={"configurable": {"thread_id": None, "checkpoint_id": None, "checkpoint_ns": ""}})
     return output["result"], output["local_checks"], output["terminal_reason"]

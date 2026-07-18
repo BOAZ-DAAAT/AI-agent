@@ -99,7 +99,6 @@ class SQLAgent:
                 "retry_hint": {},
                 "validation_summary": {},
                 "retry_count": 0,
-                "max_retries": 2,
                 "feedback": "",
                 "error": "",
                 "generation_source": "llm",
