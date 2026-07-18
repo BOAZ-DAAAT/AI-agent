@@ -33,6 +33,7 @@ class EDAState(TypedDict, total=False):
     round: int                       # 현재 라운드 (0부터)
     next_analysis: str               # 플래너가 고른 다음 분석 ("done" 가능)
     controller_log: List[Dict[str, Any]]  # [{round, choice, reason}] 결정 추적
+    analysis_queue: List[str]        # 1차 배치계획 중 아직 안 돌린 것들 (#194, 있으면 LLM 호출 없이 소비)
 
     # validator(자기검증) 상태
     validation_result: Dict[str, Any]     # {status, retry_target, reason, feedback}
