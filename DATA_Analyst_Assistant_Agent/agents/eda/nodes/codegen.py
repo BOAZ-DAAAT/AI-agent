@@ -278,11 +278,19 @@ def _retry_prompt(question: str, columns: list, prev_expression: str, error_reas
 def route_after_codegen(state: EDAState):
     """codegen 성공 → insight. 도메인 밖일 때:
       - 실질 도구가 이미 결과를 냄(플래너가 codegen을 오버픽했지만 실패 등) → insight로 정상 분석 살림
-      - 아무 실질 결과도 없음(진짜 도메인 밖) → 종료(그럴듯한 요약 생성 방지)
+      - 아직 시도 안 한 분석 도구가 남아있음 → planner로 복귀(정상 분석 경로에 한 번 더 기회를 준다.
+        codegen의 판단 LLM과 planner의 선택 LLM은 서로 다른 잣대라 planner가 codegen으로 풀릴
+        거라 오판해도, 아직 안 써본 quality/distribution/comparison 등이 남아있으면 거기서
+        답을 찾을 수 있다 — #194, run-019f747b에서 이걸로 EDA 전체가 조기 종료된 사례 확인)
+      - 아무 실질 결과도 없고 남은 도구도 없음(진짜 도메인 밖) → 종료(그럴듯한 요약 생성 방지)
     """
-    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import _substantive_produced_output
+    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import (
+        _feasible_tools, _substantive_produced_output,
+    )
     if (state.get("codegen") or {}).get("status") == "out_of_domain":
-        return "insight" if _substantive_produced_output(state) else "end"
+        if _substantive_produced_output(state):
+            return "insight"
+        return "planner" if _feasible_tools(state) else "end"
     return "insight"
 
 

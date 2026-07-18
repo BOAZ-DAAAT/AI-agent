@@ -135,8 +135,10 @@ def planner_node(state: EDAState) -> dict:
             # 배치가 비었거나(emit_batch=False, 또는 LLM이 codegen/done을 골랐을 때) 기존 단일선택 로직
             choice = decision.get("next", "done")
             reason = decision.get("reason", "")
-            # 환각 방지: feasible 목록 + codegen(특수 카드) 밖 선택이면 done
-            allowed_single = allowed | {"codegen"}
+            # 환각 방지: feasible 목록 + codegen(특수 카드, 단 이미 한 번 써봤으면 재선택 금지 —
+            # route_after_codegen이 도메인 밖 거부 시 planner로 되돌리는데, 여기서 또 codegen을
+            # 고르게 두면 왕복 루프가 생긴다, #194) 밖 선택이면 done
+            allowed_single = allowed | ({"codegen"} - attempted)
             if choice != "done" and choice not in allowed_single:
                 choice, reason = "done", f"유효하지 않은 선택({choice}) → 종료"
 
@@ -181,6 +183,19 @@ def _substantive_produced_output(state: EDAState) -> bool:
     attempted = {e["choice"] for e in state.get("controller_log", [])
                  if e.get("choice") in _SUBSTANTIVE}
     return any(not _is_empty_result(state.get(_RESULT_FIELD[n])) for n in attempted)
+
+
+def _feasible_tools(state: EDAState) -> list[dict]:
+    """전제조건 충족 + 아직 안 돌린 분석 카드만 추린다 (결정론, LLM 0).
+
+    codegen이 도메인 밖으로 거부됐을 때, route_after_codegen이 이걸로 '아직 안 써본
+    진짜 분석 도구가 남았는지' 판단해 planner로 되돌릴지 종료할지 정한다(#194).
+    """
+    ctx = get_context()
+    shape = _data_shape(ctx)
+    attempted = {e["choice"] for e in state.get("controller_log", [])
+                 if e.get("choice") and e["choice"] != "done"}
+    return [t for t in ANALYSIS_TOOLS if t["precond"](shape) and t["name"] not in attempted]
 
 
 def route_after_planner(state: EDAState):
