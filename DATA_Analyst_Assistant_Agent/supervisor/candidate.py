@@ -8,6 +8,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     build_result_validation_context,
     invoke_supervisor_decision,
 )
+from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import (
+    emit_node_lifecycle_event,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import SEMANTIC_VALIDATION_ADVISORY_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -16,9 +19,13 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     StepSummary,
     SupervisorState,
     PendingApproval,
+    begin_or_retry_agent_node,
+    complete_active_node,
+    fail_active_node,
     normalize_supervisor_state,
     promote_pending_result,
     reject_pending_result,
+    wait_active_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
     InvalidAnalysisReviewRequest,
@@ -270,6 +277,7 @@ def commit_candidate(
     approval_granted: bool = False,
 ) -> SupervisorState:
     """검증 결과를 멱등하게 기록하고 후보를 승격하거나 거절한다."""
+    source_schema_version = int(state.get("state_schema_version", 0) or 0)
     normalized = normalize_supervisor_state(state)
     pending = normalized.get("pending_result")
     validation_payload = normalized.get("pending_validation")
@@ -352,6 +360,36 @@ def commit_candidate(
             *limitation_messages,
         )
 
+    active_node_payload = working.get("active_node")
+    if (
+        approval_granted
+        and isinstance(active_node_payload, dict)
+        and active_node_payload.get("status") == "waiting"
+    ):
+        working, resumed_node, resumed_event_type = begin_or_retry_agent_node(
+            working,
+            result.agent,
+        )
+        pending_approval = working.get("pending_approval")
+        approval_id = (
+            str(pending_approval.get("approval_id") or "")
+            if isinstance(pending_approval, dict)
+            else ""
+        )
+        emit_node_lifecycle_event(
+            backend_adapter,
+            working,
+            resumed_event_type,
+            resumed_node,
+            f"{result.agent} 작업을 재개했습니다.",
+            action=_ACTION_BY_AGENT[result.agent],
+            approval_id=approval_id or None,
+            metadata={
+                "candidate_id": record.candidate_id,
+                "validation_id": record.validation_id,
+            },
+        )
+
     if disposition == "await_approval" and not approval_granted:
         review_request = None
         if result.agent == "analysis_agent" and result.approval.approval_type == "analysis.review":
@@ -396,7 +434,7 @@ def commit_candidate(
                 else {"approved": "boolean"}
             ),
         ).model_dump(mode="json")
-        return {
+        approval_state: SupervisorState = {
             **working,
             "pending_approval": approval,
             "terminal_state": (
@@ -407,6 +445,35 @@ def commit_candidate(
             "next_action": "collect_analysis_review" if is_structured_review else "finalize",
             "final_answer": "" if is_structured_review else approval["reason"],
         }
+        if isinstance(approval_state.get("active_node"), dict):
+            waiting_state, waiting_node, waiting_event_type = wait_active_node(
+                approval_state,
+                agent_name=result.agent,
+                reason=approval["reason"],
+            )
+            emit_node_lifecycle_event(
+                backend_adapter,
+                waiting_state,
+                waiting_event_type,
+                waiting_node,
+                approval["reason"],
+                action=_ACTION_BY_AGENT[result.agent],
+                approval_id=approval["approval_id"],
+                metadata={
+                    "candidate_id": record.candidate_id,
+                    "validation_id": record.validation_id,
+                    "approval_type": approval["approval_type"],
+                },
+            )
+            return waiting_state
+
+        if source_schema_version >= 6:
+            return _failure(
+                approval_state,
+                f"{result.agent} 결과를 대기 처리할 active_node가 없습니다.",
+            )
+
+        return approval_state
 
     if disposition == "recover":
         return _commit_semantic_recovery(
@@ -458,6 +525,35 @@ def commit_candidate(
                     "disposition": disposition,
                 },
             )
+
+        if disposition == "reject" and isinstance(rejected.get("active_node"), dict):
+            failed_state, failed_node, failure_event_type = fail_active_node(
+                rejected,
+                agent_name=result.agent,
+                reason=record.outcome.reason,
+                reason_code=record.outcome.reason_code,
+            )
+            emit_node_lifecycle_event(
+                backend_adapter,
+                failed_state,
+                failure_event_type,
+                failed_node,
+                record.outcome.reason,
+                action=_ACTION_BY_AGENT[result.agent],
+                metadata={
+                    "candidate_id": record.candidate_id,
+                    "validation_id": record.validation_id,
+                    "disposition": disposition,
+                },
+            )
+            return failed_state
+
+        if disposition == "reject" and source_schema_version >= 6:
+            return _failure(
+                rejected,
+                f"{result.agent} 결과를 실패 처리할 active_node가 없습니다.",
+            )
+
         return rejected
 
     if disposition not in {"accept", "accept_with_limitations", "await_approval"}:
@@ -477,39 +573,54 @@ def commit_candidate(
     promoted["next_action"] = next_action
     promoted["current_step"] = "commit_candidate"
     summaries = list(promoted.get("step_summaries", []))
-    if not any(
-        item.get("agent") == result.agent
-        and item.get("action") == _ACTION_BY_AGENT[result.agent]
-        and item.get("summary") == result.summary
-        and item.get("artifact_ids") == build_step_summary(
-            result, _ACTION_BY_AGENT[result.agent], next_action
-        ).artifact_ids
-        for item in summaries
-    ):
-        summaries.append(
-            build_step_summary(
-                result,
-                _ACTION_BY_AGENT[result.agent],
-                next_action,
-            ).model_dump(mode="json")
-        )
+    step_summary = build_step_summary(
+        result,
+        _ACTION_BY_AGENT[result.agent],
+        next_action,
+    )
+    summary_payload = step_summary.model_dump(mode="json")
+    if summary_payload not in summaries:
+        summaries.append(summary_payload)
     promoted["step_summaries"] = summaries
-    if not already_committed:
+    if not already_committed or approval_granted:
         _emit_event(
             backend_adapter,
             working,
             "evidence.promoted",
             f"{result.agent} 후보 근거를 승격했습니다.",
-            artifact_ids=build_step_summary(
-                result,
-                _ACTION_BY_AGENT[result.agent],
-                next_action,
-            ).artifact_ids,
+            artifact_ids=step_summary.artifact_ids,
             metadata={
                 "candidate_id": record.candidate_id,
                 "validation_id": record.validation_id,
             },
         )
+
+    if isinstance(promoted.get("active_node"), dict):
+        completed_state, completed_node, completion_event_type = complete_active_node(
+            promoted,
+            agent_name=result.agent,
+            step_summary=step_summary,
+        )
+        emit_node_lifecycle_event(
+            backend_adapter,
+            completed_state,
+            completion_event_type,
+            completed_node,
+            f"{result.agent} 작업을 완료했습니다.",
+            action=_ACTION_BY_AGENT[result.agent],
+            metadata={
+                "candidate_id": record.candidate_id,
+                "validation_id": record.validation_id,
+            },
+        )
+        return completed_state
+
+    if source_schema_version >= 6:
+        return _failure(
+            promoted,
+            f"{result.agent} 결과를 완료할 active_node가 없습니다.",
+        )
+
     return promoted
 
 
