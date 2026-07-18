@@ -49,6 +49,14 @@ class EDAState(TypedDict, total=False):
     time_result: str
     clustering_result: Dict[str, Any]
 
+    # 각 노드가 원문과 별도로 뽑은 짧은 핵심 사실 — insight 입력용(원문 대체 아니라 병행, #194 후속)
+    inspect_facts: List[str]
+    quality_facts: List[str]
+    distribution_facts: List[str]
+    comparison_facts: List[str]
+    relationship_facts: List[str]
+    time_facts: List[str]
+
     # 컬럼 의미 분류 (LLM이 로드 직후 판단)
     time_columns: List[str]    # 시간/날짜 컬럼
     count_column: str          # 표본 수/볼륨 컬럼 (없으면 "")

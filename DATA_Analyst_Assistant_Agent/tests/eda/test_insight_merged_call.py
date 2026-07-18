@@ -103,3 +103,43 @@ def test_missing_markers_keep_full_prose_and_empty_structured_fields(monkeypatch
 
     assert out["insight_result"] == "마커 없는 순수 서술 텍스트"
     assert out["summary_facts"] == []
+
+
+def test_all_results_uses_facts_not_full_prose(monkeypatch):
+    # #194 후속 — insight 입력은 분석노드 원문 대신 facts만 받아야 한다.
+    reply = _reply_with_markers("[]")
+    fake = _FakeLLM(reply)
+    monkeypatch.setattr(insight_mod, "get_llm", lambda: fake)
+
+    long_prose = "매우 긴 원문 서술 " * 50
+    state = _state(quality_result=long_prose, quality_facts=["짧은 핵심 사실 하나."])
+
+    insight_mod.insight_node(state)
+
+    prompt = fake.prompts[0]
+    assert "짧은 핵심 사실 하나." in prompt
+    assert long_prose not in prompt
+
+
+def test_all_results_falls_back_to_full_result_when_facts_absent(monkeypatch):
+    # 노드가 facts 없이(미실행 등) 원문만 남긴 경우엔 원문으로 폴백해 정보 누락을 막는다.
+    reply = _reply_with_markers("[]")
+    fake = _FakeLLM(reply)
+    monkeypatch.setattr(insight_mod, "get_llm", lambda: fake)
+
+    state = _state(distribution_result="분포 노드 원문", distribution_facts=[])
+
+    insight_mod.insight_node(state)
+
+    assert "분포 노드 원문" in fake.prompts[0]
+
+
+def test_clustering_not_duplicated_in_all_results(monkeypatch):
+    # statistical_metadata.clustering에 이미 있으므로 all_results에서 별도 라벨로 반복하지 않는다.
+    reply = _reply_with_markers("[]")
+    fake = _FakeLLM(reply)
+    monkeypatch.setattr(insight_mod, "get_llm", lambda: fake)
+
+    insight_mod.insight_node(_state())
+
+    assert "[클러스터링]" not in fake.prompts[0]
