@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -12,12 +13,22 @@ def normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(payload)
     notes: list[str] = []
 
+    for field in ("findings", "limitations", "method_notes", "interpretation"):
+        normalized[field] = _normalize_string_list(
+            normalized.get(field),
+            f"result.{field}",
+            notes,
+        )
     normalized["evidence_tables"] = _normalize_evidence_tables(
         normalized.get("evidence_tables"),
         notes,
     )
     normalized["hypothesis_tests"] = _normalize_hypothesis_tests(
         normalized.get("hypothesis_tests"),
+        notes,
+    )
+    normalized["method_decision"] = _normalize_method_decision(
+        normalized.get("method_decision"),
         notes,
     )
     _extend_method_notes(normalized, notes)
@@ -127,27 +138,128 @@ def _normalize_hypothesis_tests(value: Any, notes: list[str]) -> list[dict[str, 
             continue
 
         test = dict(item)
-        n = test.get("n")
-        if isinstance(n, float):
-            if n.is_integer():
-                test["n"] = int(n)
-                notes.append(f"Normalized hypothesis_tests[{index}].n from integer-valued float.")
-            else:
-                test["n"] = None
-                notes.append(
-                    f"Cleared hypothesis_tests[{index}].n because sample size was a non-integer float."
-                )
-        caveats = test.get("caveats")
-        if isinstance(caveats, str):
-            test["caveats"] = [caveats]
-            notes.append(f"Normalized hypothesis_tests[{index}].caveats from string to list.")
-        elif isinstance(caveats, list):
-            test["caveats"] = [str(caveat) for caveat in caveats]
-        elif caveats is not None:
-            test["caveats"] = []
-            notes.append(f"Reset hypothesis_tests[{index}].caveats because it was not a list.")
+        prefix = f"hypothesis_tests[{index}]"
+        test["hypothesis"] = _text_or_default(
+            test.get("hypothesis"),
+            "Untitled hypothesis",
+            f"{prefix}.hypothesis",
+            notes,
+        )
+        test["test_name"] = _text_or_default(
+            test.get("test_name"),
+            "unspecified test",
+            f"{prefix}.test_name",
+            notes,
+        )
+        for field in ("null_hypothesis", "alternative_hypothesis"):
+            if test.get(field) is not None:
+                test[field] = str(test[field])
+        for field in ("statistic", "p_value", "effect_size"):
+            test[field] = _normalize_optional_float(test.get(field), f"{prefix}.{field}", notes)
+        test["n"] = _normalize_sample_size(test.get("n"), f"{prefix}.n", notes)
+        test["decision"] = _normalize_decision(test.get("decision"), f"{prefix}.decision", notes)
+        test["caveats"] = _normalize_string_list(test.get("caveats"), f"{prefix}.caveats", notes)
         tests.append(test)
     return tests
+
+
+def _normalize_method_decision(value: Any, notes: list[str]) -> dict[str, Any] | Any:
+    if value is None or not isinstance(value, dict):
+        return value
+
+    decision = dict(value)
+    for field in ("selected_method", "rationale"):
+        if decision.get(field) is not None:
+            decision[field] = str(decision[field])
+    for field in ("assumptions_checked", "fallbacks_considered"):
+        decision[field] = _normalize_string_list(
+            decision.get(field),
+            f"method_decision.{field}",
+            notes,
+        )
+    return decision
+
+
+def _normalize_string_list(value: Any, field: str, notes: list[str]) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if not value.strip():
+            return []
+        notes.append(f"Normalized {field} from string to list.")
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    notes.append(f"Reset {field} because it was not a list.")
+    return []
+
+
+def _text_or_default(value: Any, default: str, field: str, notes: list[str]) -> str:
+    text = str(value or "").strip()
+    if text:
+        return text
+    notes.append(f"Filled missing {field}.")
+    return default
+
+
+def _normalize_optional_float(value: Any, field: str, notes: list[str]) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        notes.append(f"Cleared {field} because it was not numeric.")
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(value))
+        if match:
+            notes.append(f"Parsed numeric value from {field}.")
+            return float(match.group(0))
+        notes.append(f"Cleared {field} because it was not numeric.")
+        return None
+
+
+def _normalize_sample_size(value: Any, field: str, notes: list[str]) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        notes.append(f"Cleared {field} because sample size was not numeric.")
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        notes.append(f"Cleared {field} because sample size was not numeric.")
+        return None
+    if numeric.is_integer():
+        if isinstance(value, float):
+            notes.append(f"Normalized {field} from integer-valued float.")
+        return int(numeric)
+    notes.append(f"Cleared {field} because sample size was a non-integer float.")
+    return None
+
+
+def _normalize_decision(value: Any, field: str, notes: list[str]) -> str:
+    normalized = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "supported": "supported",
+        "support": "supported",
+        "accepted": "supported",
+        "accept": "supported",
+        "not_supported": "not_supported",
+        "unsupported": "not_supported",
+        "rejected": "not_supported",
+        "reject": "not_supported",
+        "inconclusive": "inconclusive",
+        "not_conclusive": "inconclusive",
+        "uncertain": "inconclusive",
+    }
+    decision = aliases.get(normalized)
+    if decision is None:
+        notes.append(f"Normalized {field} to inconclusive because it was not recognized.")
+        return "inconclusive"
+    if decision != value:
+        notes.append(f"Normalized {field} to {decision}.")
+    return decision
 
 
 def _columns_from_rows(rows: list[dict[str, Any]]) -> list[str]:
