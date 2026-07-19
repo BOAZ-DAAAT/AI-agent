@@ -72,6 +72,27 @@ def hypothesis_node(state: EDAState) -> dict:
     from DATA_Analyst_Assistant_Agent.agents.eda.lib.hypothesis_screening import screen_hypotheses
     hypotheses, hypothesis_signals = screen_hypotheses(hypotheses, state.get("statistical_metadata", {}) or {})
 
+    # 교정이 있었으면 final_summary·primary_hypothesis도 같이 고친다(LLM 재호출 없음, 결정론).
+    # hypotheses 텍스트는 위에서 고쳐지는데 final_summary는 라인 58에서 이미 뽑아둔 교정 전
+    # 값이라, 손 안 대면 "불가능한 검정을 실행하라"는 문장이 그대로 analysis_agent에게
+    # 전달된다(run-019f7437 실사례 — Mann-Whitney U 검정을 그룹당 1행 마트에 추천).
+    if _feas_fixes:
+        fix_notes = "; ".join(
+            f"'{fx.get('resolved') or fx.get('feature')}' 기준 {fx.get('method')}는 "
+            "그룹당 표본 부족으로 현재 데이터로는 실행 불가(원본 행 데이터 필요)"
+            for fx in _feas_fixes
+        )
+        final_summary = f"{final_summary} [주의: {fix_notes}]"
+        primary_feature = str(primary_hypothesis.get("feature") or "")
+        if primary_feature and any(
+            primary_feature in {fx.get("feature"), fx.get("resolved")} for fx in _feas_fixes
+        ):
+            primary_hypothesis = {
+                **primary_hypothesis,
+                "feasible": False,
+                "note": "그룹당 표본 부족으로 현재 데이터로는 실행 불가 — 원본 행 데이터 필요",
+            }
+
     return {
         "hypotheses": hypotheses,
         "hypothesis_signals": hypothesis_signals,

@@ -15,15 +15,27 @@ FINAL_SUMMARY_MARKER = "===FINAL_SUMMARY==="
 
 
 _TYPE_GUIDE_BLOCK = """
-[가설 유형 판별 — 먼저 target 성격으로 유형을 정하고, 그 유형에 맞는 검증방법만 써라]
-아래 표로 target 성격 → 유형 → 검증방법을 정한다. (괄호는 EDA 근거)
-- 연속형 수치를 예측      → 회귀     → 단순/다중 선형회귀(또는 RandomForestRegressor)  (근거: correlation_pairs, distribution의 정규성·왜도, outliers)
-- 범주/이진을 예측        → 분류     → 로지스틱 회귀·의사결정나무(Accuracy·AUC)         (근거: group_comparison의 범주별 비율, 클래스 불균형) ※주의: target 파생 필요(연속→이진화)가 흔함
-- 두 변수 관계 유무·강도만 → 관계추론 → 피어슨/스피어만 상관검정(예측·계수 추정 아님)    (근거: correlation_pairs)
-- 집단 간 평균·분포 비교   → 그룹차이 → 일원배치 ANOVA(2집단이면 t검정)+사후 Tukey      (근거: group_comparison의 top3/bottom3, group_std)
-- 레이블 없는 구조 발견    → 군집     → K-means(+silhouette로 K 선택)                   (근거: clustering의 n_clusters·silhouette·centroids)
-- 시간축 수치 추세·계절성  → 시계열   → 추세분해·자기상관(예측은 ARIMA·Prophet)         (근거: time_result의 추세·시즌성)
-각 가설의 '유형:'에는 위 6가지(회귀/분류/관계추론/그룹차이/군집/시계열) 중 하나만 적고, '검증방법:'은 그 유형에 해당하는 방법만 써라.
+[가설 유형 판별 — 먼저 target/질문 성격으로 유형을 정하고, 그 유형에 맞는 검증방법만 써라]
+아래 표로 target·질문 성격 → 유형 → 검증방법을 정한다. (괄호는 EDA 근거)
+이 가설은 참고용 제안이다 — 실제 실행은 다음 분석 에이전트가 데이터를 다시 보고 방법을
+스스로 조정할 수 있으니, 여기서는 데이터가 완벽히 뒷받침하는지 과도하게 걱정하지 말고
+질문에 맞는 유형이면 폭넓게 제안하라(뒷단이 최종 검증·조정을 담당한다).
+- 연속형 수치를 예측         → 회귀      → 단순/다중 선형회귀(또는 RandomForestRegressor)   (근거: correlation_pairs, distribution의 정규성·왜도, outliers)
+- 범주/이진을 예측           → 분류      → 로지스틱 회귀·의사결정나무(Accuracy·AUC)          (근거: group_comparison의 범주별 비율, 클래스 불균형) ※주의: target 파생 필요(연속→이진화)가 흔함
+- 두 변수 관계 유무·강도만    → 관계추론  → 피어슨/스피어만 상관검정(예측·계수 추정 아님)     (근거: correlation_pairs)
+- 집단 간 평균·분포 비교      → 그룹차이  → 일원배치 ANOVA(2집단이면 t검정)+사후 Tukey       (근거: group_comparison의 top3/bottom3, group_std)
+- 레이블 없는 구조 발견       → 군집      → K-means(+silhouette로 K 선택)                    (근거: clustering의 n_clusters·silhouette·centroids)
+- 시간축 수치 추세·계절성     → 시계열    → 추세분해·자기상관(예측은 ARIMA·Prophet)          (근거: time_result의 추세·시즌성)
+- 고객 반복구매·구매금액 이력 → 생애가치  → 확률모델(BG/NBD+Gamma-Gamma) 기반 LTV 추정        (근거: 고객ID류 컬럼, 구매시점 컬럼, 결제금액 컬럼)
+- 특정 사건까지의 기간(이탈 등)→ 생존분석 → Kaplan-Meier 생존곡선·Cox비례위험              (근거: 기간(duration) 컬럼, 사건관측여부(0/1) 컬럼)
+- 위치 기반 밀집·이상 패턴    → 지역분석  → 공간자기상관(Moran's I 등)                       (근거: 위도·경도 컬럼)
+- 채널별 마케팅비와 성과 관계 → 마케팅믹스 → 베이지안 MMM(adstock·saturation)               (근거: 날짜, 채널별 지출 컬럼들, 매출/전환 컬럼)
+- 예산 제약 하 항목별 최적배분 → 자원배분  → 선형계획법 최적화                              (근거: 항목·가치·비용 컬럼 + 질문에 명시된 예산제약)
+- 가입/시작 시점 집단의 추이  → 코호트    → 코호트별 유지율·재구매율 추이                    (근거: 가입/시작 시점 컬럼 + 반복 관측 시간축)
+- 단계형 전환 과정의 이탈지점 → 퍼널      → 단계별 전환율·이탈률                            (근거: 프로세스 단계를 나타내는 컬럼들)
+각 가설의 '유형:'에는 위 13가지(회귀/분류/관계추론/그룹차이/군집/시계열/생애가치/생존분석/
+지역분석/마케팅믹스/자원배분/코호트/퍼널) 중 하나만 적고, '검증방법:'은 그 유형에 해당하는
+방법만 써라.
 """
 
 
