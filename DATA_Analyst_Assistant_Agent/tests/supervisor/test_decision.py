@@ -36,7 +36,11 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     SEMANTIC_VALIDATION_ADVISORY_PROMPT,
     STEP_SUMMARY_DECISION_PROMPT,
 )
-from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, empty_supervisor_state
+from DATA_Analyst_Assistant_Agent.supervisor.state import (
+    AgentCompactResult,
+    empty_supervisor_state,
+    stage_candidate_result,
+)
 
 
 @dataclass
@@ -529,9 +533,10 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
     assert "requested_next_action" in contexts[3]
     assert "agent_capabilities" in contexts[3]
     assert "last_agent_result" in contexts[4]
+    assert "pending_result" in contexts[4]
     assert "query" in contexts[4]
     assert "agent_capabilities" in contexts[4]
-    assert "recent_semantic_validation_results" in contexts[4]
+    assert "recent_semantic_validation_results" not in contexts[4]
     assert "latest_validation_result" in contexts[5]
     assert "latest_semantic_validation_result" in contexts[5]
     assert "terminal_state" in contexts[6]
@@ -549,6 +554,77 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "analysis_agent",
     ]
     assert all(len(json.dumps(context, ensure_ascii=False)) <= 12500 for context in contexts)
+
+
+def test_result_validation_context_is_scoped_to_current_candidate() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="analyze sales",
+        datasource_id=None,
+    )
+    old_record = {
+        "candidate_id": "candidate_old",
+        "validation_id": "validation_old",
+        "agent": "eda_agent",
+        "outcome": {
+            "disposition": "recover",
+            "reason": "stale missing evidence reason",
+            "reason_code": "semantic_validation_failed",
+            "retry_target": None,
+            "terminal_state": "running",
+        },
+        "checks": [
+            {"name": "result", "passed": True, "findings": [], "details": {}},
+            {
+                "name": "semantic",
+                "passed": False,
+                "findings": [],
+                "details": {
+                    "semantic_valid": False,
+                    "reason": "stale missing evidence reason",
+                    "missing_evidence": ["old artifact"],
+                },
+            },
+        ],
+    }
+    result = AgentCompactResult(
+        agent="eda_agent",
+        status="success",
+        summary="current candidate summary",
+        artifact_ids=["eda_current"],
+    )
+    state = stage_candidate_result(state, result, {})
+    state["last_agent_result"] = result.model_dump(mode="json")
+    pending = state["pending_result"]
+    state["validation_history"] = [
+        old_record,
+        {
+            "candidate_id": pending["candidate_id"],
+            "validation_id": pending["validation_id"],
+            "agent": "eda_agent",
+            "outcome": {
+                "disposition": "accept",
+                "reason": "current candidate hard checks passed",
+                "reason_code": "none",
+                "retry_target": None,
+                "terminal_state": "running",
+            },
+            "checks": [
+                {"name": "result", "passed": True, "findings": [], "details": {}},
+            ],
+        },
+    ]
+
+    context = build_result_validation_context(state)
+
+    assert "recent_semantic_validation_results" not in context
+    assert context["pending_result"]["candidate_id"] == pending["candidate_id"]
+    assert len(context["validation_results"]) == 1
+    assert context["validation_results"][0]["agent"] == "eda_agent"
+    assert context["validation_results"][0]["decision"] == "accept"
+    assert context["validation_results"][0]["reason"] == "current candidate hard checks passed"
+    assert "stale missing evidence reason" not in json.dumps(context, ensure_ascii=False)
 
 
 def test_next_action_context_preserves_capability_role_boundary_text() -> None:

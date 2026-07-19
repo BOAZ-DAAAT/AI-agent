@@ -238,17 +238,19 @@ def build_execution_guard_context(state: SupervisorState) -> dict[str, Any]:
 
 
 def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
-    validation_results, _, semantic_results = _validation_context_views(state)
+    validation_results, _, _ = _validation_context_views(state)
+    validation_results = _current_candidate_validation_results(state, validation_results)
+    pending = state.get("pending_result") if isinstance(state.get("pending_result"), dict) else {}
     return _bounded_context(
         {
             "query": state.get("clarified_query") or state.get("latest_user_query", ""),
             "latest_user_query": state.get("latest_user_query", ""),
             "clarified_query": state.get("clarified_query", ""),
             "last_agent_result": state.get("last_agent_result") or {},
+            "pending_result": pending,
             "analysis_plan": state.get("analysis_plan") or {},
             "artifacts": artifact_ids_by_agent(state),
-            "validation_results": validation_results[-3:],
-            "recent_semantic_validation_results": semantic_results[-3:],
+            "validation_results": validation_results,
             "step_summaries": list(state.get("step_summaries", []))[-3:],
             "completed_agents": list(state.get("completed_agents", [])),
             "failed_agents": list(state.get("failed_agents", [])),
@@ -262,6 +264,25 @@ def build_result_validation_context(state: SupervisorState) -> dict[str, Any]:
         max_items=8,
         depth=4,
     )
+
+
+def _current_candidate_validation_results(
+    state: SupervisorState,
+    validation_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    pending = state.get("pending_result")
+    if not isinstance(pending, dict):
+        return validation_results[-1:]
+
+    candidate_id = str(pending.get("candidate_id") or "")
+    validation_id = str(pending.get("validation_id") or "")
+    current = [
+        item
+        for item in validation_results
+        if str(item.get("candidate_id") or "") == candidate_id
+        and str(item.get("validation_id") or "") == validation_id
+    ]
+    return current
 
 
 def build_step_summary_context(state: SupervisorState) -> dict[str, Any]:

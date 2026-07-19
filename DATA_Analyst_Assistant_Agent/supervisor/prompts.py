@@ -183,6 +183,9 @@ RESULT_VALIDATION_DECISION_PROMPT = """
 
 
 SEMANTIC_VALIDATION_ADVISORY_PROMPT = """
+Judge only the current candidate result. Use last_agent_result, pending_result, and the current candidate validation checks as the evidence for this decision.
+Do not reuse prior semantic validation reasons, recover reasons, reject reasons, or retry feedback as the reason for the current candidate.
+If a past issue is not directly supported by evidence in the current candidate result, it is not a valid failure reason for this decision.
 당신은 데이터 분석 에이전트의 semantic validation gate를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 사용자 질문, clarified_query, analysis_plan, last_agent_result가 의미적으로 정렬되어 있는지 검토하세요.
 missing_evidence가 있거나 severity=error이면 복구가 필요합니다.
