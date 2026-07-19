@@ -93,6 +93,7 @@ class EDAAgent:
             "analysis_plan": eda_result.get("analysis_plan", {}),
             "insight_result": eda_result.get("insight_result", ""),
             "hypotheses": eda_result.get("hypotheses", ""),
+            "primary_hypothesis": eda_result.get("primary_hypothesis", {}),
             "final_summary": eda_result.get("final_summary", ""),
             "analysis_target": eda_result.get("analysis_target", ""),
             "data_level": eda_result.get("data_level", {}),
