@@ -152,9 +152,10 @@ def deterministic_precheck(
             + ", ".join(coverage.missing_requirements)
         )
     elif coverage.coverage_status == "partial" and intent.is_time_based:
-        issues.append(
-            "time-based analysis only partially covered requested signals: "
-            + ", ".join(coverage.missing_requirements)
+        _append_method_note(
+            result,
+            "Time-based analysis only partially covered requested signals: "
+            + ", ".join(coverage.missing_requirements),
         )
 
     if not issues:
@@ -199,3 +200,15 @@ def _review_request_issues(value: object) -> list[str]:
     if all(option.label.strip().replace(".", "").isdigit() for option in request.options):
         issues.append("review_request cannot be an arbitrary list of numeric thresholds")
     return issues
+
+
+def _append_method_note(result: dict[str, Any], note: str) -> None:
+    normalized = str(note or "").strip()
+    if not normalized:
+        return
+    notes = result.get("method_notes")
+    if not isinstance(notes, list):
+        notes = []
+    if normalized not in [str(item) for item in notes]:
+        notes.append(normalized)
+    result["method_notes"] = notes

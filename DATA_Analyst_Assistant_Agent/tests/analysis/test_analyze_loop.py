@@ -220,6 +220,71 @@ def test_deterministic_precheck_reflects_before_critic() -> None:
     assert outcome.result["statistics"]["sum_revenue"] == 60
 
 
+def test_partial_time_coverage_becomes_method_note_not_precheck_failure() -> None:
+    intent = AnalysisIntent(
+        objective="monthly revenue by category",
+        metric_hints=["revenue"],
+        dimension_hints=["category"],
+        time_column="order_month",
+        is_time_based=True,
+        time_grain="M",
+    )
+    context = AnalysisContext(
+        user_question="monthly revenue by category",
+        goal="monthly revenue by category",
+        route_kind="comprehensive",
+        columns=["order_month", "category", "revenue"],
+    )
+    code = GeneratedAnalysisCode(
+        rationale="category revenue",
+        code=(
+            "by_category = df.groupby('category')['revenue'].sum()\n"
+            "result = {'summary': 'category revenue', 'findings': ['category revenue'], "
+            "'statistics': {'category_revenue': by_category.to_dict()}, "
+            "'method_decision': {'selected_method': 'grouped sum', 'rationale': 'fixture'}, "
+            "'limitations': []}\n"
+        ),
+    )
+    result = {
+        "summary": "category revenue",
+        "findings": ["category revenue"],
+        "statistics": {"category_revenue": {"A": 10}},
+        "method_decision": {"selected_method": "grouped sum", "rationale": "fixture"},
+        "limitations": [],
+    }
+
+    critique = critic_module.deterministic_precheck(intent, context, code, result)
+
+    assert critique is None
+    assert result["method_notes"] == [
+        "Time-based analysis only partially covered requested signals: time_column:order_month"
+    ]
+
+
+def test_missing_coverage_remains_precheck_failure() -> None:
+    intent = AnalysisIntent(objective="sum revenue", metric_hints=["revenue"])
+    context = AnalysisContext(
+        user_question="sum revenue",
+        goal="sum revenue",
+        route_kind="simple",
+        columns=["x", "revenue"],
+        metric_hint="revenue",
+    )
+    result = {
+        "summary": "sum x",
+        "findings": ["sum x"],
+        "statistics": {"sum_x": 6},
+        "method_decision": {"selected_method": "sum", "rationale": "fixture"},
+        "limitations": [],
+    }
+
+    critique = critic_module.deterministic_precheck(intent, context, _GOOD_CODE, result)
+
+    assert critique is not None
+    assert critique.verdict == "fail"
+    assert any("metric:revenue" in issue for issue in critique.method_issues)
+
+
 def test_numeric_only_review_options_are_rejected_before_critic() -> None:
     result = {
         "summary": "ok",
