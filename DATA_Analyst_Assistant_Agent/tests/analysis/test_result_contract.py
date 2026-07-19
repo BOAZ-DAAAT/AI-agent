@@ -40,6 +40,28 @@ def test_clear_non_integer_float_sample_size_without_rounding() -> None:
     )
 
 
+def test_normalize_hypothesis_caveats_string_to_list() -> None:
+    payload = {
+        "hypothesis_tests": [
+            {
+                "hypothesis": "seller averages differ",
+                "test_name": "spearman",
+                "caveats": "Aggregated seller averages can hide within-seller variance.",
+            }
+        ]
+    }
+
+    normalized = normalize_result_payload(payload)
+
+    assert normalized["hypothesis_tests"][0]["caveats"] == [
+        "Aggregated seller averages can hide within-seller variance."
+    ]
+    assert (
+        "Normalized hypothesis_tests[0].caveats from string to list."
+        in normalized["method_notes"]
+    )
+
+
 def test_recoverable_alias_is_not_fatal_but_broken_rows_are() -> None:
     assert fatal_result_contract_errors({"evidence_tables": [{"name": "summary", "rows": []}]}) == []
 

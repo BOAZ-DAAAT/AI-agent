@@ -137,6 +137,15 @@ def _normalize_hypothesis_tests(value: Any, notes: list[str]) -> list[dict[str, 
                 notes.append(
                     f"Cleared hypothesis_tests[{index}].n because sample size was a non-integer float."
                 )
+        caveats = test.get("caveats")
+        if isinstance(caveats, str):
+            test["caveats"] = [caveats]
+            notes.append(f"Normalized hypothesis_tests[{index}].caveats from string to list.")
+        elif isinstance(caveats, list):
+            test["caveats"] = [str(caveat) for caveat in caveats]
+        elif caveats is not None:
+            test["caveats"] = []
+            notes.append(f"Reset hypothesis_tests[{index}].caveats because it was not a list.")
         tests.append(test)
     return tests
 
