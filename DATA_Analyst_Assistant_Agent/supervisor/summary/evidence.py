@@ -1,8 +1,8 @@
 """노드 서머리용 증거 — 아티팩트를 읽어 근거 dict로 정규화한다(계산 없음, 발췌만).
 
-이번 단계는 artifact_ids 리스트의 첫 항목만 실질적으로 다룬다("한 노드 = 아티팩트 하나"
-단순화, evidence.py:read_node_evidence 시그니처는 나중에 "노드 하나가 여러 아티팩트를
-대표"하는 경우로 확장하기 위해 처음부터 리스트로 받는다 — 다중 병합 로직은 지금 안 만듦).
+EDA/분석/인사이트는 artifact_ids 중 다룰 줄 아는 kind를 가진 항목 하나를 찾아 읽는다
+("한 노드 = 아티팩트 하나" 단순화). SQL만 예외로 sql_plan+sql_result를 병합해서 읽는다
+(자세한 이유는 read_node_evidence 참고).
 """
 
 from __future__ import annotations
@@ -35,16 +35,43 @@ class NodeEvidence:
     charts: list[ChartRef] = field(default_factory=list)
 
 
+_KNOWN_KINDS = _SQL_KINDS | {"eda_summary", "analysis_result", "insight_payload"}
+
+
 def read_node_evidence(artifact_ids: list[str], runtime: AgentRuntime) -> NodeEvidence:
+    """artifact_ids 중 다룰 줄 아는 kind(위 _KNOWN_KINDS)를 가진 항목을 찾아 읽는다.
+
+    단순히 artifact_ids[0]을 쓰면 안 된다 — 예를 들어 insight는
+    [final_report, insight_payload, insight_chart...] 순으로 등록되므로(InsightGenerator.run
+    참고) 0번 인덱스는 final_report(마크다운 리포트, 이 함수가 처리 못 하는 kind)가 걸려
+    근거가 통째로 비어버린다(실사례로 확인됨).
+
+    SQL만 예외적으로 여러 아티팩트를 병합한다 — sql_agent는 보통 sql_result(CSV, 5행
+    미리보기)와 sql_plan(실행된 SQL·grain·근거)을 각각 따로 등록하는데, 실제로는 둘 다
+    있어야 "무슨 SQL을 실행해서 어떤 마트가 나왔는지"를 온전히 설명할 수 있다.
+    """
     if not artifact_ids:
         return NodeEvidence(source_kind="unknown")
 
-    artifact_id = artifact_ids[0]
-    record = runtime.adapter.get_artifact(artifact_id)
-    kind = str(record.metadata.get("kind") or record.type.value)
+    kinds: dict[str, str] = {}
+    for candidate_id in artifact_ids:
+        record = runtime.adapter.get_artifact(candidate_id)
+        kinds[candidate_id] = str(record.metadata.get("kind") or record.type.value)
 
-    if kind in _SQL_KINDS:
-        return _read_sql_evidence(artifact_id, kind, runtime)
+    sql_ids = [aid for aid in artifact_ids if kinds[aid] in _SQL_KINDS]
+    if sql_ids:
+        return _read_sql_evidence_merged(sql_ids, kinds, runtime)
+
+    for candidate_id in artifact_ids:
+        kind = kinds[candidate_id]
+        if kind in _KNOWN_KINDS:
+            return _dispatch_single_kind_evidence(candidate_id, kind, runtime)
+
+    # 아는 kind가 하나도 없으면(완전히 새로운 종류) 첫 항목 kind라도 보고한다.
+    return NodeEvidence(source_kind=kinds[artifact_ids[0]] or "unknown")
+
+
+def _dispatch_single_kind_evidence(artifact_id: str, kind: str, runtime: AgentRuntime) -> NodeEvidence:
     if kind == "eda_summary":
         return _read_eda_evidence(artifact_id, runtime)
     if kind == "analysis_result":
@@ -91,11 +118,43 @@ def _read_sql_evidence(artifact_id: str, kind: str, runtime: AgentRuntime) -> No
     return NodeEvidence(source_kind=kind, facts=facts, code_used="")
 
 
+def _read_sql_evidence_merged(sql_ids: list[str], kinds: dict[str, str], runtime: AgentRuntime) -> NodeEvidence:
+    """sql_plan(SQL 텍스트·grain·근거)과 sql_result(CSV 5행 미리보기)를 합친다.
+
+    한 아티팩트만으론 "무슨 SQL을 실행해서 어떤 마트가 나왔는지"를 다 설명 못 한다 —
+    sql_plan엔 실제 행 데이터가 없고 sql_result엔 SQL 텍스트가 없다.
+    """
+    plan_evidence: NodeEvidence | None = None
+    result_evidence: NodeEvidence | None = None
+    for aid in sql_ids:
+        kind = kinds[aid]
+        if kind == "sql_plan" and plan_evidence is None:
+            plan_evidence = _read_sql_evidence(aid, kind, runtime)
+        elif kind == "sql_result" and result_evidence is None:
+            result_evidence = _read_sql_evidence(aid, kind, runtime)
+        if plan_evidence is not None and result_evidence is not None:
+            break
+
+    facts: dict[str, Any] = {}
+    code_used = ""
+    source_kind = "sql_plan"
+    if plan_evidence is not None:
+        facts.update(plan_evidence.facts)
+        code_used = plan_evidence.code_used
+        source_kind = plan_evidence.source_kind
+    if result_evidence is not None:
+        facts.update(result_evidence.facts)
+        if plan_evidence is None:
+            source_kind = result_evidence.source_kind
+    return NodeEvidence(source_kind=source_kind, facts=facts, code_used=code_used)
+
+
 def _read_eda_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvidence:
     payload = read_json_artifact(runtime, artifact_id)
     facts = {
         "final_summary": payload.get("final_summary", ""),
         "hypotheses": payload.get("hypotheses", ""),
+        "primary_hypothesis": payload.get("primary_hypothesis", {}),
         "cautions": payload.get("cautions", []),
         "data_level": payload.get("data_level", {}),
         "statistical_metadata": payload.get("statistical_metadata", {}),   # Codex 리뷰: 빠져있었음
@@ -128,6 +187,8 @@ def _read_analysis_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvid
         "key_findings": payload.get("key_findings", []),
         "limitations": payload.get("limitations", []),
         "method_notes": payload.get("method_notes", []),
+        "method_decision": payload.get("method_decision") or {},   # selected_method/rationale/... (근거 그대로)
+        "hypothesis_tests": payload.get("hypothesis_tests", []),
     }
     code_used = str(payload.get("generated_code") or "")
     return NodeEvidence(source_kind="analysis_result", facts=facts, code_used=code_used)
@@ -135,11 +196,15 @@ def _read_analysis_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvid
 
 def _read_insight_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvidence:
     payload = read_json_artifact(runtime, artifact_id)
+    labels = payload.get("evidence_labels") or {}
+    sources = payload.get("evidence_sources") or []
     facts = {
         "answer": payload.get("answer", ""),
         "key_insights": payload.get("key_insights", []),
         "action_plan": payload.get("action_plan", []),
         "limitations": payload.get("limitations", []),
+        # 사람이 읽는 라벨로 변환해서 넘긴다(원본은 artifact_id라 LLM/화면에 그대로 노출하면 안 읽힘).
+        "evidence_labels": [str(labels.get(a, a)) for a in sources] if sources else list(labels.values()),
     }
     # insight ChartEntry는 caption이 아니라 title 필드에 설명이 있다(supervisor/insight/schemas.py).
     charts_raw = payload.get("charts") or []
