@@ -3,8 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from pydantic import ValidationError
+
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     AnalysisCodeError,
+    AnalysisGenerationError,
+    _extract_json_object,
     execute_generated_code,
     generate_analysis_code,
 )
@@ -16,6 +20,39 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     GeneratedAnalysisCode,
     ReviewRequest,
 )
+
+
+def _validation_error_for(text: str) -> ValidationError:
+    try:
+        GeneratedAnalysisCode.model_validate_json(text)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+class _RaisingStructuredModel:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def invoke(self, _messages: object) -> object:
+        raise self._exc
+
+
+class _RaisingModel:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def with_structured_output(self, _schema: object) -> _RaisingStructuredModel:
+        return _RaisingStructuredModel(self._exc)
+
+
+def _minimal_context() -> AnalysisContext:
+    return AnalysisContext(
+        user_question="analyze revenue",
+        goal="analyze revenue",
+        route_kind="simple",
+        columns=["amount"],
+    )
 
 
 def _frame() -> pd.DataFrame:
@@ -45,6 +82,62 @@ def test_disallowed_import_is_blocked() -> None:
     with pytest.raises(AnalysisCodeError) as excinfo:
         execute_generated_code(code, _frame())
     assert "not allowed" in str(excinfo.value)
+
+
+_GOOD_JSON = '{"rationale":"r","imports":"import pandas as pd","code":"result = {}"}'
+
+
+def test_extract_json_object_strips_markdown_fence() -> None:
+    fenced = f"```json\n{_GOOD_JSON}\n```"
+    assert _extract_json_object(fenced) == _GOOD_JSON
+
+
+def test_extract_json_object_strips_trailing_prose() -> None:
+    trailed = f"{_GOOD_JSON}\nHope this helps!"
+    assert _extract_json_object(trailed) == _GOOD_JSON
+
+
+def test_extract_json_object_leaves_clean_json_untouched() -> None:
+    assert _extract_json_object(_GOOD_JSON) == _GOOD_JSON
+
+
+def test_generate_analysis_code_recovers_from_fenced_response() -> None:
+    # run 019f7a58: openai/gpt-5.4-mini (via OpenRouter) returned a JSON
+    # object wrapped in noise, which crashed structured-output parsing
+    # outright. A response that is otherwise valid should not require a
+    # full extra model round-trip to fix.
+    exc = _validation_error_for(f"```json\n{_GOOD_JSON}\n```")
+    model = _RaisingModel(exc)
+
+    code = generate_analysis_code(
+        AnalysisIntent(objective="analyze revenue"), _minimal_context(), model=model
+    )
+
+    assert code.rationale == "r"
+    assert code.code == "result = {}"
+
+
+def test_generate_analysis_code_raises_generation_error_when_unrecoverable() -> None:
+    exc = _validation_error_for("this is not json at all")
+    model = _RaisingModel(exc)
+
+    with pytest.raises(AnalysisGenerationError):
+        generate_analysis_code(
+            AnalysisIntent(objective="analyze revenue"), _minimal_context(), model=model
+        )
+
+
+def test_timestamp_strftime_does_not_trip_the_import_guard() -> None:
+    # pandas Timestamp.strftime() imports the stdlib `time` module internally
+    # even when the generated code never writes `import time` itself
+    # (run 019f7970: every retry failed identically because of this).
+    body = (
+        "label = df['ts'].iloc[0].strftime('%Y-%m')\n"
+        "result = {'summary': label, 'findings': [label], 'statistics': {'n': 1}, 'limitations': []}\n"
+    )
+    frame = pd.DataFrame({"ts": pd.to_datetime(["2024-01-01", "2024-02-01"])})
+    out = execute_generated_code(_code(body), frame)
+    assert out["summary"] == "2024-01"
 
 
 def test_result_must_be_dict_with_required_keys() -> None:

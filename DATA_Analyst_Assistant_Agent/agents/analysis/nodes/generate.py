@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import builtins
 import json
+import re
 from typing import Any, Callable
 
 import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import ValidationError
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.prompts.domains import domain_framing
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
@@ -45,8 +47,10 @@ _PRIMITIVE_TOOLS: tuple[str, ...] = (
 
 # Import roots the sandbox permits. Anything else (os, sys, subprocess, ...) is
 # refused at import time.
+# "time" is included because pandas Timestamp.strftime() imports it internally
+# even when the generated code never writes `import time` itself.
 _ALLOWED_IMPORT_ROOTS = frozenset({
-    "pandas", "numpy", "math", "statistics", "datetime", "collections",
+    "pandas", "numpy", "math", "statistics", "datetime", "time", "collections",
     "itertools", "functools", "re", "json",
     "statsmodels", "scipy", "sklearn", "lifelines",
 })
@@ -69,7 +73,7 @@ GENERATE_SYSTEM_PROMPT = """You write one small, auditable Python analysis scrip
 Rules:
 - Operate on the pandas DataFrame named `df` (already loaded). `pd` and `np` are available.
 - You MAY import from: pandas, numpy, math, statistics, scipy, statsmodels,
-  sklearn, lifelines, datetime, collections, itertools, functools, re, json.
+  sklearn, lifelines, datetime, time, collections, itertools, functools, re, json.
   No other imports (no os/sys/file/network access).
 - For heavy specialized methods, call the provided primitives instead of
   reimplementing them: {primitives}. Each takes keyword column arguments.
@@ -251,6 +255,73 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
     return prompt
 
 
+class AnalysisGenerationError(RuntimeError):
+    """Raised when the code-generator model's structured output cannot be
+    parsed, even after stripping markdown fences/trailing noise."""
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _extract_json_object(text: str) -> str:
+    """Recover the JSON object from a response the model wrapped in markdown
+    fences or trailed with stray prose after the closing brace.
+
+    Mirrors validation_contract.py's `_normalized_sql()` for the SQL agent:
+    LLM structured output is not always byte-clean, so noise around a
+    genuinely valid object is tolerated before handing off to the schema
+    validator, instead of treating any formatting slip as a hard failure.
+    """
+    stripped = text.strip()
+    fence_match = _JSON_FENCE_RE.search(stripped)
+    if fence_match:
+        stripped = fence_match.group(1).strip()
+    start = stripped.find("{")
+    if start == -1:
+        return stripped
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(stripped)):
+        char = stripped[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+    return stripped[start:]
+
+
+def _recover_from_validation_error(exc: ValidationError) -> GeneratedAnalysisCode | None:
+    """Best-effort repair for a schema-shaped response the strict JSON parser
+    rejected. Avoids burning a full model round-trip for output that was
+    actually fine once the fence/trailing noise around it is stripped."""
+
+    for error in exc.errors():
+        raw = error.get("input")
+        if not isinstance(raw, str):
+            continue
+        cleaned = _extract_json_object(raw)
+        if cleaned == raw:
+            continue
+        try:
+            return GeneratedAnalysisCode.model_validate_json(cleaned)
+        except ValidationError:
+            continue
+    return None
+
+
 def generate_analysis_code(
     intent: AnalysisIntent,
     context: AnalysisContext,
@@ -269,10 +340,16 @@ def generate_analysis_code(
             "\nA previous attempt was rejected. Fix these issues and regenerate:\n"
             f"{feedback}\n"
         )
-    result = structured_model.invoke([
-        SystemMessage(content=system),
-        HumanMessage(content=human),
-    ])
+    messages = [SystemMessage(content=system), HumanMessage(content=human)]
+    try:
+        result = structured_model.invoke(messages)
+    except ValidationError as exc:
+        recovered = _recover_from_validation_error(exc)
+        if recovered is not None:
+            return recovered
+        raise AnalysisGenerationError(
+            f"Model response was not valid JSON and could not be repaired: {exc}"
+        ) from exc
     return result if isinstance(result, GeneratedAnalysisCode) else GeneratedAnalysisCode.model_validate(result)
 
 
