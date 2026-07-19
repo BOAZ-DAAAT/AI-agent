@@ -206,7 +206,7 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
     )
     context["agent_capabilities"] = _bounded_value(
         agent_capabilities_context(),
-        max_text=250,
+        max_text=130,
         max_items=8,
         depth=3,
     )

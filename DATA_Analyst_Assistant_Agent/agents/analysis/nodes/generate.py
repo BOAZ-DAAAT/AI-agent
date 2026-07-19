@@ -81,8 +81,7 @@ Rules:
   and are supported by the available columns/data. Include them in
   `hypothesis_tests` when tested.
 - When defining or evaluating a heuristic metric, proxy label, operational
-  threshold, or segment (for example churn-risk groups), treat it as a
-  hypothesis-driven analysis:
+  threshold, or segment, treat it as a hypothesis-driven analysis:
   - include `hypothesis_tests` in result, with items containing hypothesis,
     test_name, null_hypothesis, alternative_hypothesis, statistic, p_value,
     effect_size, n, decision (supported/inconclusive/not_supported), and caveats.
@@ -94,13 +93,21 @@ Rules:
     p-values alone.
   - if a threshold is central to the analysis, add sensitivity checks where
     feasible and store them in statistics.
+- Do not create `review_request` just because an operational definition or
+  threshold is needed. First compare defensible criteria with the data: observed
+  distribution, relationship to the outcome, sample size, sensitivity, and
+  limitations. Create `review_request` only when the definition or method choice
+  materially affects interpretation and user confirmation would improve analysis
+  quality.
 - Always include `method_decision` in result with selected_method, rationale,
   assumptions_checked, and fallbacks_considered. Choose a method automatically
   whenever the observed data and objective establish a defensible preference.
 - Create `review_request` only when at least two mutually exclusive analysis
   paths are each valid for this data and their different assumptions or
   interpretations would materially change the next analysis. Do not ask merely
-  because a parameter has multiple possible values.
+  because a parameter has multiple possible values. A review_request may ask for
+  confirmation of one recommended path, or present options when valid paths have
+  different interpretive tradeoffs; options must not be a bare list of numbers.
 - A `review_request` contains decision_type, question, proposal, rationale
   (list of strings), evidence, options, recommended_option_id, allow_free_text,
   free_text_prompt, impact_if_approved, and requires_followup_analysis. Each

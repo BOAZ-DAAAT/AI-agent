@@ -49,8 +49,13 @@ Return the AnalysisIntent schema. Rules:
 - time_column: the single best time column if the question is time-based, else null.
 - is_time_based: true only if answering requires ordering or aggregating over time.
 - Do NOT set time_grain or time_span_days; those are computed deterministically.
-- requires_human_review + review_reason: set when the request implies causal
-  interpretation, weak identification, or a materially ambiguous target.
+- requires_human_review + review_reason is not clarification. Set it when the
+  request is likely to require an analyst-chosen operational definition, proxy
+  label, heuristic segment, threshold, scoring rule, or other analysis convention
+  that could materially change interpretation. Do not ask the user before
+  analysis when the data can support candidate options; proceed with analysis
+  and let the generated result return review_request only after it has evidence
+  for an approval or a meaningful choice.
 - EDA candidate insights/hypotheses are exploratory hints only. Use them to
   clarify relevant focus when they match the user request; do not turn every
   candidate into required analysis work.

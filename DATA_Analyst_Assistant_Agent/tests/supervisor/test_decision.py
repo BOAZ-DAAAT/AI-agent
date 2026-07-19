@@ -638,10 +638,10 @@ def test_next_action_context_preserves_capability_role_boundary_text() -> None:
     context = build_next_action_context(state)
     capabilities = {item["agent"]: item for item in context["agent_capabilities"]}
 
-    assert "가설 후보" in capabilities["eda_agent"]["description"]
-    assert "분석 방향" in capabilities["eda_agent"]["when_to_use"]
-    assert "비즈니스 인사이트" in " ".join(capabilities["sql_agent"]["avoid_when"])
-    assert "통계 검정" in capabilities["analysis_agent"]["description"]
+    assert "관찰 가능한 신호" in capabilities["eda_agent"]["description"]
+    assert "분석 판단의 재료" in capabilities["eda_agent"]["when_to_use"]
+    assert "기준값" in " ".join(capabilities["sql_agent"]["avoid_when"])
+    assert "결론의 강도와 한계" in capabilities["analysis_agent"]["description"]
 
 
 def test_finalization_context_includes_latest_validation_agent_failure_streak() -> None:
