@@ -75,3 +75,52 @@ def test_read_chart_artifacts_marks_whole_batch_failed_on_reader_exception(monke
     assert result["chart_status"] == "read_failed"
     assert len(result["visual_evidence"]) == 2
     assert all(e["status"] == "reader_failed" for e in result["visual_evidence"])
+
+
+def test_chart_selection_dedupes_by_artifact_id_and_uses_next_match():
+    profile = {
+        "statistical_metadata": {
+            "distribution": {
+                "delivery_days": {
+                    "type": "numeric",
+                    "mean": 7.0,
+                    "median": 2.0,
+                    "25%": 1.0,
+                    "75%": 3.0,
+                    "max": 45.0,
+                },
+            },
+            "correlation_pairs": {
+                "corr_delivery_days_vs_review_score": {
+                    "pearson_r": -0.35,
+                    "spearman_r": -0.45,
+                },
+            },
+        },
+        "key_charts": [
+            {
+                "filename": "scatter_delivery_days_vs_review_score.png",
+                "artifact_id": "chart-scatter",
+                "chart_type": "scatter",
+            },
+            {
+                "filename": "scatter_delivery_days_vs_review_score.png",
+                "artifact_id": "chart-scatter",
+                "chart_type": "scatter",
+            },
+            {
+                "filename": "ts_delivery_days.png",
+                "artifact_id": "chart-time",
+                "chart_type": "line",
+            },
+        ],
+        "profile": {"columns": ["delivery_days", "review_score", "order_month"]},
+    }
+
+    result = chart_mod.decide_chart_inspection({"eda_profiles": [profile]}, max_charts=3)
+
+    artifact_ids = [chart["artifact_id"] for chart in result["selected_charts"]]
+    related_blocks = [chart["related_block"] for chart in result["selected_charts"]]
+    assert artifact_ids == ["chart-scatter", "chart-time"]
+    assert related_blocks == ["relationship", "time"]
+    assert len(artifact_ids) == len(set(artifact_ids))
