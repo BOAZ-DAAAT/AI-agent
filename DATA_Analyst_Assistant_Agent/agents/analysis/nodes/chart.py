@@ -192,14 +192,19 @@ def _select_available_charts(
             charts.append(_enrich_chart_metadata(dict(chart)))
 
     selected: list[dict[str, Any]] = []
+    selected_artifact_ids: set[str] = set()
     for request in chart_requests:
-        match = _best_chart_match(charts, request)
-        if match and match not in selected:
+        match = _best_chart_match(charts, request, excluded_artifact_ids=selected_artifact_ids)
+        if match:
+            artifact_id = str(match.get("artifact_id") or "")
+            if not artifact_id or artifact_id in selected_artifact_ids:
+                continue
             match = dict(match)
             match.setdefault("related_block", request["related_block"])
             match.setdefault("related_keys", request.get("related_keys", []))
             match.setdefault("variables", request.get("variables", []))
             selected.append(match)
+            selected_artifact_ids.add(artifact_id)
         if len(selected) >= max_charts:
             break
     return selected
@@ -365,35 +370,88 @@ def _enrich_chart_metadata(chart: dict[str, Any]) -> dict[str, Any]:
         chart.setdefault("chart_type", "histogram")
     elif "box" in filename or "violin" in filename:
         chart.setdefault("chart_type", "box")
-    elif "line" in filename or filename.startswith("ts_"):
+    elif (
+        "line" in filename
+        or filename.startswith("ts_")
+        or "time" in filename
+        or "month" in filename
+        or "season" in filename
+    ):
         chart.setdefault("chart_type", "line")
     elif "bar" in filename:
         chart.setdefault("chart_type", "bar")
     return chart
 
 
-def _best_chart_match(charts: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any] | None:
+def _best_chart_match(
+    charts: list[dict[str, Any]],
+    request: dict[str, Any],
+    *,
+    excluded_artifact_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
     preferred = set(request.get("preferred_chart_types", []) or [])
     variables = [str(item).casefold() for item in request.get("variables", []) or []]
+    excluded = excluded_artifact_ids or set()
     scored: list[tuple[int, dict[str, Any]]] = []
     for chart in charts:
-        filename = str(chart.get("filename") or "").casefold()
+        artifact_id = str(chart.get("artifact_id") or "")
+        if artifact_id in excluded:
+            continue
+        text = _chart_search_text(chart)
         chart_type = str(chart.get("chart_type") or "").casefold()
+        if not _chart_type_is_compatible(request, chart_type, text):
+            continue
         score = 0
         if chart_type in preferred:
             score += 3
-        score += sum(1 for variable in variables if variable and variable in filename)
+        score += sum(1 for variable in variables if variable and variable in text)
         if request.get("related_block") == "relationship" and chart_type in {"scatter", "heatmap"}:
             score += 1
         if request.get("related_block") == "distribution" and chart_type in {"histogram", "box"}:
             score += 1
-        if request.get("related_block") == "time" and chart_type == "line":
+        if request.get("related_block") == "time" and chart_type in {"line", "time_series"}:
             score += 1
         if score:
             scored.append((score, chart))
     if not scored:
         return None
     return sorted(scored, key=lambda item: item[0], reverse=True)[0][1]
+
+
+def _chart_search_text(chart: dict[str, Any]) -> str:
+    fields = (
+        chart.get("filename"),
+        chart.get("caption"),
+        chart.get("title"),
+        chart.get("description"),
+        chart.get("chart_type"),
+    )
+    return " ".join(str(field or "").casefold() for field in fields)
+
+
+def _chart_type_is_compatible(request: dict[str, Any], chart_type: str, text: str) -> bool:
+    preferred = {str(item).casefold() for item in request.get("preferred_chart_types", []) or []}
+    if chart_type in preferred:
+        return True
+
+    related_block = request.get("related_block")
+    if related_block == "distribution":
+        return chart_type in {"histogram", "box", "violin"} or any(
+            token in text for token in ("hist", "distribution", "dist", "box", "violin")
+        )
+    if related_block == "relationship":
+        return chart_type in {"scatter", "heatmap"} or any(
+            token in text for token in ("scatter", "heatmap", "correlation", "relationship")
+        )
+    if related_block == "group_comparison":
+        return chart_type in {"bar", "box", "groupedbox"} or any(
+            token in text for token in ("bar", "box", "group", "comparison")
+        )
+    if related_block == "time":
+        return chart_type in {"line", "time_series"} or any(
+            token in text for token in ("line", "time", "trend", "month", "season", "ts_")
+        )
+    return not preferred
 
 
 def _dedupe_requests(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
