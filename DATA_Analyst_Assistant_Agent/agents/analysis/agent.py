@@ -166,7 +166,10 @@ def _analysis_failure_reason(result: dict[str, Any], terminal_reason: str) -> st
 
     limitations = [str(item).strip() for item in result.get("limitations", []) if str(item).strip()]
     for limitation in limitations:
-        if "Analysis did not pass method review" in limitation:
+        if (
+            "Analysis did not pass method review" in limitation
+            or "Analysis code failed at the" in limitation
+        ):
             return limitation
     if limitations:
         return limitations[0]
@@ -239,6 +242,7 @@ def _debug_payload(result: dict[str, Any], terminal_reason: str) -> dict[str, An
         "review_request": result.get("review_request"),
         "method_notes": result.get("method_notes", []),
         "method_decision": result.get("method_decision"),
+        "error_history": result.get("error_history", []),
     }
 
 
@@ -247,6 +251,7 @@ def _public_result_payload(result: dict[str, Any], debug_artifact_id: str) -> di
     payload["debug_artifact_id"] = debug_artifact_id
     payload["generated_code"] = ""
     payload["code_critique"] = None
+    payload["error_history"] = []
     return payload
 
 
