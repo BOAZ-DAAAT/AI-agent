@@ -180,7 +180,10 @@ class RunService:
         context = context or PolicyContext(run_id=run_id)
         self.policy_engine.enforce("run.event.read", run_id, {}, context)
         self.get_run(run_id, context)
-        rows = self.sqlite.query_all("SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at", (run_id,))
+        rows = self.sqlite.query_all(
+            "SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at, rowid",
+            (run_id,),
+        )
         return [self._event_row_to_model(row) for row in rows]
 
     def get_summary(self, run_id: str, context: PolicyContext | None = None) -> RunSummary:
