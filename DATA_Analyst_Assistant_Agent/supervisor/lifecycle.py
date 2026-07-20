@@ -14,6 +14,13 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 LifecycleNode = ActiveNodeExecution | CompletedNodeExecution | FailedNodeExecution
 
 
+def _lifecycle_event_key(
+    event_type: NodeLifecycleEventType,
+    node: LifecycleNode,
+) -> str:
+    return f"agent-node:{node.node_id}:{event_type}:attempt:{node.attempt}"
+
+
 def emit_node_lifecycle_event(
     backend_adapter: Any | None,
     state: SupervisorState,
@@ -47,6 +54,7 @@ def emit_node_lifecycle_event(
         run_id,
         event_type,
         message,
+        event_key=_lifecycle_event_key(event_type, node),
         node_name=node.agent_name,
         artifact_ids=artifact_ids,
         approval_id=approval_id,
