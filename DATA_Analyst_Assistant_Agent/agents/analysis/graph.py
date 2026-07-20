@@ -109,8 +109,32 @@ def assemble_node(state: AnalysisWorkflowState) -> dict[str, Any]:
     return {
         "result": result,
         "local_checks": _local_checks(outcome),
-        "terminal_reason": "validated_result" if passed else "method_review_failed",
+        "terminal_reason": "validated_result" if passed else _failure_terminal_reason(outcome),
     }
+
+
+# Maps the stage of the *last recorded* attempt failure to a terminal_reason.
+# A repeated generate/execute/result_contract failure never reached the
+# critic, so it must not be reported as "method_review_failed" (run
+# 019f7970: a sandboxed `time` import block made every attempt fail at
+# execute; run 019f7a58: unparseable structured JSON output made every
+# attempt fail at generate -- both used to surface as the same generic
+# "method review failed" label, sending debugging on a wild goose chase).
+_STAGE_TERMINAL_REASONS = {
+    "generate": "generation_failed",
+    "execute": "execution_failed",
+    "result_contract": "result_contract_failed",
+    "critic": "method_review_failed",
+}
+
+
+def _failure_terminal_reason(outcome: AnalysisOutcome) -> str:
+    if outcome.error_history:
+        stage = str(outcome.error_history[-1].get("stage") or "")
+        reason = _STAGE_TERMINAL_REASONS.get(stage)
+        if reason:
+            return reason
+    return "method_review_failed"
 
 
 def decide_chart_node(state: AnalysisWorkflowState) -> dict[str, Any]:
@@ -136,6 +160,10 @@ def finalize_node(state: AnalysisWorkflowState) -> dict[str, Any]:
 def _local_checks(outcome: AnalysisOutcome) -> list[LocalCheck]:
     issues = outcome.critique.method_issues if outcome.critique else []
     method_passed = outcome.status in {"passed", "review_required"}
+    execution_detail = "Generated analysis code must run and produce a result dict."
+    if outcome.error_history and outcome.error_history[-1].get("stage") in {"generate", "execute", "result_contract"}:
+        last_failure = outcome.error_history[-1]
+        execution_detail = f"[{last_failure.get('stage')}] {last_failure.get('error')}"
     method_detail = "; ".join(issues) or (
         "Generated analysis requires review before operational interpretation."
         if outcome.status == "review_required"
@@ -146,7 +174,7 @@ def _local_checks(outcome: AnalysisOutcome) -> list[LocalCheck]:
             name="analysis_code_executed",
             passed=outcome.result is not None,
             severity="error",
-            detail="Generated analysis code must run and produce a result dict.",
+            detail=execution_detail,
         ),
         LocalCheck(
             name="method_review_passed",

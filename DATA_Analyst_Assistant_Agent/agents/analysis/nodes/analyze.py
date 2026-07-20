@@ -1,9 +1,10 @@
 """Analysis orchestration: classify's intent -> generate -> execute -> critic.
 
 This is the analysis itself, not a side "codegen" step. It runs the
-evaluator-optimizer loop from the LangGraph playbook. Two failure modes both
+evaluator-optimizer loop from the LangGraph playbook. Three failure modes all
 feed feedback back into the next generate attempt:
 
+- generation failure (unparseable structured output) -> reflect on the parse error
 - execution failure (import/runtime error)  -> reflect on the traceback
 - method failure (critic verdict == "fail")  -> reflect on the critique feedback
 
@@ -25,6 +26,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.critic import (
 )
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     AnalysisCodeError,
+    AnalysisGenerationError,
     execute_generated_code,
     generate_analysis_code,
 )
@@ -78,6 +80,28 @@ def run_analysis(
                 model=code_generator_model,
                 feedback=feedback,
             )
+        except AnalysisGenerationError as exc:
+            _notify_progress(progress_callback, "generate", "failed", attempt)
+            error = str(exc)
+            feedback = (
+                f"The previous response was not valid JSON: {error}. Return ONLY the "
+                "JSON object with no markdown fences or extra text, and keep the code "
+                "focused on what the objective needs rather than every possible statistic."
+            )
+            history.append({"stage": "generate", "code": "", "error": error})
+            signature = _failure_signature("generate", error)
+            if signature == previous_failure_signature:
+                return AnalysisOutcome(
+                    status="failed",
+                    attempts=attempt,
+                    code=last_code,
+                    result=last_result,
+                    critique=last_critique,
+                    error_history=history,
+                    early_stop_reason="same generation failure repeated after regeneration",
+                )
+            previous_failure_signature = signature
+            continue
         except Exception:
             _notify_progress(progress_callback, "generate", "failed", attempt)
             raise

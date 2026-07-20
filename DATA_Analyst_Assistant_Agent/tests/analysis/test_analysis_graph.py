@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from pydantic import ValidationError
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
@@ -12,12 +13,23 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
 from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
 
 
+def _validation_error_for(text: str) -> ValidationError:
+    try:
+        GeneratedAnalysisCode.model_validate_json(text)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
 class _Structured:
     def __init__(self, queue: list[object]) -> None:
         self._queue = queue
 
     def invoke(self, _messages: object) -> object:
-        return self._queue.pop(0)
+        item = self._queue.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 class _FakeModel:
@@ -102,6 +114,95 @@ _RECOVERABLE_CONTRACT_CODE = GeneratedAnalysisCode(
         "}\n"
     ),
 )
+
+
+_BAD_IMPORT_CODE = GeneratedAnalysisCode(
+    rationale="uses a disallowed import",
+    code="import os\nresult = {}\n",
+)
+
+_BAD_CONTRACT_CODE = GeneratedAnalysisCode(
+    rationale="produces a malformed evidence_tables shape",
+    code=(
+        "result = {'summary': 'x', 'findings': ['x'], 'statistics': {'n': 1}, "
+        "'limitations': [], 'evidence_tables': 'not-a-list'}\n"
+    ),
+)
+
+
+def test_graph_repeated_generation_parse_failure_is_labeled_generation_failed() -> None:
+    # run 019f7a58: openai/gpt-5.4-mini returned unparseable structured JSON
+    # (too verbose, cut off / trailing noise) on both attempts, which used
+    # to crash the whole analyze node as an uncaught exception instead of
+    # feeding back into the retry loop like execute/critic failures do.
+    classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance")])
+    unrecoverable = _validation_error_for("this is not json at all")
+    generate = _FakeModel([unrecoverable, unrecoverable])
+    critic = _FakeModel([])  # must never be reached
+
+    result, checks, terminal = run_analysis_workflow(
+        _state(), _df(), [],
+        planner_model=classify,
+        code_generator_model=generate,
+        critic_model=critic,
+    )
+
+    parsed = AnalysisResult.model_validate(result)
+    assert terminal == "generation_failed"
+    assert parsed.status == "failed"
+    assert parsed.error_history
+    assert parsed.error_history[-1]["stage"] == "generate"
+    execution_check = next(c for c in checks if c.name == "analysis_code_executed")
+    assert not execution_check.passed
+    assert "[generate]" in execution_check.detail
+
+
+def test_graph_repeated_execute_failure_is_labeled_execution_failed() -> None:
+    # run 019f7970: every attempt failed at execute (blocked import), but
+    # terminal_reason still said "method_review_failed" -- the critic was
+    # never even called. This pins the corrected stage-specific label.
+    classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance")])
+    generate = _FakeModel([_BAD_IMPORT_CODE, _BAD_IMPORT_CODE])
+    critic = _FakeModel([])  # must never be reached
+
+    result, checks, terminal = run_analysis_workflow(
+        _state(), _df(), [],
+        planner_model=classify,
+        code_generator_model=generate,
+        critic_model=critic,
+    )
+
+    parsed = AnalysisResult.model_validate(result)
+    assert terminal == "execution_failed"
+    assert parsed.status == "failed"
+    assert parsed.error_history
+    assert parsed.error_history[-1]["stage"] == "execute"
+    assert "not allowed" in parsed.error_history[-1]["error"]
+    assert any(
+        "failed at the execute stage" in limitation for limitation in parsed.limitations
+    )
+    execution_check = next(c for c in checks if c.name == "analysis_code_executed")
+    assert not execution_check.passed
+    assert "not allowed" in execution_check.detail
+
+
+def test_graph_repeated_result_contract_failure_is_labeled_result_contract_failed() -> None:
+    classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance")])
+    generate = _FakeModel([_BAD_CONTRACT_CODE, _BAD_CONTRACT_CODE])
+    critic = _FakeModel([])  # must never be reached
+
+    result, checks, terminal = run_analysis_workflow(
+        _state(), _df(), [],
+        planner_model=classify,
+        code_generator_model=generate,
+        critic_model=critic,
+    )
+
+    parsed = AnalysisResult.model_validate(result)
+    assert terminal == "result_contract_failed"
+    assert parsed.status == "failed"
+    assert parsed.error_history
+    assert parsed.error_history[-1]["stage"] == "result_contract"
 
 
 def test_graph_produces_valid_analysis_result() -> None:

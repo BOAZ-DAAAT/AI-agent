@@ -348,3 +348,7 @@ class AnalysisResult(BaseModel):
     generated_code: str = ""
     code_critique: CodeCritique | None = None
     codegen_attempts: int = 0
+    # Per-attempt failure record (stage: execute/result_contract/critic + raw
+    # error/code), debug-only. Lets a repeated-failure diagnosis see which
+    # stage actually rejected the code instead of guessing from terminal_reason.
+    error_history: list[dict[str, Any]] = Field(default_factory=list)
