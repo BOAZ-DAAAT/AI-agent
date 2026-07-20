@@ -75,6 +75,36 @@ def build_step_summary(
     )
 
 
+def _enrich_step_summary_with_node_finding(
+    step_summary: StepSummary,
+    backend_adapter: Any | None,
+) -> StepSummary:
+    """가능하면 결정론적 summary를, generate_node_summary()가 만든 key_finding으로 교체한다.
+
+    노드가 UI에 완료 상태로 뜰 때 같이 보일 한 줄이라 여기서 채워 넣는다. 실패(어댑터
+    없음/LLM 오류/근거 부족 등)해도 원래 결정론적 summary로 안전하게 되돌아간다 —
+    이 함수가 노드 완료 자체를 막으면 안 된다.
+    """
+    if backend_adapter is None or not step_summary.artifact_ids:
+        return step_summary
+
+    try:
+        import json
+
+        from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
+        from DATA_Analyst_Assistant_Agent.supervisor.summary.generator import generate_node_summary
+
+        runtime = AgentRuntime(backend_adapter)
+        ref = generate_node_summary(step_summary.artifact_ids, runtime)
+        payload = json.loads(backend_adapter.read_artifact_text(ref.artifact_id))
+        key_finding = str(payload.get("key_finding") or "").strip()
+        if not key_finding:
+            return step_summary
+        return step_summary.model_copy(update={"summary": key_finding})
+    except Exception:  # noqa: BLE001 - 서머리는 부가 정보, 실패해도 완료 흐름은 계속
+        return step_summary
+
+
 def validate_candidate(
     state: SupervisorState,
     model: Any | None,
@@ -579,6 +609,7 @@ def commit_candidate(
         _ACTION_BY_AGENT[result.agent],
         next_action,
     )
+    step_summary = _enrich_step_summary_with_node_finding(step_summary, backend_adapter)
     summary_payload = step_summary.model_dump(mode="json")
     if summary_payload not in summaries:
         summaries.append(summary_payload)

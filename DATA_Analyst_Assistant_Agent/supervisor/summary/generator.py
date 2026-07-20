@@ -106,9 +106,15 @@ def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> Art
 
 
 def _find_cached(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef | None:
-    """이미 만들어둔 같은 버전 요약이 있으면 그걸 그대로 쓴다(재생성 없음, LLM 호출 0)."""
+    """이미 만들어둔 같은 버전 요약이 있으면 그걸 그대로 쓴다(재생성 없음, LLM 호출 0).
+
+    list_artifacts는 created_at 오름차순(오래된 것부터)이라, 매칭되는 게 여러 개면
+    가장 나중 것(=최신)을 쓴다 — 재생성으로 더 나은 결과가 생겼는데도 옛날 폴백
+    아티팩트를 계속 돌려주는 걸 방지한다.
+    """
     anchor = runtime.adapter.get_artifact(artifact_ids[0])
     wanted = set(artifact_ids)
+    latest: ArtifactRef | None = None
     for record in runtime.adapter.list_artifacts(run_id=anchor.run_id, artifact_type=ArtifactType.file):
         meta = record.metadata
         if meta.get("kind") != "node_summary":
@@ -117,8 +123,8 @@ def _find_cached(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef 
             continue
         if meta.get("summary_version") != _SUMMARY_VERSION:
             continue
-        return record.ref()
-    return None
+        latest = record.ref()
+    return latest
 
 
 def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
