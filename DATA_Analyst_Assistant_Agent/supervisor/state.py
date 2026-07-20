@@ -265,7 +265,7 @@ def empty_supervisor_state(
         "semantic_recovery_attempts": {},
         "limitations": [],
         "run_events": [],
-        
+
         # 노드 관련
         "active_node": None,
         "last_completed_node_id": None,
@@ -500,7 +500,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             int(state.get("node_sequence", 0) or 0),
             0,
         )
-        
+
 
         normalized: SupervisorState = {
             **state,
