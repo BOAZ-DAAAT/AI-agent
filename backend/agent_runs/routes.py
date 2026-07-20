@@ -14,10 +14,16 @@ from fastapi.responses import StreamingResponse
 from backend.auth.deps import get_current_user
 from backend.session.service import get_owned_session
 from data_agent_backend.models.common import BackendError
+from data_agent_backend.models.runs import RunStatus
 
 from .event_stream import EVENT_STREAM_POLL_INTERVAL_SECONDS, stream_run_events
-from .schemas import AgentRunCreateRequest, AgentRunResponse
-from .service import launch_agent_run, new_thread_id
+from .schemas import (
+    AgentRunCreateRequest,
+    AgentRunResponse,
+    AgentRunResumeRequest,
+    AgentRunResumeResponse,
+)
+from .service import launch_agent_run, new_thread_id, resume_agent_run
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
@@ -60,6 +66,65 @@ def create_agent_run(
         status="created",
         query=query,
         session_id=session.id,
+    )
+
+
+@router.post("/{run_id}/resume", response_model=AgentRunResumeResponse, status_code=202)
+def resume_run(
+    run_id: str,
+    payload: AgentRunResumeRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentRunResumeResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    username = str(user["sub"])
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    session = get_owned_session(session_id, username)
+
+    if run.status != RunStatus.waiting_input:
+        raise HTTPException(
+            status_code=409,
+            detail="설명 입력을 기다리는 실행만 재개할 수 있습니다.",
+        )
+    if run.metadata.get("interrupt_type") != "clarification":
+        raise HTTPException(status_code=409, detail="현재 대기 요청은 clarification 유형이 아닙니다.")
+    if not run.thread_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 thread 정보가 없습니다.")
+
+    try:
+        services.run_service.claim_waiting_input(
+            run_id,
+            metadata={"resumed_from": "clarification"},
+        )
+    except BackendError as exc:
+        if exc.code == "RUN_NOT_WAITING_INPUT":
+            raise HTTPException(
+                status_code=409,
+                detail="이미 재개되었거나 더 이상 입력 대기 상태가 아닙니다.",
+            ) from exc
+        raise
+
+    background_tasks.add_task(
+        resume_agent_run,
+        services=services,
+        session=session,
+        answer=payload.answer,
+        run_id=run_id,
+        thread_id=run.thread_id,
+    )
+    return AgentRunResumeResponse(
+        run_id=run_id,
+        thread_id=run.thread_id,
+        status="running",
+        resume_type=payload.type,
     )
 
 

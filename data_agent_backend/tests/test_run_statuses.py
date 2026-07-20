@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from data_agent_backend.config import BackendConfig
+from data_agent_backend.models.common import BackendError
 from data_agent_backend.models.runs import TERMINAL_RUN_STATUSES, RunStatus
 from data_agent_backend.services.factory import create_backend_services
 
@@ -26,3 +29,21 @@ def test_waiting_input_status_is_valid_and_not_terminal(tmp_path) -> None:
 
     assert running.status == RunStatus.running
     assert succeeded.status == RunStatus.succeeded
+
+
+def test_claim_waiting_input_is_atomic(tmp_path) -> None:
+    services = create_backend_services(BackendConfig(base_data_dir=tmp_path / ".data_agent"))
+    run = services.run_service.create_run(thread_id="thread_claim")
+    services.run_service.update_status(run.run_id, RunStatus.running)
+    services.run_service.update_status(run.run_id, RunStatus.waiting_input)
+
+    claimed = services.run_service.claim_waiting_input(
+        run.run_id,
+        metadata={"resumed_from": "clarification"},
+    )
+
+    assert claimed.status == RunStatus.running
+    assert claimed.metadata["resumed_from"] == "clarification"
+    with pytest.raises(BackendError, match="not waiting") as exc_info:
+        services.run_service.claim_waiting_input(run.run_id)
+    assert exc_info.value.code == "RUN_NOT_WAITING_INPUT"
