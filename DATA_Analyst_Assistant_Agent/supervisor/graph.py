@@ -962,6 +962,13 @@ def make_finalize_node(
         current_terminal_state = state.get("terminal_state")
         if current_terminal_state in FINALIZE_PROTECTED_TERMINAL_STATES:
             terminal_state = current_terminal_state
+        elif terminal_state == SupervisorTerminalState.needs_user_approval.value:
+            # finalize_node는 실제 재개 가능한 interrupt/pending_approval을 만들 방법이
+            # 없다. 이전 노드가 이미 승인 대기를 걸어둔 경우(위 protected 분기)가 아니라면
+            # 재개 불가능한 "승인 대기" 라벨만 붙이고 끝나버려, 사용자가 approve해도
+            # "승인 대기 상태가 아닙니다" 에러가 난다(pending_approval 없음). 그런 경우엔
+            # completed로 처리하고 caveat은 final_answer에 그대로 담아 사용자가 읽게 한다.
+            terminal_state = SupervisorTerminalState.completed.value
 
         final_answer = state.get("final_answer") or decision.final_answer
         if (
