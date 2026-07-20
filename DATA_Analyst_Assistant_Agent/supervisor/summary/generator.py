@@ -161,7 +161,11 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
                 prompt += (
                     "\n\n[분기 지시사항] 이 결과는 원본 분석에서 분기하여 다음 추가 지시사항을 "
                     f"반영해 재실행한 것이다: \"{branch_instruction}\"\n"
-                    "이 지시사항을 어떻게 반영했는지 background 또는 conclusion에서 명시적으로 서술하라."
+                    "이 지시사항을 어떻게 반영했는지 background 또는 conclusion에서 명시적으로 서술하라.\n"
+                    "key_finding(전체를 압축한 한 문장)에도 이 지시사항이 결과에 영향을 줬는지 "
+                    "짧게 드러내라 — 예: '~에도 관계는 유지되었다', '~로 제한하니 검정이 불가했다', "
+                    "'~기준으로도 동일한 경향이 확인되었다'처럼, 지시사항 반영 여부와 결과가 "
+                    "달라졌는지/유지됐는지를 한 문장 안에 압축하라."
                 )
             raw = llm.invoke(prompt).content
         except Exception:  # noqa: BLE001 — LLM 호출 실패는 폴백으로 처리
