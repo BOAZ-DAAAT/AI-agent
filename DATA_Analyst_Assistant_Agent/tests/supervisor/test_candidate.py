@@ -4,6 +4,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.candidate import build_step_summary
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     stage_candidate_result,
 )
@@ -72,6 +73,7 @@ def _validated_state(
         "analysis_agent": "call_analysis_agent",
         "insight": "call_insight",
     }[result.agent]
+    state, _, _ = begin_or_retry_agent_node(state, result.agent)
     staged = stage_candidate_result(state, result, {})
     pending = staged["pending_result"] or {}
     staged["pending_validation"] = ValidationRecord(
@@ -149,7 +151,10 @@ def test_commit_candidate_emits_backend_event_once() -> None:
     committed = commit_candidate(state, backend)
     commit_candidate(committed, backend)
 
-    assert [event[1] for event in backend.events] == ["evidence.promoted"]
+    assert [event[1] for event in backend.events] == [
+        "evidence.promoted",
+        "agent.completed",
+    ]
 
 
 def _semantic_recovery_state(
@@ -212,6 +217,7 @@ def test_commit_semantic_recovery_quarantines_candidate_and_schedules_first_targ
     ]
     assert [event[1] for event in backend.events] == [
         "semantic_recovery.quarantined",
+        "agent.discarded",
         "semantic_recovery.scheduled",
     ]
 

@@ -28,6 +28,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     build_result_validation_context,
     invoke_supervisor_decision,
 )
+from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import (
+    emit_node_lifecycle_event,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     ANALYSIS_RULE_EXTRACTION_PROMPT,
     CLARIFY_DECISION_PROMPT,
@@ -43,6 +46,8 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     StepSummary,
     SupervisorState,
     artifact_ids_by_agent,
+    begin_or_retry_agent_node,
+    fail_active_node,
     reject_pending_result,
     stage_candidate_result,
 )
@@ -410,6 +415,29 @@ def make_resolve_analysis_review_node(backend_adapter: Any | None = None):
                 )
                 for index, artifact in enumerate(quarantined)
             ]
+            active_node_payload = rejected.get("active_node")
+            if (
+                isinstance(active_node_payload, dict)
+                and active_node_payload.get("status") == "waiting"
+            ):
+                rejected, resumed_node, resumed_event_type = begin_or_retry_agent_node(
+                    rejected,
+                    "analysis_agent",
+                )
+                emit_node_lifecycle_event(
+                    backend_adapter,
+                    rejected,
+                    resumed_event_type,
+                    resumed_node,
+                    "analysis_agent 후속 분석을 재개했습니다.",
+                    action="call_analysis_agent",
+                    approval_id=str(pending_approval.get("approval_id") or "") or None,
+                    metadata={
+                        "candidate_id": pending_result.get("candidate_id"),
+                        "validation_id": pending_result.get("validation_id"),
+                        "reason_code": "analysis.review_followup",
+                    },
+                )
             rejected.update(
                 {
                     "pending_approval": None,
@@ -602,56 +630,88 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 f"지원하지 않는 subagent action입니다: {action}",
             )
 
-        _emit_run_event(
+        working_state, active_node, activation_event_type = (
+            begin_or_retry_agent_node(
+                state,
+                agent_name,
+            )
+        )
+        activation_message = {
+            "agent.started": f"{agent_name} 작업을 시작했습니다.",
+            "agent.retrying": (
+                f"{agent_name} 작업을 재시도합니다. "
+                f"현재 시도: {active_node.attempt}"
+            ),
+            "agent.resumed": f"{agent_name} 작업을 재개했습니다.",
+        }[activation_event_type]
+        emit_node_lifecycle_event(
             getattr(subagent_adapter, "backend_adapter", None),
-            state,
-            "node.started",
-            f"{agent_name} 실행을 시작했습니다.",
-            node_name=agent_name,
-            metadata={"agent_name": agent_name, "action": action},
+            working_state,
+            activation_event_type,
+            active_node,
+            activation_message,
+            action=action,
         )
         try:
-            tool_result: AgentToolResult = subagent_adapter.call(agent_name, state)
+            tool_result: AgentToolResult = subagent_adapter.call(
+                agent_name,
+                working_state,
+            )
         except AgentContractError as exc:
             message = f"{agent_name} 결과의 에이전트 계약 검증에 실패했습니다: {exc}"
-            _emit_run_event(
+            failed_state, failed_node, failed_event_type = fail_active_node(
+                working_state,
+                agent_name=agent_name,
+                reason=message,
+                reason_code="agent_contract_mismatch",
+            )
+            emit_node_lifecycle_event(
                 getattr(subagent_adapter, "backend_adapter", None),
-                state,
-                "node.failed",
+                failed_state,
+                failed_event_type,
+                failed_node,
                 message,
-                node_name=agent_name,
+                action=action,
                 metadata={
-                    "agent_name": agent_name,
-                    "action": action,
                     "reason_code": "agent_contract_mismatch",
                 },
             )
-            failed_agents = list(state.get("failed_agents", []))
+            failed_agents = list(failed_state.get("failed_agents", []))
             if agent_name not in failed_agents:
                 failed_agents.append(agent_name)
-            return _terminal_failure_updates(
-                state,
-                "execute_subagent",
-                message,
-                extra_updates={
-                    "pending_result": None,
-                    "last_agent_result": {},
-                    "failed_agents": failed_agents,
-                    "completed_agents": list(state.get("completed_agents", [])),
-                    "accepted_evidence": {
-                        agent: list(items)
-                        for agent, items in state.get("accepted_evidence", {}).items()
+            return {
+                **failed_state,
+                **_terminal_failure_updates(
+                    failed_state,
+                    "execute_subagent",
+                    message,
+                    extra_updates={
+                        "pending_result": None,
+                        "last_agent_result": {},
+                        "failed_agents": failed_agents,
+                        "completed_agents": list(failed_state.get("completed_agents", [])),
+                        "accepted_evidence": {
+                            agent: list(items)
+                            for agent, items in failed_state.get(
+                                "accepted_evidence",
+                                {},
+                            ).items()
+                        },
+                        "error_state": {
+                            "node": "execute_subagent",
+                            "message": message,
+                            "reason_code": "agent_contract_mismatch",
+                            "retryable": False,
+                        },
                     },
-                    "error_state": {
-                        "node": "execute_subagent",
-                        "message": message,
-                        "reason_code": "agent_contract_mismatch",
-                        "retryable": False,
-                    },
-                },
-            )
+                ),
+            }
 
-        updates = stage_candidate_result(state, tool_result.agent_result, tool_result.state_updates)
+        updates = stage_candidate_result(
+            working_state,
+            tool_result.agent_result,
+            tool_result.state_updates,
+        )
         updates["last_agent_result"] = tool_result.agent_result.model_dump(mode="json")
         updates["current_step"] = "execute_subagent"
         updates["next_action"] = action
@@ -663,18 +723,7 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
             node_name=agent_name,
             metadata={
                 "agent_name": agent_name,
-                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
-            },
-        )
-        _emit_run_event(
-            getattr(subagent_adapter, "backend_adapter", None),
-            state,
-            "node.completed",
-            f"{agent_name} 실행이 완료되었습니다.",
-            node_name=agent_name,
-            metadata={
-                "agent_name": agent_name,
-                "action": action,
+                "node_id": active_node.node_id,
                 "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
             },
         )
@@ -704,15 +753,29 @@ class _InsightGeneratorAdapter:
 
 def make_generate_insight_node(insight_generator: Any):
     def generate_insight_node(state: SupervisorState) -> SupervisorState:
-        _emit_run_event(
-            getattr(insight_generator, "backend_adapter", None),
-            state,
-            "node.started",
-            "insight 실행을 시작했습니다.",
-            node_name="insight",
-            metadata={"agent_name": "insight", "action": "call_insight"},
+        working_state, active_node, activation_event_type = (
+            begin_or_retry_agent_node(
+                state,
+                "insight",
+            )
         )
-        evidence_ids = artifact_ids_by_agent(state)
+        activation_message = {
+            "agent.started": "insight 작업을 시작했습니다.",
+            "agent.retrying": (
+                "insight 작업을 재시도합니다. "
+                f"현재 시도: {active_node.attempt}"
+            ),
+            "agent.resumed": "insight 작업을 재개했습니다.",
+        }[activation_event_type]
+        emit_node_lifecycle_event(
+            getattr(insight_generator, "backend_adapter", None),
+            working_state,
+            activation_event_type,
+            active_node,
+            activation_message,
+            action="call_insight",
+        )
+        evidence_ids = artifact_ids_by_agent(working_state)
         has_evidence = any(
             bool(evidence_ids.get(agent_name))
             for agent_name in ("sql_agent", "eda_agent", "analysis_agent")
@@ -723,7 +786,7 @@ def make_generate_insight_node(insight_generator: Any):
             )
         else:
             try:
-                result = insight_generator.generate(state)
+                result = insight_generator.generate(working_state)
             except Exception as exc:
                 result = _failed_insight_result(f"인사이트 생성 또는 저장에 실패했습니다: {exc}")
 
@@ -733,7 +796,7 @@ def make_generate_insight_node(insight_generator: Any):
             )
 
         updates: SupervisorState = {
-            **stage_candidate_result(state, result, {}),
+            **stage_candidate_result(working_state, result, {}),
             "last_agent_result": result.model_dump(mode="json"),
             "terminal_state": "running",
             "next_action": "call_insight",
@@ -741,24 +804,13 @@ def make_generate_insight_node(insight_generator: Any):
         }
         _emit_run_event(
             getattr(insight_generator, "backend_adapter", None),
-            state,
+            working_state,
             "result.staged",
             "insight 후보 결과를 격리했습니다.",
             node_name="insight",
             metadata={
                 "agent_name": "insight",
-                "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
-            },
-        )
-        _emit_run_event(
-            getattr(insight_generator, "backend_adapter", None),
-            state,
-            "node.failed" if result.status == "failed" else "node.completed",
-            result.error or "insight 실행이 완료되었습니다.",
-            node_name="insight",
-            metadata={
-                "agent_name": "insight",
-                "action": "call_insight",
+                "node_id": active_node.node_id,
                 "candidate_id": (updates.get("pending_result") or {}).get("candidate_id"),
             },
         )

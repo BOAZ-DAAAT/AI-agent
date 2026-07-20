@@ -22,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     merge_agent_result,
     stage_candidate_result,
@@ -875,9 +876,10 @@ def test_execute_subagent_emits_agent_lifecycle_events() -> None:
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
     assert ("result.staged", "sql_agent") in event_pairs
-    assert ("node.completed", "sql_agent") in event_pairs
+    assert ("agent.completed", "sql_agent") not in event_pairs
+    assert result["active_node"]["status"] == "running"
 
 
 def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> None:
@@ -894,8 +896,9 @@ def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> No
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
-    assert ("node.failed", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
+    assert ("agent.failed", "sql_agent") in event_pairs
+    assert result["active_node"] is None
 
 
 def test_execute_subagent_unsupported_action_fails_terminally() -> None:
@@ -1313,8 +1316,9 @@ def test_resolve_candidate_uses_only_approval_required_flag() -> None:
 
 
 def test_resolve_success_with_required_approval_waits_without_promotion() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "analysis_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="analysis_agent",
             status="success",
@@ -1373,8 +1377,9 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
 
 
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="sql_agent",
             status="success",

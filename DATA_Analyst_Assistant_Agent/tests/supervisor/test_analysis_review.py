@@ -21,6 +21,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import AgentCompactResult, Ar
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     PendingApproval,
     SupervisorState,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     to_orchestration_state,
 )
@@ -102,6 +103,7 @@ def _pending_review_state(*, requires_followup_analysis: bool) -> dict:
     result = _analysis_result(
         _review_request(requires_followup_analysis=requires_followup_analysis)
     )
+    state, _, _ = begin_or_retry_agent_node(state, "analysis_agent")
     state = stage_candidate_result(state, result)
     candidate = state["pending_result"]
     state["pending_validation"] = {
@@ -362,6 +364,7 @@ def test_commit_unstructured_analysis_review_keeps_general_approval_flow() -> No
         user_query="매출 분석",
         datasource_id=None,
     )
+    state, _, _ = begin_or_retry_agent_node(state, "analysis_agent")
     state = stage_candidate_result(state, _analysis_result(None))
     candidate = state["pending_result"]
     state["pending_validation"] = {

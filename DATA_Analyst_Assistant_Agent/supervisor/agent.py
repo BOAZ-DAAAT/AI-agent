@@ -299,7 +299,7 @@ class SupervisorAgent:
         normalized = normalize_supervisor_state(values)
         if hashes_match:
             updates = commit_candidate(
-                normalized,
+                values,
                 self.adapter,
                 approval_granted=True,
             )

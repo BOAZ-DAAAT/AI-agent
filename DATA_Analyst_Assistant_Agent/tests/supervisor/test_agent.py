@@ -576,7 +576,7 @@ def _analysis_review_checkpoint() -> tuple[dict[str, Any], dict[str, Any]]:
         "thread_id": "thread_sales_001",
         "current_run_id": "run_resumed_001",
         "latest_user_query": "매출 분석",
-        "state_schema_version": 5,
+        "state_schema_version": 6,
         "pending_result": {
             "candidate_id": "candidate_001",
             "validation_id": "validation_001",
