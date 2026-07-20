@@ -22,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     merge_agent_result,
     stage_candidate_result,
@@ -1315,8 +1316,9 @@ def test_resolve_candidate_uses_only_approval_required_flag() -> None:
 
 
 def test_resolve_success_with_required_approval_waits_without_promotion() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "analysis_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="analysis_agent",
             status="success",
@@ -1375,8 +1377,9 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
 
 
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="sql_agent",
             status="success",
