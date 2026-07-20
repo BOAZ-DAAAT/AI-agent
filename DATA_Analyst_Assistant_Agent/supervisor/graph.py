@@ -860,7 +860,88 @@ def _emit_run_event(
     )
 
 
-def make_finalize_node(model: Any | None):
+def _close_active_node_for_terminal_state(
+    state: SupervisorState,
+    updates: SupervisorState,
+    backend_adapter: Any | None,
+) -> SupervisorState:
+    terminal_state = updates.get("terminal_state")
+    active_node_payload = state.get("active_node")
+    if not isinstance(active_node_payload, dict):
+        return updates
+
+    if terminal_state == SupervisorTerminalState.completed.value:
+        message = "활성 Agent 노드가 남아 있어 Supervisor 실행을 완료할 수 없습니다."
+        updates = {
+            **updates,
+            "terminal_state": SupervisorTerminalState.failed_terminal.value,
+            "final_answer": message,
+            "error_state": {
+                "node": "finalize",
+                "message": message,
+                "reason_code": "active_node_in_completed_state",
+                "retryable": False,
+            },
+        }
+        terminal_state = SupervisorTerminalState.failed_terminal.value
+
+    if terminal_state not in {
+        SupervisorTerminalState.failed_terminal.value,
+        SupervisorTerminalState.failed_with_recoverable_context.value,
+    }:
+        return updates
+
+    message = str(
+        updates.get("final_answer")
+        or "Supervisor 실행이 완료되지 못하고 종료되었습니다."
+    )
+    error_state = updates.get("error_state")
+    reason_code = (
+        str(error_state.get("reason_code") or "supervisor_terminal_failure")
+        if isinstance(error_state, dict)
+        else "supervisor_terminal_failure"
+    )
+    agent_name = active_node_payload.get("agent_name")
+    failed_state, failed_node, failed_event_type = fail_active_node(
+        {**state, **updates},
+        agent_name=agent_name,
+        reason=message,
+        reason_code=reason_code,
+    )
+    emit_node_lifecycle_event(
+        backend_adapter,
+        failed_state,
+        failed_event_type,
+        failed_node,
+        message,
+        action=next(
+            (
+                action
+                for action, mapped_agent in ACTION_TO_AGENT.items()
+                if mapped_agent == failed_node.agent_name
+            ),
+            "",
+        ),
+        metadata={
+            "terminal_state": terminal_state,
+            "reason_code": reason_code,
+        },
+    )
+
+    failed_agents = list(state.get("failed_agents", []))
+    if failed_node.agent_name not in failed_agents:
+        failed_agents.append(failed_node.agent_name)
+    return {
+        **updates,
+        "active_node": None,
+        "failed_agents": failed_agents,
+    }
+
+
+def make_finalize_node(
+    model: Any | None,
+    backend_adapter: Any | None = None,
+):
     def finalize_node(state: SupervisorState) -> SupervisorState:
         try:
             decision = invoke_supervisor_decision(
@@ -871,7 +952,11 @@ def make_finalize_node(model: Any | None):
                 extra=build_finalization_context(state),
             )
         except Exception as exc:
-            return _decision_failure_updates(state, "finalize", exc)
+            return _close_active_node_for_terminal_state(
+                state,
+                _decision_failure_updates(state, "finalize", exc),
+                backend_adapter,
+            )
 
         terminal_state = decision.terminal_state
         current_terminal_state = state.get("terminal_state")
@@ -879,18 +964,26 @@ def make_finalize_node(model: Any | None):
             terminal_state = current_terminal_state
 
         final_answer = state.get("final_answer") or decision.final_answer
-        if terminal_state == SupervisorTerminalState.completed.value:
+        if (
+            terminal_state == SupervisorTerminalState.completed.value
+            and not isinstance(state.get("active_node"), dict)
+        ):
             completion = _check_completion_readiness(state)
             if completion.status != "ready":
                 terminal_state = SupervisorTerminalState.failed_terminal.value
                 final_answer = completion.reason
-        return {
+        updates: SupervisorState = {
             "terminal_state": terminal_state,
             "final_answer": final_answer,
             "next_action": "finalize",
             "current_step": "finalize",
             "llm_decisions": _append_llm_decision(state, "finalize", decision),
         }
+        return _close_active_node_for_terminal_state(
+            state,
+            updates,
+            backend_adapter,
+        )
 
     return finalize_node
 
@@ -949,7 +1042,7 @@ def build_graph(
     graph.add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
     graph.add_node("collect_analysis_review", make_collect_analysis_review_node())
     graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
-    graph.add_node("finalize", make_finalize_node(model))
+    graph.add_node("finalize", make_finalize_node(model, backend_adapter))
 
     graph.add_edge(START, "retrieve_analysis_rules")
     graph.add_edge("retrieve_analysis_rules", "clarify_query")

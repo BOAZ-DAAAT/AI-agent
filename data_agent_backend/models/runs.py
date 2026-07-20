@@ -31,6 +31,7 @@ class RunRecord(BackendModel):
 class RunEvent(BackendModel):
     event_id: str
     run_id: str
+    event_key: str | None = None
     event_type: str
     message: str
     node_name: str | None = None

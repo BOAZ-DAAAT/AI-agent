@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -84,3 +85,87 @@ def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> N
     assert events_response.status_code == 200
     assert events_response.json()[0]["event_type"] == "run.started"
     assert events_response.json()[0]["node_name"] == "supervisor"
+
+
+def test_stream_agent_run_events_resumes_after_last_event_id(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.EVENT_STREAM_POLL_INTERVAL_SECONDS",
+        0,
+    )
+
+    run = services.run_service.create_run(thread_id="thread_stream")
+    first = services.run_service.append_event(
+        run.run_id,
+        "agent.started",
+        "SQL Agent started",
+        node_name="sql_agent",
+    )
+    second = services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+    )
+    services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/events/stream",
+        headers={**_user_header(), "Last-Event-ID": first.event_id},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert f"id: {first.event_id}" not in response.text
+    assert f"id: {second.event_id}" in response.text
+    assert "event: run.event" in response.text
+    assert "event: run.closed" in response.text
+
+    data_lines = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert data_lines[0]["event_id"] == second.event_id
+    assert data_lines[0]["event_type"] == "agent.completed"
+    assert data_lines[-1] == {"run_id": run.run_id, "status": "succeeded"}
+
+
+def test_stream_agent_run_events_replays_all_for_unknown_cursor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.EVENT_STREAM_POLL_INTERVAL_SECONDS",
+        0,
+    )
+
+    run = services.run_service.create_run(thread_id="thread_replay")
+    event = services.run_service.append_event(
+        run.run_id,
+        "agent.started",
+        "SQL Agent started",
+        node_name="sql_agent",
+    )
+    services.run_service.update_status(run.run_id, "failed")
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/events/stream?after=unknown_event",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    assert f"id: {event.event_id}" in response.text
+    assert "event: run.closed" in response.text

@@ -45,6 +45,7 @@ class RunAppendEventRequest(BackendModel):
     run_id: str
     event_type: str
     message: str
+    event_key: str | None = None
     node_name: str | None = None
     tool_name: str | None = None
     artifact_ids: list[str] | None = None
@@ -107,16 +108,17 @@ def append_run_event(payload: RunAppendEventRequest, services: BackendServices =
     return dump_result(
         result_wrap(
             lambda: services.run_service.append_event(
-                payload.run_id,
-                payload.event_type,
-                payload.message,
-                payload.node_name,
-                payload.tool_name,
-                payload.artifact_ids,
-                payload.approval_id,
-                payload.memory_ids,
-                payload.metadata,
-                context_from(payload.context, "run_append_event"),
+                run_id=payload.run_id,
+                event_type=payload.event_type,
+                message=payload.message,
+                event_key=payload.event_key,
+                node_name=payload.node_name,
+                tool_name=payload.tool_name,
+                artifact_ids=payload.artifact_ids,
+                approval_id=payload.approval_id,
+                memory_ids=payload.memory_ids,
+                metadata=payload.metadata,
+                context=context_from(payload.context, "run_append_event"),
             )
         )
     )

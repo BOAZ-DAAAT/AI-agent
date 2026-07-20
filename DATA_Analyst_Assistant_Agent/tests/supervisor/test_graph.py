@@ -26,6 +26,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     empty_supervisor_state,
     merge_agent_result,
     stage_candidate_result,
+    wait_active_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
@@ -688,6 +689,100 @@ def test_finalize_node_preserves_protected_terminal_state_without_report(
 
     assert result["terminal_state"] == terminal_state
     assert result["final_answer"] == "기존 terminal 상태를 보존합니다."
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    ["failed_terminal", "failed_with_recoverable_context"],
+)
+def test_finalize_terminal_failure_closes_active_node(terminal_state: str) -> None:
+    backend = RecordingBackendAdapter()
+    state = _state()
+    state["last_completed_node_id"] = "run_001:node:1"
+    state["node_sequence"] = 1
+    state, active_node, _ = begin_or_retry_agent_node(state, "sql_agent")
+    state["terminal_state"] = terminal_state
+    state["final_answer"] = "복구할 수 없는 오류로 종료합니다."
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision()]),
+        backend,
+    )
+
+    result = node(state)
+    merged = {**state, **result}
+
+    assert merged["active_node"] is None
+    assert merged["last_completed_node_id"] == "run_001:node:1"
+    assert merged["node_sequence"] == 2
+    assert merged["failed_agents"] == ["sql_agent"]
+    assert backend.events[-1]["event_type"] == "agent.failed"
+    assert backend.events[-1]["metadata"]["node_id"] == active_node.node_id
+    assert backend.events[-1]["metadata"]["terminal_state"] == terminal_state
+
+
+def test_finalize_preserves_waiting_node_for_user_approval() -> None:
+    backend = RecordingBackendAdapter()
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
+    state, waiting_node, _ = wait_active_node(
+        state,
+        agent_name="sql_agent",
+        reason="SQL 실행 승인이 필요합니다.",
+    )
+    state["terminal_state"] = "needs_user_approval"
+    state["final_answer"] = "SQL 실행 승인이 필요합니다."
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision()]),
+        backend,
+    )
+
+    result = node(state)
+    merged = {**state, **result}
+
+    assert merged["terminal_state"] == "needs_user_approval"
+    assert merged["active_node"] == waiting_node.model_dump(mode="json")
+    assert backend.events == []
+
+
+def test_finalize_rejects_completed_state_with_active_node() -> None:
+    backend = RecordingBackendAdapter()
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="insight",
+            status="success",
+            summary="인사이트 완료",
+            artifact_ids=["artifact_insight"],
+        ),
+    )
+    state, _, _ = begin_or_retry_agent_node(state, "sql_agent")
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision("completed", "완료")]),
+        backend,
+    )
+
+    result = node(state)
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["active_node"] is None
+    assert result["error_state"]["reason_code"] == "active_node_in_completed_state"
+    assert backend.events[-1]["event_type"] == "agent.failed"
+
+
+def test_repeated_finalize_does_not_emit_duplicate_agent_failed() -> None:
+    backend = RecordingBackendAdapter()
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
+    state["terminal_state"] = "failed_terminal"
+    state["final_answer"] = "최종 실패"
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision(), _final_decision()]),
+        backend,
+    )
+
+    first = {**state, **node(state)}
+    second = {**first, **node(first)}
+
+    assert second["active_node"] is None
+    assert [event["event_type"] for event in backend.events] == ["agent.failed"]
 
 
 def test_decide_next_action_fail_sets_terminal_failure_immediately() -> None:

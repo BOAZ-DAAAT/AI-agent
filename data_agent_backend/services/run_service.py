@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from data_agent_backend.models.approvals import ApprovalRequest, ApprovalStatus
 from data_agent_backend.models.common import BackendError, JsonDict, utc_now_iso
 from data_agent_backend.models.contexts import PolicyContext
@@ -120,6 +122,7 @@ class RunService:
         approval_id: str | None = None,
         memory_ids: list[str] | None = None,
         metadata: JsonDict | None = None,
+        event_key: str | None = None,
         context: PolicyContext | None = None,
     ) -> RunEvent:
         context = context or PolicyContext(run_id=run_id)
@@ -132,34 +135,55 @@ class RunService:
         self.get_run(run_id, context)
         event_id = self.id_generator.new_id("evt")
         now = utc_now_iso()
-        self.sqlite.execute(
-            """
-            INSERT INTO run_events(
-                event_id, run_id, event_type, message, node_name, tool_name, artifact_ids_json,
-                approval_id, memory_ids_json, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_id,
-                run_id,
-                event_type,
-                message,
-                node_name,
-                tool_name,
-                dumps_json(artifact_ids or []),
-                approval_id,
-                dumps_json(memory_ids or []),
-                dumps_json(metadata or {}),
-                now,
-            ),
+        try:
+            self.sqlite.execute(
+                """
+                INSERT INTO run_events(
+                    event_id, run_id, event_key, event_type, message, node_name,
+                    tool_name, artifact_ids_json, approval_id, memory_ids_json,
+                    metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    run_id,
+                    event_key,
+                    event_type,
+                    message,
+                    node_name,
+                    tool_name,
+                    dumps_json(artifact_ids or []),
+                    approval_id,
+                    dumps_json(memory_ids or []),
+                    dumps_json(metadata or {}),
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            if event_key is None:
+                raise
+            existing_row = self.sqlite.query_one(
+                "SELECT * FROM run_events WHERE run_id = ? AND event_key = ?",
+                (run_id, event_key),
+            )
+            if existing_row is None:
+                raise
+            return self._event_row_to_model(existing_row)
+
+        row = self.sqlite.query_one(
+            "SELECT * FROM run_events WHERE event_id = ?",
+            (event_id,),
         )
-        return self._event_row_to_model(self.sqlite.query_one("SELECT * FROM run_events WHERE event_id = ?", (event_id,)))
+        return self._event_row_to_model(row)
 
     def list_events(self, run_id: str, context: PolicyContext | None = None) -> list[RunEvent]:
         context = context or PolicyContext(run_id=run_id)
         self.policy_engine.enforce("run.event.read", run_id, {}, context)
         self.get_run(run_id, context)
-        rows = self.sqlite.query_all("SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at", (run_id,))
+        rows = self.sqlite.query_all(
+            "SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at, rowid",
+            (run_id,),
+        )
         return [self._event_row_to_model(row) for row in rows]
 
     def get_summary(self, run_id: str, context: PolicyContext | None = None) -> RunSummary:
@@ -192,6 +216,7 @@ class RunService:
         return RunEvent(
             event_id=row["event_id"],
             run_id=row["run_id"],
+            event_key=row["event_key"],
             event_type=row["event_type"],
             message=row["message"],
             node_name=row["node_name"],
