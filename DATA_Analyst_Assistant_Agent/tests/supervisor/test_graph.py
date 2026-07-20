@@ -875,9 +875,10 @@ def test_execute_subagent_emits_agent_lifecycle_events() -> None:
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
     assert ("result.staged", "sql_agent") in event_pairs
-    assert ("node.completed", "sql_agent") in event_pairs
+    assert ("agent.completed", "sql_agent") not in event_pairs
+    assert result["active_node"]["status"] == "running"
 
 
 def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> None:
@@ -894,8 +895,9 @@ def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> No
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
-    assert ("node.failed", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
+    assert ("agent.failed", "sql_agent") in event_pairs
+    assert result["active_node"] is None
 
 
 def test_execute_subagent_unsupported_action_fails_terminally() -> None:

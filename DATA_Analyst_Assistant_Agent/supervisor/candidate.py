@@ -21,6 +21,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     PendingApproval,
     begin_or_retry_agent_node,
     complete_active_node,
+    discard_active_node_for_recovery,
     fail_active_node,
     normalize_supervisor_state,
     promote_pending_result,
@@ -624,6 +625,76 @@ def commit_candidate(
     return promoted
 
 
+def _prepare_active_node_for_recovery_target(
+    state: SupervisorState,
+    record: ValidationRecord,
+    target_agent: AgentName,
+    target_action: NextAction,
+    reason: str,
+    backend_adapter: Any | None,
+) -> SupervisorState:
+    active_node_payload = state.get("active_node")
+    if not isinstance(active_node_payload, dict):
+        return state
+    if active_node_payload.get("agent_name") == target_agent:
+        return state
+
+    transitioned, discarded_node, discarded_event_type = (
+        discard_active_node_for_recovery(
+            state,
+            next_agent_name=target_agent,
+            reason=reason,
+        )
+    )
+    emit_node_lifecycle_event(
+        backend_adapter,
+        transitioned,
+        discarded_event_type,
+        discarded_node,
+        reason,
+        action=target_action,
+        metadata={
+            "candidate_id": record.candidate_id,
+            "validation_id": record.validation_id,
+            "from_agent": discarded_node.agent_name,
+            "to_agent": target_agent,
+            "reason_code": record.outcome.reason_code,
+        },
+    )
+    return transitioned
+
+
+def _fail_active_node_after_recovery(
+    state: SupervisorState,
+    record: ValidationRecord,
+    reason: str,
+    backend_adapter: Any | None,
+) -> SupervisorState:
+    if not isinstance(state.get("active_node"), dict):
+        return state
+
+    failed_state, failed_node, failed_event_type = fail_active_node(
+        state,
+        agent_name=record.agent,
+        reason=reason,
+        reason_code=record.outcome.reason_code or "semantic_recovery_exhausted",
+    )
+    emit_node_lifecycle_event(
+        backend_adapter,
+        failed_state,
+        failed_event_type,
+        failed_node,
+        reason,
+        action=_ACTION_BY_AGENT[record.agent],
+        metadata={
+            "candidate_id": record.candidate_id,
+            "validation_id": record.validation_id,
+            "disposition": "recover",
+        },
+    )
+    return failed_state
+
+
 def _commit_semantic_recovery(
     state: SupervisorState,
     pending: dict[str, Any],
@@ -693,6 +764,7 @@ def _commit_semantic_recovery(
         return _finish_semantic_recovery(
             recovered,
             record,
+            backend_adapter,
             original_action=original_action,
             path=[original_action] if original_action else [],
             actual_action=None,
@@ -729,6 +801,14 @@ def _commit_semantic_recovery(
             recovered["semantic_recovery_attempts"] = attempts
             recovered["next_action"] = actual_action
             recovered["terminal_state"] = "running"
+            recovered = _prepare_active_node_for_recovery_target(
+                recovered,
+                record,
+                target,
+                actual_action,
+                record.outcome.reason,
+                backend_adapter,
+            )
             recovered = _record_recovery_audit(
                 recovered,
                 record,
@@ -836,6 +916,7 @@ def _schedule_limited_insight_or_finish(
         return _finish_semantic_recovery(
             state,
             record,
+            backend_adapter,
             original_action=original_action,
             path=path,
             actual_action=None,
@@ -864,6 +945,7 @@ def _schedule_limited_insight_or_finish(
         return _finish_semantic_recovery(
             state,
             record,
+            backend_adapter,
             original_action=original_action,
             path=path,
             actual_action=None,
@@ -879,6 +961,14 @@ def _schedule_limited_insight_or_finish(
     state["limitations"] = _append_unique(
         state.get("limitations", []),
         "승인된 기존 근거만 사용해 제한적 인사이트 fallback을 생성합니다.",
+    )
+    state = _prepare_active_node_for_recovery_target(
+        state,
+        record,
+        "insight_agent",
+        "call_insight_agent",
+        fallback_reason,
+        backend_adapter,
     )
     state = _record_recovery_audit(
         state,
@@ -910,6 +1000,7 @@ def _schedule_limited_insight_or_finish(
 def _finish_semantic_recovery(
     state: SupervisorState,
     record: ValidationRecord,
+    backend_adapter: Any | None,
     *,
     original_action: NextAction | None,
     path: list[str | None],
@@ -918,6 +1009,12 @@ def _finish_semantic_recovery(
     terminal_state: str,
     correction_reasons: list[str] | None = None,
 ) -> SupervisorState:
+    state = _fail_active_node_after_recovery(
+        state,
+        record,
+        fallback_reason,
+        backend_adapter,
+    )
     finished = _record_recovery_audit(
         state,
         record,
