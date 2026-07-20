@@ -262,11 +262,14 @@ STEP_SUMMARY_DECISION_PROMPT = """
 FINALIZE_DECISION_PROMPT = """
 당신은 데이터 분석가용 에이전트의 finalize 노드를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 최종 terminal_state와 사용자에게 반환할 final_answer를 결정하세요.
-리포트가 완료되었으면 completed, 추가 정보가 필요하면 needs_clarification, 승인 대기면 needs_user_approval, 완료할 수 없으면 failed_terminal을 선택하세요.
+리포트가 완료되었으면 completed, 추가 정보가 필요하면 needs_clarification, 완료할 수 없으면 failed_terminal을 선택하세요.
+needs_user_approval은 선택하지 마세요 — finalize 시점에는 이미 모든 서브 에이전트 작업이
+끝난 상태라 실제로 재개 가능한 승인 대기를 만들 수 없습니다. 해석에 주의가 필요하거나
+운영 기준 확인이 있으면 좋겠다고 판단되면, completed를 선택하고 그 caveat을 final_answer
+문장 안에 그대로 설명하세요(승인을 기다리는 것처럼 쓰지 말 것).
 
 허용 terminal_state:
 - completed
-- needs_user_approval
 - needs_clarification
 - failed_with_recoverable_context
 - failed_terminal
@@ -280,4 +283,5 @@ FINALIZE_DECISION_PROMPT = """
 
 예시:
 {"terminal_state":"completed","final_answer":"최종 리포트 생성이 완료되었습니다.","next_action":"finalize","reason":"리포트 산출물이 확인되었습니다."}
+{"terminal_state":"completed","final_answer":"판매자별 표본이 불균형해 집계 기준에 따라 결과가 달라질 수 있습니다. 이 점을 감안해 참고해 주세요.","next_action":"finalize","reason":"분석은 끝났으나 해석에 주의가 필요합니다."}
 """.strip()

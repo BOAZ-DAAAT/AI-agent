@@ -17,7 +17,7 @@ import json
 import re
 from typing import Any
 
-_NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_NUM_RE = re.compile(r"(?<!\d)-?\d[\d,]*(?:\.\d+)?")
 _SMALL_INT_SKIP = 12                                  # "상위 10개"류 서수 허용 상한
 
 
