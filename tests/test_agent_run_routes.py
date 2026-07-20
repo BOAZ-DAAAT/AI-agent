@@ -20,6 +20,20 @@ def _user_header() -> dict[str, str]:
     return {"Authorization": "Bearer ignored"}
 
 
+def _waiting_clarification_run(services, *, interrupt_type: str = "clarification"):
+    run = services.run_service.create_run(
+        thread_id="thread_clarification",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    return services.run_service.update_status(
+        run.run_id,
+        "waiting_input",
+        metadata={"interrupt_type": interrupt_type, "node": "collect_clarification"},
+    )
+
+
 def test_create_agent_run_returns_run_id_and_uses_selected_session(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)
@@ -169,3 +183,112 @@ def test_stream_agent_run_events_replays_all_for_unknown_cursor(
     assert response.status_code == 200
     assert f"id: {event.event_id}" in response.text
     assert "event: run.closed" in response.text
+
+
+def test_resume_clarification_claims_run_and_schedules_same_thread(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = _waiting_clarification_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    owned_session = SimpleNamespace(id="sess_001", session_db="session_db", mart_db="mart_db")
+    ownership: dict[str, str] = {}
+
+    def fake_get_owned_session(session_id: str, username: str):
+        ownership.update(session_id=session_id, username=username)
+        return owned_session
+
+    seen: dict[str, object] = {}
+
+    def fake_resume(**kwargs) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr("backend.agent_runs.routes.get_owned_session", fake_get_owned_session)
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", fake_resume)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "clarification", "answer": "  월별 기준으로 분석해줘  "},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "run_id": run.run_id,
+        "thread_id": "thread_clarification",
+        "status": "running",
+        "resume_type": "clarification",
+    }
+    assert ownership == {"session_id": "sess_001", "username": "dev"}
+    assert seen["run_id"] == run.run_id
+    assert seen["thread_id"] == "thread_clarification"
+    assert seen["answer"] == "월별 기준으로 분석해줘"
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_resume_clarification_rejects_duplicate_submission(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = _waiting_clarification_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.resume_agent_run",
+        lambda **kwargs: calls.append(kwargs["run_id"]),
+    )
+
+    first = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "clarification", "answer": "월별"},
+        headers=_user_header(),
+    )
+    second = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "clarification", "answer": "분기별"},
+        headers=_user_header(),
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert calls == [run.run_id]
+
+
+@pytest.mark.parametrize(
+    ("interrupt_type", "answer", "expected_status"),
+    [
+        ("analysis_review", "승인", 409),
+        ("clarification", "   ", 422),
+    ],
+)
+def test_resume_clarification_validates_waiting_contract(
+    tmp_path,
+    monkeypatch,
+    interrupt_type: str,
+    answer: str,
+    expected_status: int,
+) -> None:
+    services = _services(tmp_path)
+    run = _waiting_clarification_run(services, interrupt_type=interrupt_type)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "clarification", "answer": answer},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == expected_status
