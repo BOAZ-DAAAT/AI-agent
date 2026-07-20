@@ -260,6 +260,179 @@ def test_resume_clarification_rejects_duplicate_submission(tmp_path, monkeypatch
     assert calls == [run.run_id]
 
 
+def _succeeded_run(services, *, thread_id: str = "thread_branch_src"):
+    run = services.run_service.create_run(
+        thread_id=thread_id,
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "query": "지난 3개월 매출 추이를 분석해줘"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    return services.run_service.update_status(run.run_id, "succeeded")
+
+
+def test_branch_run_starts_background_task_with_plan_from_checkpoint(tmp_path, monkeypatch) -> None:
+    from backend.agent_runs.service import BranchPlan
+
+    services = _services(tmp_path)
+    run = _succeeded_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    plan = BranchPlan(
+        upstream_artifact_ids={"sql_agent": ["art_sql_1"]},
+        original_question="지난 3개월 매출 추이를 분석해줘",
+        target_table="analytics.mart_sales",
+        default_parent_node_id="node_1",
+    )
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.prepare_branch_plan",
+        lambda **kwargs: plan,
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.run_branch_task",
+        lambda **kwargs: seen.update(kwargs),
+    )
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/branch",
+        json={"start_stage": "eda", "instruction": "표본이 30 미만인 판매자는 제외하고 다시 분석해줘"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["run_id"] != run.run_id
+    assert body["run_id"].startswith("run_")
+    assert body["thread_id"] == "thread_branch_src"
+    assert body["status"] == "created"
+    assert body["start_stage"] == "eda"
+    assert body["source_run_id"] == run.run_id
+    assert seen["run_id"] == body["run_id"]
+    assert seen["thread_id"] == "thread_branch_src"
+    assert seen["start_stage"] == "eda"
+    assert seen["upstream_artifact_ids"] == {"sql_agent": ["art_sql_1"]}
+    assert seen["target_table"] == "analytics.mart_sales"
+    # 프론트가 parent_node_id를 안 보내면 체크포인트의 기본값을 쓴다.
+    assert seen["parent_node_id"] == "node_1"
+
+    # 원본 run은 이미 종료 상태라 그대로 succeeded로 남는다(재사용하지 않음).
+    assert services.run_service.get_run(run.run_id).status.value == "succeeded"
+    branch_run_record = services.run_service.get_run(body["run_id"])
+    assert branch_run_record.metadata["branched_from_run_id"] == run.run_id
+
+
+def test_branch_run_prefers_explicit_parent_node_id(tmp_path, monkeypatch) -> None:
+    from backend.agent_runs.service import BranchPlan
+
+    services = _services(tmp_path)
+    run = _succeeded_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    plan = BranchPlan(
+        upstream_artifact_ids={},
+        original_question="질문",
+        target_table=None,
+        default_parent_node_id="node_default",
+    )
+    monkeypatch.setattr("backend.agent_runs.routes.prepare_branch_plan", lambda **kwargs: plan)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.run_branch_task", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/branch",
+        json={"start_stage": "sql", "instruction": "지시", "parent_node_id": "node_clicked"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert seen["parent_node_id"] == "node_clicked"
+
+
+def test_branch_run_rejects_non_succeeded_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_running",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/branch",
+        json={"start_stage": "eda", "instruction": "지시"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 409
+
+
+def test_branch_run_rejects_missing_upstream_artifacts(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = _succeeded_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+
+    def fake_prepare_branch_plan(**kwargs):
+        from backend.agent_runs.service import BranchPlanError
+
+        raise BranchPlanError("eda 단계 결과가 없어 분기를 시작할 수 없습니다.")
+
+    monkeypatch.setattr("backend.agent_runs.routes.prepare_branch_plan", fake_prepare_branch_plan)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/branch",
+        json={"start_stage": "analysis", "instruction": "지시"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 409
+    # 실패 시 run 상태를 running으로 바꾸면 안 된다(분기가 시작되지 않았으므로).
+    assert services.run_service.get_run(run.run_id).status.value == "succeeded"
+
+
+def test_branch_run_rejects_blank_instruction(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = _succeeded_run(services)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/branch",
+        json={"start_stage": "eda", "instruction": "   "},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 422
+
+
 @pytest.mark.parametrize(
     ("interrupt_type", "answer", "expected_status"),
     [
