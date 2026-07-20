@@ -56,6 +56,7 @@ class FakeBackendAdapter:
         event_type,
         message,
         *,
+        event_key=None,
         node_name=None,
         tool_name=None,
         artifact_ids=None,
@@ -68,6 +69,7 @@ class FakeBackendAdapter:
                 "run_id": run_id,
                 "event_type": event_type,
                 "message": message,
+                "event_key": event_key,
                 "node_name": node_name,
                 "metadata": metadata,
             }
