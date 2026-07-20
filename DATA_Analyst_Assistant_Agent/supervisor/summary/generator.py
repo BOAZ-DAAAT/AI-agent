@@ -89,7 +89,18 @@ _FACT_LABELS = {
 }
 
 
-def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef:
+def generate_node_summary(
+    artifact_ids: list[str],
+    runtime: AgentRuntime,
+    *,
+    branch_instruction: str | None = None,
+) -> ArtifactRef:
+    """branch_instruction: 분기(재분석) 시 이 단계에 추가로 반영된 지시사항.
+
+    원본 파이프라인 실행에서는 항상 None이라 기존 동작에 영향이 없다. 분기 실행에서
+    값이 있으면, 이 단계가 그 지시사항을 어떻게 반영했는지 결과 서술에 명시적으로
+    드러나도록 프롬프트에 덧붙인다(_generate_with_llm 참고).
+    """
     if not artifact_ids:
         raise ValueError("generate_node_summary는 artifact_ids가 최소 1개 필요합니다.")
 
@@ -98,6 +109,8 @@ def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> Art
         return cached
 
     evidence = read_node_evidence(artifact_ids, runtime)
+    if branch_instruction and branch_instruction.strip():
+        evidence.facts["branch_instruction"] = branch_instruction.strip()
     result = _generate_with_llm(evidence) if evidence.facts else None
     if result is None:
         result = _fallback_result(evidence)
@@ -138,11 +151,19 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
     known_chart_ids = {c.artifact_id for c in evidence.charts}
     build_prompt = _PROMPT_BUILDERS[detail_kind]
     parse_result = _RESULT_PARSERS[detail_kind]
+    branch_instruction = str(evidence.facts.get("branch_instruction") or "").strip()
 
     feedback = ""
     for _ in range(_MAX_ATTEMPTS):
         try:
-            raw = llm.invoke(build_prompt(evidence, feedback)).content
+            prompt = build_prompt(evidence, feedback)
+            if branch_instruction:
+                prompt += (
+                    "\n\n[분기 지시사항] 이 결과는 원본 분석에서 분기하여 다음 추가 지시사항을 "
+                    f"반영해 재실행한 것이다: \"{branch_instruction}\"\n"
+                    "이 지시사항을 어떻게 반영했는지 background 또는 conclusion에서 명시적으로 서술하라."
+                )
+            raw = llm.invoke(prompt).content
         except Exception:  # noqa: BLE001 — LLM 호출 실패는 폴백으로 처리
             return None
         parsed = _parse_llm_json(raw)
