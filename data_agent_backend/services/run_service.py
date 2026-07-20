@@ -111,6 +111,50 @@ class RunService:
         self.sqlite.execute(f"UPDATE runs SET {', '.join(updates)} WHERE run_id = ?", params)
         return self.get_run(run_id, context)
 
+    def claim_waiting_input(
+        self,
+        run_id: str,
+        metadata: JsonDict | None = None,
+        context: PolicyContext | None = None,
+    ) -> RunRecord:
+        """Atomically claim a waiting run before scheduling its resume task."""
+        context = context or PolicyContext(run_id=run_id)
+        self.policy_engine.enforce(
+            "run.update",
+            run_id,
+            {"status": RunStatus.running.value, "metadata": metadata or {}},
+            context,
+        )
+        run = self.get_run(run_id, context)
+        merged_metadata = dict(run.metadata)
+        merged_metadata.update(metadata or {})
+        now = utc_now_iso()
+
+        with self.sqlite.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET status = ?, metadata_json = ?, updated_at = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (
+                    RunStatus.running.value,
+                    dumps_json(merged_metadata),
+                    now,
+                    run_id,
+                    RunStatus.waiting_input.value,
+                ),
+            )
+
+        if cursor.rowcount != 1:
+            current = self.get_run(run_id, context)
+            raise BackendError(
+                "RUN_NOT_WAITING_INPUT",
+                "Run is not waiting for clarification input.",
+                {"run_id": run_id, "status": current.status.value},
+            )
+        return self.get_run(run_id, context)
+
     def append_event(
         self,
         run_id: str,

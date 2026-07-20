@@ -14,7 +14,7 @@ from data_agent_backend.models.runs import RunStatus
 from data_agent_backend.services.factory import BackendServices
 
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
-from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorTerminalState
+from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state
 
@@ -154,22 +154,88 @@ def launch_agent_run(
             supervisor._update_run_from_interrupt(run_id, interrupt)
             return
         result = supervisor._update_run_from_terminal_output(run_id, output)
-        state = result.state
-        message = state.final_answer or "Agent workflow finished."
-        services.run_service.append_event(
-            run_id,
-            "run.completed",
-            message,
-            node_name="supervisor",
-            metadata={"terminal_state": state.terminal_state.value if state and state.terminal_state else None},
-        )
+        _append_terminal_event(services, run_id, result)
     except Exception as exc:
-        services.run_service.update_status(run_id, RunStatus.failed, metadata={"error": str(exc), "session_id": session.id})
+        _mark_run_failed(services, run_id, session.id, exc)
+        raise
+
+
+def resume_agent_run(
+    *,
+    services: BackendServices,
+    session: SessionResponse,
+    answer: str,
+    run_id: str,
+    thread_id: str,
+) -> None:
+    run = services.run_service.get_run(run_id)
+    interrupt_node = run.metadata.get("node")
+    node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
+    services.run_service.append_event(
+        run_id,
+        "human_input.resumed",
+        "Clarification answer received. Resuming agent workflow.",
+        node_name=node_name,
+        metadata={
+            "interrupt_type": "clarification",
+            "thread_id": thread_id,
+            "node": node_name,
+        },
+    )
+
+    try:
+        catalog_summary = build_session_catalog_summary(session)
+        adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
+        supervisor = SupervisorAgent(adapter, checkpoint_path=adapter.base_data_dir / f"{thread_id}.sqlite")
+        with bind_session_database(session):
+            result = supervisor.resume(thread_id, {"answer": answer})
+        if isinstance(result, SupervisorRunResult) and result.kind == "state":
+            _append_terminal_event(services, run_id, result)
+    except Exception as exc:
+        _mark_run_failed(services, run_id, session.id, exc)
+        raise
+
+
+def _append_terminal_event(
+    services: BackendServices,
+    run_id: str,
+    result: SupervisorRunResult,
+) -> None:
+    state = result.state
+    if state is None or state.terminal_state is None:
+        return
+    if state.terminal_state == SupervisorTerminalState.needs_user_approval:
+        return
+
+    completed = state.terminal_state == SupervisorTerminalState.completed
+    services.run_service.append_event(
+        run_id,
+        "run.completed" if completed else "run.failed",
+        state.final_answer or ("Agent workflow finished." if completed else "Agent workflow failed."),
+        node_name="supervisor",
+        metadata={"terminal_state": state.terminal_state.value},
+    )
+
+
+def _mark_run_failed(
+    services: BackendServices,
+    run_id: str,
+    session_id: str,
+    exc: Exception,
+) -> None:
+    try:
+        run = services.run_service.get_run(run_id)
+        if run.status != RunStatus.failed:
+            services.run_service.update_status(
+                run_id,
+                RunStatus.failed,
+                metadata={"error": str(exc), "session_id": session_id},
+            )
+    finally:
         services.run_service.append_event(
             run_id,
             "run.failed",
             str(exc),
             node_name="supervisor",
-            metadata={"session_id": session.id},
+            metadata={"session_id": session_id},
         )
-        raise
