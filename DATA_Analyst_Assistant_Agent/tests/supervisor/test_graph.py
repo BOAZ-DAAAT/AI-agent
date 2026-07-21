@@ -373,13 +373,15 @@ def _semantic_decision(
     semantic_valid: bool = True,
     severity: str = "info",
     recommended_next_action: str = "",
+    reason: str = "의미 검증 advisory",
+    missing_evidence: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "semantic_valid": semantic_valid,
         "severity": severity,
         "recommended_next_action": recommended_next_action,
-        "reason": "의미 검증 advisory",
-        "missing_evidence": [],
+        "reason": reason,
+        "missing_evidence": missing_evidence or [],
         "alignment_notes": ["계획과 결과가 정렬되어 있습니다."],
     }
 
@@ -483,6 +485,41 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
     assert result["accepted_evidence"].keys() == {"sql_agent", "insight"}
     assert len(result["rejected_results"]) == 1
     assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["terminal_state"] == "completed"
+
+
+def test_missing_evidence_recommendation_promotes_candidate_then_routes_to_sql() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(
+                recommended_next_action="call_sql_agent",
+                reason="",
+                missing_evidence=["monthly_sales"],
+            ),
+            _semantic_decision(recommended_next_action="finalize"),
+            _semantic_decision(),
+            _final_decision("completed", "후속 SQL 근거로 인사이트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(subagent_adapter=adapter, model=model)
+
+    result = graph.invoke(
+        _state(),
+        {"configurable": {"thread_id": "thread_missing_evidence_advisory"}},
+    )
+
+    assert adapter.calls == ["analysis_agent", "sql_agent"]
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["rejected_results"] == []
+    assert result["completed_agents"] == ["analysis_agent", "sql_agent", "insight"]
+    assert result["accepted_evidence"].keys() == {
+        "analysis_agent", "sql_agent", "insight",
+    }
+    assert "누락 근거: monthly_sales" in result["limitations"]
     assert result["terminal_state"] == "completed"
 
 
