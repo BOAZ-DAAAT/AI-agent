@@ -234,15 +234,20 @@ def validate_candidate(
         updates["semantic_retry_counts"] = counts
         return updates
 
-    semantic_recover = (
-        semantic_decision.severity == "error"
-        or bool(semantic_decision.missing_evidence)
-        or (
-            semantic_decision.severity == "info"
-            and not semantic_decision.semantic_valid
-        )
+    semantic_recover = semantic_decision.severity == "error" or (
+        semantic_decision.severity == "info"
+        and not semantic_decision.semantic_valid
     )
-    semantic_warning = semantic_decision.severity == "warning" and not semantic_decision.missing_evidence
+    semantic_advisory = (
+        semantic_decision.severity == "warning"
+        or bool(semantic_decision.missing_evidence)
+    )
+    semantic_advisory_reason = semantic_decision.reason
+    if not semantic_advisory_reason and semantic_decision.missing_evidence:
+        semantic_advisory_reason = (
+            "누락 근거: "
+            + ", ".join(str(item) for item in semantic_decision.missing_evidence)
+        )
     if semantic_recover:
         semantic_findings = [
             ValidationFinding(
@@ -254,14 +259,18 @@ def validate_candidate(
                 details={"missing_evidence": list(semantic_decision.missing_evidence)},
             )
         ]
-    elif semantic_warning:
+    elif semantic_advisory:
         semantic_findings = [
             ValidationFinding(
                 code="semantic_validation_warning",
                 source="supervisor",
                 severity="warning",
                 disposition="limitation",
-                message=semantic_decision.reason or "semantic validation에 제한사항이 있습니다.",
+                message=(
+                    semantic_advisory_reason
+                    or "semantic validation에 제한사항이 있습니다."
+                ),
+                details={"missing_evidence": list(semantic_decision.missing_evidence)},
             )
         ]
     else:
@@ -283,10 +292,14 @@ def validate_candidate(
         )
     elif contract_decision.decision == "await_approval":
         outcome = outcome_from_contract_decision(result.agent, contract_decision)
-    elif semantic_warning or contract_decision.decision == "accept_with_limitations":
+    elif semantic_advisory or contract_decision.decision == "accept_with_limitations":
         outcome = ValidationOutcome(
             disposition="accept_with_limitations",
-            reason=semantic_decision.reason if semantic_warning else contract_decision.reason,
+            reason=(
+                semantic_advisory_reason
+                if semantic_advisory
+                else contract_decision.reason
+            ),
         )
     else:
         outcome = ValidationOutcome(disposition="accept", reason=contract_decision.reason)
