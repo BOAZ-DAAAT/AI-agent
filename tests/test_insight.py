@@ -130,6 +130,54 @@ def test_evidence_pack_comprehensive():
 # ─────────────────────────────
 # 도구: compute / chart / look
 # ─────────────────────────────
+def test_evidence_pack_keeps_raw_analysis_for_lookup():
+    analysis_payload = {
+        "method_summary": "compact summary",
+        "key_findings": ["finding"],
+        "evidence": [{"statistics": {"p_value": 0.03}}],
+        "debug_artifact_id": "ad1",
+    }
+    debug_payload = {
+        "terminal_reason": "validated_result",
+        "generated_code": "result = {'summary': 'ok'}",
+        "raw_statistics": [{"p_value": 0.03}],
+    }
+    adapter = FakeAdapter({
+        "s1": (ArtifactType.sql_result, _CSV),
+        "a1": (ArtifactType.file, json.dumps(analysis_payload)),
+        "ad1": (ArtifactType.file, json.dumps(debug_payload)),
+    })
+
+    pack = build_evidence_pack(_state(sql_agent=["s1"], analysis_agent=["a1", "ad1"]), _runtime(adapter))
+
+    assert pack.analysis == {
+        "method_summary": "compact summary",
+        "key_findings": ["finding"],
+        "limitations": [],
+        "data_quality_notes": [],
+    }
+    assert pack.analysis_raw["evidence"][0]["statistics"]["p_value"] == 0.03
+    assert pack.analysis_debug["generated_code"].startswith("result =")
+    assert set(pack.source_artifact_ids) == {"s1", "a1", "ad1"}
+
+
+def test_look_can_read_raw_analysis_and_debug_paths():
+    pack = EvidencePack(
+        user_question="q",
+        route_kind="simple",
+        analysis={"method_summary": "compact"},
+        analysis_raw={"evidence": [{"statistics": {"effect_size": 1.2}}]},
+        analysis_debug={"raw_statistics": [{"p_value": 0.03}]},
+        raw_artifact_ids={"analysis": "a1", "analysis_debug": "ad1"},
+    )
+
+    raw = run_look(pack, {"target": "analysis_raw", "path": "evidence.0.statistics.effect_size"})
+    debug = run_look(pack, {"target": "analysis_debug", "path": "raw_statistics.0.p_value"})
+
+    assert raw["ok"] and raw["excerpt"] == 1.2 and raw["artifact_id"] == "a1"
+    assert debug["ok"] and debug["excerpt"] == 0.03 and debug["artifact_id"] == "ad1"
+
+
 def test_compute_success():
     out = run_compute(_pack(), {"expression": "df.groupby('category')['total_sales'].sum().nlargest(3)"})
     assert out["ok"] and out["result"]["toys"] == 900.0

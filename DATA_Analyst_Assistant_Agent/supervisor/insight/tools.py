@@ -136,6 +136,65 @@ def _dig(payload: dict, path: str) -> Any:
 # ─────────────────────────────
 # compute — 보조 계산 (게이트 통과 필수)
 # ─────────────────────────────
+def _dig(payload: dict, path: str) -> Any:
+    """Read a dotted path from dict/list payloads. Empty path returns payload."""
+    cur: Any = payload
+    if not path:
+        return cur
+    for key in [p for p in path.split(".") if p]:
+        if isinstance(cur, dict):
+            if key not in cur:
+                return None
+            cur = cur[key]
+            continue
+        if isinstance(cur, list) and key.isdigit():
+            index = int(key)
+            if index >= len(cur):
+                return None
+            cur = cur[index]
+            continue
+        return None
+    return cur
+
+
+def run_look(pack, args: dict) -> dict:
+    target = str(args.get("target", "table"))
+    if target == "table":
+        return {"ok": True, "target": target, "excerpt": pack.table_summary or "empty table"}
+    if target == "sql":
+        return {"ok": True, "target": target, "excerpt": pack.generated_sql or "(no generated SQL)"}
+
+    payloads = {
+        "eda": pack.eda,
+        "analysis": pack.analysis,
+        "eda_raw": getattr(pack, "eda_raw", {}),
+        "analysis_raw": getattr(pack, "analysis_raw", {}),
+        "analysis_debug": getattr(pack, "analysis_debug", {}),
+    }
+    if target in payloads:
+        payload = payloads[target]
+        if not payload:
+            return {
+                "ok": False,
+                "error": (
+                    f"{target} evidence is unavailable. Do not repeat this look target; "
+                    "use table summary, compute, or another available evidence target. 없다"
+                ),
+            }
+        excerpt = _dig(payload, str(args.get("path", "")))
+        artifact_key = target.replace("_raw", "")
+        return {
+            "ok": True,
+            "target": target,
+            "artifact_id": getattr(pack, "raw_artifact_ids", {}).get(artifact_key, ""),
+            "excerpt": excerpt if excerpt is not None else "(path not found)",
+        }
+    return {
+        "ok": False,
+        "error": "unknown_target: use one of table, eda, analysis, eda_raw, analysis_raw, analysis_debug, sql",
+    }
+
+
 def run_compute(pack, args: dict) -> dict:
     expression = str(args.get("expression", ""))
     ok, result = eval_expression(pack.df, expression)

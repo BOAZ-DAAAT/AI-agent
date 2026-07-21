@@ -186,7 +186,9 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
 {obs_text}
 
 [도구 — 반드시 하나만 JSON으로 제안]
-- look: 증거 더 보기. args={{"target":"table|eda|analysis|sql","path":"eda/analysis 내부 점표기 경로(선택, 예: statistical_metadata.group_comparison)"}}
+- look: 증거 더 보기. args={{"target":"table|eda|analysis|eda_raw|analysis_raw|analysis_debug|sql","path":"eda/analysis 내부 점표기 경로(선택, 예: statistical_metadata.group_comparison)"}}
+  * prompt에는 요약만 들어온다. 분석 원본이 필요하면 analysis_raw, 생성 코드/critic/raw_statistics/error_history가 필요하면 analysis_debug를 path와 함께 조회하라.
+  * 조회가 필요한 때: 요약만으로 답변 근거가 부족할 때, 숫자 검증이 실패했을 때, 사용한 분석 방법/가정/통계량/한계를 확인해야 할 때, 이전 analysis 실패 원인이나 critic 피드백을 확인해야 할 때.
 - compute: 보조 계산. args={{"expression":"df 단일 pandas 표현식"}}
   · 허용: 증감률·차이·비율·top/bottom·정렬·간단 집계·reshape / 금지: 회귀·군집·검정·인과·예측·외부데이터
   · 게이트가 거부하니 쓰지 마라: comprehension·lambda·query·eval·apply·merge·파일IO. df·pd·np 만, 단일 표현식만.

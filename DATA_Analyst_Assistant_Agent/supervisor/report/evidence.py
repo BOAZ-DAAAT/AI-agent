@@ -24,6 +24,7 @@ _KIND_TO_STAGE = {
     "sql_plan": "sql",
     "eda_summary": "eda",
     "analysis_result": "analysis",
+    "analysis_debug": "analysis",
     "insight_payload": "insight",
 }
 _STAGE_LABELS = {
@@ -176,12 +177,21 @@ def _read_eda_stage(entries: list[tuple[str, str]], runtime: AgentRuntime) -> St
 
 
 def _read_analysis_stage(entries: list[tuple[str, str]], runtime: AgentRuntime) -> StageEvidence:
-    artifact_id = entries[0][0]
+    result_entries = [(aid, kind) for aid, kind in entries if kind == "analysis_result"]
+    debug_entries = [(aid, kind) for aid, kind in entries if kind == "analysis_debug"]
+    artifact_id = (result_entries or entries)[0][0]
     payload = read_json_artifact(runtime, artifact_id)
+    debug_payload = {}
+    if debug_entries:
+        try:
+            debug_payload = read_json_artifact(runtime, debug_entries[0][0])
+        except Exception:  # noqa: BLE001
+            debug_payload = {}
     facts = {
         "title": payload.get("title", ""),
         "executive_summary": payload.get("executive_summary", ""),
         "key_findings": payload.get("key_findings", []),
+        "debug_artifact_id": payload.get("debug_artifact_id") or (debug_entries[0][0] if debug_entries else ""),
         # method_decision/evidence는 analysis_kind와 무관하게 항상 존재하는 범용 필드다
         # (세그멘테이션/코호트/회귀 등 가설검정이 아닌 분석도 이 형태로 나온다).
         # hypotheses(H0/H1)는 correlation/group_comparison/trend류에서만 채워지는 특수 사례.
@@ -191,6 +201,14 @@ def _read_analysis_stage(entries: list[tuple[str, str]], runtime: AgentRuntime) 
         "limitations": payload.get("limitations", []),
         "method_notes": payload.get("method_notes", []),
     }
+    if debug_payload:
+        facts["debug_summary"] = {
+            "terminal_reason": debug_payload.get("terminal_reason", ""),
+            "codegen_attempts": debug_payload.get("codegen_attempts", 0),
+            "code_critique": debug_payload.get("code_critique"),
+            "raw_statistics": debug_payload.get("raw_statistics", []),
+            "hypothesis_tests": debug_payload.get("hypothesis_tests", []),
+        }
     # generated_code는 등록 시 항상 ""로 비워진다(summary/evidence.py와 동일 확인 사항).
     code_used = str(payload.get("generated_code") or "")
     return StageEvidence(stage="analysis", label=_STAGE_LABELS["analysis"], facts=facts, code_used=code_used)
