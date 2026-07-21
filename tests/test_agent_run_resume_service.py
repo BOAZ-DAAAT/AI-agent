@@ -163,6 +163,45 @@ def test_resume_agent_run_approval_passes_approved_true(tmp_path, monkeypatch) -
     assert event.metadata["interrupt_type"] == "approval"
 
 
+def test_resume_agent_run_approval_passes_approved_false_with_reason(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"resumed_from": "approval"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    session = SimpleNamespace(id="sess_001", session_db="session_db")
+    seen: dict[str, object] = {}
+
+    class FakeAdapter:
+        def __init__(self, *, services, session, catalog_summary) -> None:
+            self.base_data_dir = tmp_path / ".data_agent"
+
+    class FakeSupervisor:
+        def __init__(self, adapter, checkpoint_path) -> None:
+            pass
+
+        def resume(self, thread_id, payload):
+            seen["payload"] = payload
+            return {"terminal_state": "running"}
+
+    monkeypatch.setattr("backend.agent_runs.service.build_session_catalog_summary", lambda session: {"orders": {}})
+    monkeypatch.setattr("backend.agent_runs.service.SessionBoundBackendAdapter", FakeAdapter)
+    monkeypatch.setattr("backend.agent_runs.service.SupervisorAgent", FakeSupervisor)
+    monkeypatch.setattr("backend.agent_runs.service.bind_session_database", lambda session: nullcontext())
+
+    resume_agent_run(
+        services=services,
+        session=session,
+        resume_payload={"approved": False, "reason": "다시 검토가 필요합니다"},
+        run_id=run.run_id,
+        thread_id="thread_approval",
+    )
+
+    assert seen["payload"] == {"approved": False, "reason": "다시 검토가 필요합니다"}
+
+
 def test_terminal_event_matches_supervisor_terminal_state(tmp_path) -> None:
     services = _services(tmp_path)
 
