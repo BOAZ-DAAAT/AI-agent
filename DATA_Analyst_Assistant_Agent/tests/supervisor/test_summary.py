@@ -534,6 +534,12 @@ def test_analysis_summary_preserves_inconclusive_decision_boundary(adapter, runt
     payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
 
     test_result = payload["detail"]["hypothesis_tests"][0]
+    analysis_item = payload["detail"]["analysis_items"][0]
+    assert analysis_item["title"] == "월별 평균 배송 소요일은 시간 경과에 따라 감소한다."
+    assert analysis_item["method"] == "월별 선형추세"
+    assert analysis_item["decision"] == "inconclusive"
+    assert "p-value=0.099" in analysis_item["key_numbers"]
+    assert analysis_item["result"] == "월별 선형추세 결과의 원본 판정은 inconclusive입니다."
     assert "원본 판정은 'inconclusive'입니다" in test_result["body"]
     assert "**p-value=0.099**" in test_result["body"]
     assert "통계적으로 확정하기 어렵습니다" in payload["detail"]["interpretation"]
