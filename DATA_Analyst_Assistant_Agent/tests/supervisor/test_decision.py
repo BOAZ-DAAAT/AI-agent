@@ -122,6 +122,9 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "needs_clarification": False,
                 "clarified_query": "월별 매출 분석",
                 "clarification_question": "",
+                "input_mode": "free_text",
+                "options": [],
+                "allow_free_text": True,
                 "reason": "충분함",
             },
         ),
@@ -325,15 +328,16 @@ def test_semantic_validation_rejects_initial_only_recommendation(next_action: st
         )
 
 
-def test_semantic_validation_prompt_describes_warning_recovery_policy() -> None:
+def test_semantic_validation_prompt_describes_missing_evidence_advisory_policy() -> None:
     recommendation_section = SEMANTIC_VALIDATION_ADVISORY_PROMPT.split(
         "허용 recommended_next_action:",
         maxsplit=1,
     )[1].split("반드시 JSON 객체만 반환하세요.", maxsplit=1)[0]
 
-    assert "warning이고 missing_evidence가 없으면 semantic_valid=false여도" in (
-        SEMANTIC_VALIDATION_ADVISORY_PROMPT
-    )
+    assert "그 존재만으로 복구 또는 severity=error를 선택하지 마세요" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
+    assert "실제 역할 불이행이나 결과 모순" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
+    assert "severity=warning 또는 semantic_valid=true인 정보성 결과" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
+    assert "recommended_next_action으로 후속 작업을 권고" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
     assert "- create_plan" not in recommendation_section
 
 

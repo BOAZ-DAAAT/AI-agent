@@ -200,6 +200,11 @@ def test_supervisor_agent_run_returns_orchestration_state(monkeypatch) -> None:
     assert state.thread_id == "thread_sales_001"
     assert state.terminal_state.value == "completed"
     assert state.final_answer == "최종 리포트 생성이 완료되었습니다."
+    assert adapter.status_updates[0] == (
+        "run_001",
+        RunStatus.running,
+        {"query": "월별 매출 추이를 분석해줘", "supervisor": "langgraph"},
+    )
     assert adapter.status_updates[-1][0] == "run_001"
 
 

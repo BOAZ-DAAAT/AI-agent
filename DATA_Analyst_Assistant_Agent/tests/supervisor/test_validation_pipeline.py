@@ -179,7 +179,25 @@ def test_success_without_artifacts_reaches_semantic_validation() -> None:
     assert model.calls == 1
 
 
-def test_semantic_missing_evidence_marks_candidate_for_recovery() -> None:
+def test_semantic_info_without_reason_or_missing_evidence_is_accepted() -> None:
+    model = SemanticModel({**_semantic_success(), "reason": ""})
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="분석 완료",
+        artifact_ids=["analysis_001"],
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert record["checks"][-1]["passed"] is True
+    assert record["checks"][-1]["findings"] == []
+    assert record["checks"][-1]["details"]["missing_evidence"] == []
+    assert record["outcome"]["disposition"] == "accept"
+
+
+def test_semantic_info_with_missing_evidence_is_accepted_with_limitations() -> None:
     model = SemanticModel({**_semantic_success("call_sql_agent"), "missing_evidence": ["analysis_table"]})
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -193,9 +211,34 @@ def test_semantic_missing_evidence_marks_candidate_for_recovery() -> None:
     assert [check["name"] for check in record["checks"]] == [
         "contract", "result", "semantic"
     ]
-    assert record["checks"][-1]["passed"] is False
-    assert record["outcome"]["disposition"] == "recover"
-    assert record["outcome"]["recovery_action"] == "call_sql_agent"
+    semantic_check = record["checks"][-1]
+    assert semantic_check["passed"] is True
+    assert semantic_check["findings"][0]["disposition"] == "limitation"
+    assert semantic_check["details"]["missing_evidence"] == ["analysis_table"]
+    assert record["outcome"]["disposition"] == "accept_with_limitations"
+    assert record["outcome"]["recovery_action"] is None
+
+
+def test_semantic_missing_evidence_without_reason_generates_limitation_message() -> None:
+    model = SemanticModel(
+        {
+            **_semantic_success(),
+            "reason": "",
+            "missing_evidence": ["analysis_table", "segment_summary"],
+        }
+    )
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="분석 완료",
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    expected = "누락 근거: analysis_table, segment_summary"
+    assert record["checks"][-1]["findings"][0]["message"] == expected
+    assert record["outcome"]["reason"] == expected
 
 
 def test_semantic_warning_with_invalid_flag_is_accepted_with_limitations() -> None:
@@ -246,6 +289,31 @@ def test_semantic_warning_without_missing_evidence_is_accepted_with_limitations(
     assert record["outcome"]["disposition"] == "accept_with_limitations"
 
 
+def test_semantic_warning_with_missing_evidence_is_accepted_with_limitations() -> None:
+    model = SemanticModel(
+        {
+            **_semantic_success(),
+            "severity": "warning",
+            "reason": "집계 근거가 일부 누락되었습니다.",
+            "missing_evidence": ["monthly_sales"],
+        }
+    )
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="분석 완료",
+        artifact_ids=["analysis_001"],
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert record["checks"][-1]["passed"] is True
+    assert record["checks"][-1]["findings"][0]["disposition"] == "limitation"
+    assert record["checks"][-1]["details"]["missing_evidence"] == ["monthly_sales"]
+    assert record["outcome"]["disposition"] == "accept_with_limitations"
+
+
 def test_semantic_info_with_invalid_flag_marks_candidate_for_recovery() -> None:
     model = SemanticModel(
         {
@@ -275,6 +343,7 @@ def test_semantic_error_marks_candidate_for_recovery() -> None:
             **_semantic_success("call_eda_agent"),
             "severity": "error",
             "reason": "필수 분석이 누락되었습니다.",
+            "missing_evidence": ["segment_summary"],
         }
     )
     result = AgentCompactResult(
@@ -288,6 +357,7 @@ def test_semantic_error_marks_candidate_for_recovery() -> None:
 
     record = updates["pending_validation"]
     assert record["checks"][-1]["passed"] is False
+    assert record["checks"][-1]["details"]["missing_evidence"] == ["segment_summary"]
     assert record["outcome"]["disposition"] == "recover"
     assert record["outcome"]["recovery_action"] == "call_eda_agent"
 

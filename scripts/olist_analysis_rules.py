@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_RULE_DIR = REPO_ROOT / "docs" / "olist_rag_context" / "analysis_rules"
+DEFAULT_FOUNDATION_DIR = REPO_ROOT / "docs" / "olist_rag_context" / "analysis_foundations"
 DEFAULT_SCHEMA_PATH = REPO_ROOT / "DATA_Analyst_Assistant_Agent" / "agents" / "sql" / "data" / "db_schema.json"
+DEFAULT_INTEGRITY_PATH = REPO_ROOT / "DATA_Analyst_Assistant_Agent" / "agents" / "sql" / "data" / "db_integrity_result.json"
 
 EXPECTED_DOC_FILES = (
     "sales_orders.md",
@@ -30,6 +34,28 @@ EXPECTED_DOC_FILES = (
 )
 
 ALLOWED_QUERY_TYPES = tuple(path.removesuffix(".md") for path in EXPECTED_DOC_FILES)
+FOUNDATION_DOC_FILES = (
+    "metric_definitions.md",
+    "entity_grain_definitions.md",
+    "time_status_population_rules.md",
+    "join_cardinality_rules.md",
+    "table_contracts.md",
+    "operational_definition_policy.md",
+    "table_customers.md",
+    "table_geolocation.md",
+    "table_order_items.md",
+    "table_order_payments.md",
+    "table_order_reviews.md",
+    "table_orders.md",
+    "table_product_category_name_translation.md",
+    "table_products.md",
+    "table_sellers.md",
+    "sales_order_metrics.md",
+    "customer_metrics.md",
+    "payment_metrics.md",
+    "delivery_metrics.md",
+    "review_metrics.md",
+)
 
 REQUIRED_FRONT_MATTER = {
     "document_id": str,
@@ -45,26 +71,29 @@ REQUIRED_FRONT_MATTER = {
     "prohibited_use": str,
 }
 
-REQUIRED_SECTIONS = (
-    "definition",
-    "supported_intents",
-    "default_metrics",
-    "entity_grain",
-    "time_basis",
-    "required_tables",
-    "join_constraints",
-    "status_and_null_rules",
-    "clarify_when",
-    "prohibited_interpretations",
-    "unsupported_requests",
-    "limitations",
+QUALITY_SECTIONS = (
+    "search_aliases",
+    "when_to_use",
+    "when_not_to_use",
+    "metric_definitions",
+    "grain_guidance",
+    "table_and_join_guidance",
+    "default_assumptions",
+    "soft_guidance",
+    "clarification_triggers",
+    "related_rule_types",
     "positive_examples",
     "negative_examples",
 )
 
 DOC_TYPE = "analysis_query_rule"
-MIN_CONSTRAINTS = 10
-MIN_AMBIGUOUS_EXAMPLES = 3
+FOUNDATION_DOC_TYPE = "analysis_foundation"
+INTEGRITY_DOC_TYPE = "analysis_integrity_caution"
+RULE_STRENGTHS = ("must", "avoid", "default", "prefer", "ask_if_missing")
+RULE_STRENGTH_ORDER = {name: index for index, name in enumerate(RULE_STRENGTHS)}
+ISSUE_INTEGRITY_STATUSES = {"FAIL", "FAILED", "ERROR", "ACTION_REQUIRED", "STALE"}
+TABLE_COLUMN_RE = re.compile(r"`?([A-Za-z_][A-Za-z0-9_]*)`?\.`?([A-Za-z_][A-Za-z0-9_]*)`?")
+RULE_TAG_RE = re.compile(r"^\[(must|avoid|default|prefer|ask_if_missing)\]\s*", re.IGNORECASE)
 
 
 class RuleValidationError(ValueError):
@@ -77,6 +106,7 @@ class RuleDocument:
     front_matter: dict[str, Any]
     sections: dict[str, str]
     body: str
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -96,7 +126,7 @@ class SearchHit:
     metadata: dict[str, Any]
 
 
-def load_source_table_allowlist(schema_path: Path = DEFAULT_SCHEMA_PATH) -> set[str]:
+def load_schema_catalog(schema_path: Path = DEFAULT_SCHEMA_PATH) -> dict[str, set[str]]:
     try:
         raw_schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -106,13 +136,27 @@ def load_source_table_allowlist(schema_path: Path = DEFAULT_SCHEMA_PATH) -> set[
 
     if not isinstance(raw_schema, Mapping):
         raise RuleValidationError("schema root must be an object keyed by table name")
-    return {str(table) for table in raw_schema}
+    tables = raw_schema.get("tables") if isinstance(raw_schema.get("tables"), Mapping) else raw_schema
+    catalog: dict[str, set[str]] = {}
+    for table_name, table in tables.items():
+        columns = table.get("columns", []) if isinstance(table, Mapping) else []
+        catalog[str(table_name)] = {
+            str(column.get("name"))
+            for column in columns
+            if isinstance(column, Mapping) and column.get("name")
+        }
+    return catalog
+
+
+def load_source_table_allowlist(schema_path: Path = DEFAULT_SCHEMA_PATH) -> set[str]:
+    return set(load_schema_catalog(schema_path))
 
 
 def validate_rule_directory(
     rule_dir: Path = DEFAULT_RULE_DIR,
     *,
     schema_path: Path = DEFAULT_SCHEMA_PATH,
+    integrity_path: Path = DEFAULT_INTEGRITY_PATH,
 ) -> list[RuleDocument]:
     rule_dir = Path(rule_dir)
     if not rule_dir.exists():
@@ -135,15 +179,35 @@ def validate_rule_directory(
             + "; ".join(details)
         )
 
-    allowed_tables = load_source_table_allowlist(schema_path)
+    schema_catalog = load_schema_catalog(schema_path)
+    integrity_statuses = _load_integrity_statuses(integrity_path)
     documents = [_parse_markdown(rule_dir / filename) for filename in EXPECTED_DOC_FILES]
-    _validate_documents(documents, allowed_tables)
+    documents = _validate_documents(documents, schema_catalog, integrity_statuses)
     return documents
 
 
-def build_records(rule_dir: Path = DEFAULT_RULE_DIR, *, schema_path: Path = DEFAULT_SCHEMA_PATH) -> list[dict[str, Any]]:
-    documents = validate_rule_directory(rule_dir, schema_path=schema_path)
-    return [_record_from_document(document) for document in documents]
+def build_records(
+    rule_dir: Path = DEFAULT_RULE_DIR,
+    *,
+    schema_path: Path = DEFAULT_SCHEMA_PATH,
+    integrity_path: Path = DEFAULT_INTEGRITY_PATH,
+    foundation_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    documents = validate_rule_directory(rule_dir, schema_path=schema_path, integrity_path=integrity_path)
+    resolved_rule_dir = Path(rule_dir).resolve()
+    resolved_foundation_dir = foundation_dir
+    if resolved_foundation_dir is None and resolved_rule_dir == DEFAULT_RULE_DIR.resolve():
+        resolved_foundation_dir = DEFAULT_FOUNDATION_DIR
+    if resolved_foundation_dir is not None:
+        documents += validate_foundation_directory(
+            Path(resolved_foundation_dir), schema_path=schema_path, integrity_path=integrity_path
+        )
+    records: list[dict[str, Any]] = []
+    for document in documents:
+        records.extend(_records_from_document(document))
+    if resolved_rule_dir == DEFAULT_RULE_DIR.resolve():
+        records.extend(_integrity_caution_records(integrity_path))
+    return _with_chunk_counts(records)
 
 
 def build_jsonl(
@@ -151,8 +215,15 @@ def build_jsonl(
     output: Path | None = None,
     *,
     schema_path: Path = DEFAULT_SCHEMA_PATH,
+    integrity_path: Path = DEFAULT_INTEGRITY_PATH,
+    foundation_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    records = build_records(rule_dir, schema_path=schema_path)
+    records = build_records(
+        rule_dir,
+        schema_path=schema_path,
+        integrity_path=integrity_path,
+        foundation_dir=foundation_dir,
+    )
     lines = [json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) for record in records]
     content = "\n".join(lines) + "\n"
     if output is None:
@@ -220,8 +291,8 @@ def search_smoke(query: str, *, namespace: str | None = None) -> list[Any]:
         raise ValueError("search query cannot be empty")
     return search_company_context(
         normalized,
-        top_k=1,
-        metadata_filter={"doc_type": {"$eq": DOC_TYPE}},
+        top_k=12,
+        metadata_filter={"doc_type": {"$in": [DOC_TYPE, FOUNDATION_DOC_TYPE, INTEGRITY_DOC_TYPE]}},
         settings=PineconeRuntimeSettings(namespace=namespace),
     )
 
@@ -230,7 +301,39 @@ def _parse_markdown(path: Path) -> RuleDocument:
     text = path.read_text(encoding="utf-8")
     front_matter, body = _split_front_matter(text, path)
     sections = _parse_sections(body)
-    return RuleDocument(path=path, front_matter=front_matter, sections=sections, body=body.strip())
+    return RuleDocument(path=path, front_matter=front_matter, sections=sections, body=body.strip(), warnings=[])
+
+
+def validate_foundation_directory(
+    foundation_dir: Path = DEFAULT_FOUNDATION_DIR,
+    *,
+    schema_path: Path = DEFAULT_SCHEMA_PATH,
+    integrity_path: Path = DEFAULT_INTEGRITY_PATH,
+) -> list[RuleDocument]:
+    foundation_dir = Path(foundation_dir)
+    filenames = sorted(path.name for path in foundation_dir.glob("*.md")) if foundation_dir.is_dir() else []
+    if set(filenames) != set(FOUNDATION_DOC_FILES):
+        missing = sorted(set(FOUNDATION_DOC_FILES) - set(filenames))
+        unexpected = sorted(set(filenames) - set(FOUNDATION_DOC_FILES))
+        raise RuleValidationError(f"foundation documents mismatch; missing={missing}; unexpected={unexpected}")
+
+    schema_catalog = load_schema_catalog(schema_path)
+    integrity_statuses = _load_integrity_statuses(integrity_path)
+    documents: list[RuleDocument] = []
+    for filename in FOUNDATION_DOC_FILES:
+        document = _parse_markdown(foundation_dir / filename)
+        _validate_foundation_front_matter(document, set(schema_catalog))
+        warnings = _schema_warnings(document, schema_catalog) + _integrity_warnings(document, integrity_statuses)
+        documents.append(
+            RuleDocument(
+                path=document.path,
+                front_matter=document.front_matter,
+                sections=document.sections,
+                body=document.body,
+                warnings=warnings,
+            )
+        )
+    return documents
 
 
 def _split_front_matter(text: str, path: Path) -> tuple[dict[str, Any], str]:
@@ -296,20 +399,51 @@ def _parse_sections(body: str) -> dict[str, str]:
 
 
 def _normalize_section(title: str) -> str:
-    return title.strip().lower().replace(" ", "_").replace("-", "_")
+    normalized = title.strip().lower().replace(" ", "_").replace("-", "_")
+    korean_aliases = {
+        "검색_별칭": "search_aliases",
+        "정의와_사용_시점": "when_to_use",
+        "정의": "when_to_use",
+        "지원하는_질문": "when_to_use",
+        "지표_정의": "metric_definitions",
+        "기본_지표": "metric_definitions",
+        "grain과_조인": "grain_guidance",
+        "시간·상태·기본_가정": "default_assumptions",
+        "시간·결측·기본_가정": "default_assumptions",
+        "상태·결측·기본_가정": "default_assumptions",
+        "기본_가정과_해석": "default_assumptions",
+        "기본_가정과_표현": "default_assumptions",
+        "확인이_필요한_경우와_예시": "clarification_triggers",
+        "확인이_필요한_경우": "clarification_triggers",
+        "관련_규칙": "related_rule_types",
+        "사용하지_않는_경우": "when_not_to_use",
+        "테이블_및_조인_가이드": "table_and_join_guidance",
+        "소프트_가이드": "soft_guidance",
+        "긍정_예시": "positive_examples",
+        "부정_예시": "negative_examples",
+    }
+    return korean_aliases.get(normalized, normalized)
 
 
-def _validate_documents(documents: Sequence[RuleDocument], allowed_tables: set[str]) -> None:
+def _validate_documents(
+    documents: Sequence[RuleDocument],
+    schema_catalog: dict[str, set[str]],
+    integrity_statuses: dict[str, str],
+) -> list[RuleDocument]:
     seen_document_ids: set[str] = set()
     seen_query_types: set[str] = set()
+    validated: list[RuleDocument] = []
 
     for expected_file, expected_query_type, document in zip(
         EXPECTED_DOC_FILES, ALLOWED_QUERY_TYPES, documents, strict=True
     ):
         if document.path.name != expected_file:
             raise RuleValidationError(f"{document.path.name}: expected file order/name {expected_file}")
-        _validate_front_matter(document, expected_query_type, allowed_tables)
-        _validate_sections(document)
+        warnings: list[str] = []
+        _validate_front_matter(document, expected_query_type, set(schema_catalog))
+        warnings.extend(_quality_warnings(document))
+        warnings.extend(_schema_warnings(document, schema_catalog))
+        warnings.extend(_integrity_warnings(document, integrity_statuses))
 
         document_id = document.front_matter["document_id"]
         query_type = document.front_matter["query_type"]
@@ -319,6 +453,16 @@ def _validate_documents(documents: Sequence[RuleDocument], allowed_tables: set[s
             raise RuleValidationError(f"{document.path.name}: duplicate query_type {query_type}")
         seen_document_ids.add(document_id)
         seen_query_types.add(query_type)
+        validated.append(
+            RuleDocument(
+                path=document.path,
+                front_matter=document.front_matter,
+                sections=document.sections,
+                body=document.body,
+                warnings=warnings,
+            )
+        )
+    return validated
 
 
 def _validate_front_matter(document: RuleDocument, expected_query_type: str, allowed_tables: set[str]) -> None:
@@ -350,69 +494,263 @@ def _validate_front_matter(document: RuleDocument, expected_query_type: str, all
         raise RuleValidationError(f"{document.path.name}: unknown source_tables {unknown_tables}")
 
 
-def _validate_sections(document: RuleDocument) -> None:
-    missing_sections = [section for section in REQUIRED_SECTIONS if section not in document.sections]
-    if missing_sections:
-        raise RuleValidationError(f"{document.path.name}: missing sections {missing_sections}")
-
-    for section in REQUIRED_SECTIONS:
-        if not document.sections[section].strip():
-            raise RuleValidationError(f"{document.path.name}: section {section} cannot be empty")
-
-    constraint_section_names = (
-        ("constraints",)
-        if "constraints" in document.sections
-        else (
-            "join_constraints",
-            "status_and_null_rules",
-            "prohibited_interpretations",
-            "unsupported_requests",
-            "limitations",
-        )
-    )
-    constraints = [
-        item
-        for section in constraint_section_names
-        for item in _bullet_items(document.sections.get(section, ""))
-    ]
-    if len(constraints) < MIN_CONSTRAINTS:
-        raise RuleValidationError(
-            f"{document.path.name}: constraints requires at least {MIN_CONSTRAINTS} bullet items"
-        )
-
-    ambiguous_section_names = (
-        ("ambiguous_examples",)
-        if "ambiguous_examples" in document.sections
-        else ("clarify_when", "negative_examples")
-    )
-    ambiguous_examples = [
-        item
-        for section in ambiguous_section_names
-        for item in _bullet_items(document.sections.get(section, ""))
-    ]
-    if len(ambiguous_examples) < MIN_AMBIGUOUS_EXAMPLES:
-        raise RuleValidationError(
-            f"{document.path.name}: ambiguous_examples requires at least {MIN_AMBIGUOUS_EXAMPLES} bullet items"
-        )
+def _validate_foundation_front_matter(document: RuleDocument, allowed_tables: set[str]) -> None:
+    front_matter = document.front_matter
+    required_fields = {
+        "document_id": str,
+        "doc_type": str,
+        "query_type": str,
+        "title": str,
+        "language": str,
+        "version": str,
+        "source_tables": list,
+        "grounding_level": str,
+        "intended_use": str,
+        "prohibited_use": str,
+    }
+    for key, expected_type in required_fields.items():
+        if not isinstance(front_matter.get(key), expected_type):
+            raise RuleValidationError(f"{document.path.name}: foundation front matter {key} must be {expected_type.__name__}")
+    if front_matter["doc_type"] != FOUNDATION_DOC_TYPE:
+        raise RuleValidationError(f"{document.path.name}: doc_type must be {FOUNDATION_DOC_TYPE}")
+    if front_matter["language"] not in {"ko", "en"}:
+        raise RuleValidationError(f"{document.path.name}: language must be ko or en")
+    if not front_matter["source_tables"]:
+        raise RuleValidationError(f"{document.path.name}: source_tables cannot be empty")
+    unknown_tables = sorted(set(front_matter["source_tables"]) - allowed_tables)
+    if unknown_tables:
+        raise RuleValidationError(f"{document.path.name}: unknown source_tables {unknown_tables}")
 
 
 def _bullet_items(text: str) -> list[str]:
     return [line.strip()[2:].strip() for line in text.splitlines() if line.strip().startswith("- ")]
 
 
-def _record_from_document(document: RuleDocument) -> dict[str, Any]:
+def _quality_warnings(document: RuleDocument) -> list[str]:
+    warnings = [
+        f"missing quality section: {section}"
+        for section in QUALITY_SECTIONS
+        if not document.sections.get(section, "").strip()
+    ]
+    tagged_rules = [
+        item
+        for section in document.sections.values()
+        for item in _bullet_items(section)
+        if RULE_TAG_RE.match(item)
+    ]
+    if not tagged_rules:
+        warnings.append("no rule strength tags found")
+    return warnings
+
+
+def _schema_warnings(document: RuleDocument, schema_catalog: dict[str, set[str]]) -> list[str]:
+    warnings: list[str] = []
+    referenced = _referenced_columns(document.body)
+    for table, column in referenced:
+        if table not in schema_catalog:
+            warnings.append(f"unknown referenced table in body: {table}")
+        elif column not in schema_catalog[table]:
+            warnings.append(f"unknown referenced column in body: {table}.{column}")
+
+    return warnings
+
+
+def _integrity_warnings(document: RuleDocument, integrity_statuses: dict[str, str]) -> list[str]:
+    if not integrity_statuses:
+        return ["integrity snapshot unavailable"]
+    warnings: list[str] = []
+    for table in document.front_matter.get("source_tables", []):
+        status = integrity_statuses.get(str(table))
+        if status is None:
+            warnings.append(f"integrity coverage missing: {table}")
+        elif status.upper() in ISSUE_INTEGRITY_STATUSES:
+            warnings.append(f"integrity caution: {table} status={status}")
+    return warnings
+
+
+def _referenced_columns(text: str) -> list[tuple[str, str]]:
+    return sorted({(match.group(1), match.group(2)) for match in TABLE_COLUMN_RE.finditer(text)})
+
+
+def _load_integrity_statuses(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    tables = data.get("tables") if isinstance(data, Mapping) else {}
+    if not isinstance(tables, Mapping):
+        return {}
+    statuses: dict[str, str] = {}
+    for table, payload in tables.items():
+        if isinstance(payload, Mapping):
+            statuses[str(table)] = str(payload.get("status") or "")
+        elif isinstance(payload, list):
+            statuses[str(table)] = "PASS"
+    return statuses
+
+
+def _integrity_caution_records(path: Path) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    tables = data.get("tables") if isinstance(data, Mapping) else None
+    if not isinstance(tables, Mapping):
+        return []
+
+    records: list[dict[str, Any]] = []
+    for table, payload in sorted(tables.items()):
+        if not isinstance(payload, Mapping):
+            continue
+        status = str(payload.get("table_status") or "").upper()
+        if status not in ISSUE_INTEGRITY_STATUSES:
+            continue
+        failing_columns = sorted(
+            {
+                str(check.get("column"))
+                for check in payload.get("checks", [])
+                if isinstance(check, Mapping)
+                and str(check.get("status") or "").upper() in ISSUE_INTEGRITY_STATUSES
+                and str(check.get("column") or "") not in {"", "Table-Level"}
+            }
+        )
+        columns_text = ", ".join(failing_columns) if failing_columns else "table-level checks"
+        records.append(
+            {
+                "_id": f"integrity-caution__{table}",
+                "text": f"Integrity caution for {table}: status={status}; affected columns: {columns_text}. Planning caution only; do not block execution.",
+                "doc_type": INTEGRITY_DOC_TYPE,
+                "document_id": f"integrity-caution-{table}",
+                "source_document_id": f"integrity-caution-{table}",
+                "title": f"Olist integrity caution: {table}",
+                "query_type": "integrity_caution",
+                "record_type": "integrity_caution",
+                "section": "integrity_caution",
+                "source_tables": [str(table)],
+                "referenced_columns": [f"{table}.{column}" for column in failing_columns],
+                "integrity_cautions": [f"integrity caution: {table} status={status}"],
+                "schema_warnings": [],
+                "grounding_level": "integrity_grounded",
+                "intended_use": "SQL planning caution retrieval",
+                "prohibited_use": "execution blocking or live metric evidence",
+                "language": "en",
+                "version": "1.0",
+                "rule_strength": "prefer",
+                "rule_strength_rank": RULE_STRENGTH_ORDER["prefer"],
+            }
+        )
+    return records
+
+
+def _base_metadata(document: RuleDocument) -> dict[str, Any]:
     metadata = dict(sorted(document.front_matter.items()))
     resolved_path = document.path.resolve()
     relative_path = resolved_path.relative_to(REPO_ROOT) if resolved_path.is_relative_to(REPO_ROOT) else document.path
-    record = {
-        "_id": str(document.front_matter["document_id"]),
-        "text": document.body,
-        "chunk_count": 1,
-        "chunk_index": 0,
+    return {
         "source_path": str(relative_path),
+        "source_document_id": str(document.front_matter["document_id"]),
+        "schema_warnings": sorted(set(document.warnings)),
+        "integrity_cautions": sorted({warning for warning in document.warnings if warning.startswith("integrity ")}),
         **metadata,
     }
+
+
+def _records_from_document(document: RuleDocument) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    base = _base_metadata(document)
+    document_id = str(document.front_matter["document_id"])
+
+    for section_name in sorted(document.sections):
+        text = document.sections[section_name].strip()
+        if not text:
+            continue
+        section_id = _record_id_segment(section_name)
+        records.append(
+            _record(
+                base,
+                record_id=f"{document_id}__section__{section_id}",
+                text=f"{section_name}\n{text}",
+                record_type="section_chunk",
+                section=section_name,
+            )
+        )
+        for item_index, item in enumerate(_bullet_items(text), start=1):
+            strength = _rule_strength(item)
+            clean_item = RULE_TAG_RE.sub("", item).strip()
+            if strength:
+                records.append(
+                    _record(
+                        base,
+                        record_id=f"{document_id}__rule__{strength}__{section_id}__{item_index:03d}",
+                        text=clean_item,
+                        record_type="rule_atom",
+                        section=section_name,
+                        rule_strength=strength,
+                    )
+                )
+            elif section_name in {"positive_examples", "negative_examples"}:
+                polarity = "positive" if section_name == "positive_examples" else "negative"
+                records.append(
+                    _record(
+                        base,
+                        record_id=f"{document_id}__example__{polarity}__{section_id}__{item_index:03d}",
+                        text=clean_item,
+                        record_type="example",
+                        section=section_name,
+                    )
+                )
+    return sorted(records, key=lambda item: str(item["_id"]))
+
+
+def _rule_strength(text: str) -> str:
+    match = RULE_TAG_RE.match(text.strip())
+    return match.group(1).lower() if match else ""
+
+
+def _record_id_segment(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-").lower()
+    if normalized:
+        return normalized
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+    return f"section-{digest}"
+
+
+def _record(
+    base: Mapping[str, Any],
+    *,
+    record_id: str,
+    text: str,
+    record_type: str,
+    section: str,
+    rule_strength: str = "",
+) -> dict[str, Any]:
+    referenced_columns = [f"{table}.{column}" for table, column in _referenced_columns(text)]
+    record = {
+        **dict(base),
+        "_id": record_id,
+        "text": " ".join(text.split()),
+        "referenced_columns": referenced_columns,
+        "record_type": record_type,
+        "section": section,
+        "rule_strength": rule_strength,
+        "rule_strength_rank": RULE_STRENGTH_ORDER.get(rule_strength, 99),
+    }
     return dict(sorted(record.items()))
+
+
+def _with_chunk_counts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[str, int] = {}
+    counters: dict[str, int] = {}
+    for record in records:
+        doc_id = str(record.get("source_document_id") or record.get("document_id") or "")
+        totals[doc_id] = totals.get(doc_id, 0) + 1
+    normalized: list[dict[str, Any]] = []
+    for record in records:
+        doc_id = str(record.get("source_document_id") or record.get("document_id") or "")
+        index = counters.get(doc_id, 0)
+        counters[doc_id] = index + 1
+        normalized.append(dict(sorted({**record, "chunk_count": totals.get(doc_id, 1), "chunk_index": index}.items())))
+    return normalized
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -445,6 +783,9 @@ def _record_for_text_field(record: Mapping[str, Any], text_field: str) -> dict[s
 
 def _print_validation_result(documents: Sequence[RuleDocument]) -> None:
     print(f"validated {len(documents)} Olist analysis rule documents")
+    for document in documents:
+        for warning in document.warnings:
+            print(f"warning: {document.path.name}: {warning}", file=sys.stderr)
 
 
 def _print_search_hits(hits: Iterable[Any]) -> None:
@@ -473,6 +814,7 @@ def _build_parser() -> argparse.ArgumentParser:
     build_parser = subparsers.add_parser("build")
     build_parser.add_argument("--rules-dir", type=Path, default=DEFAULT_RULE_DIR)
     build_parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
+    build_parser.add_argument("--integrity", type=Path, default=DEFAULT_INTEGRITY_PATH)
     build_parser.add_argument("--output", type=Path, required=True)
 
     ingest_parser = subparsers.add_parser("ingest")
@@ -494,7 +836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "validate":
             _print_validation_result(validate_rule_directory(args.rules_dir, schema_path=args.schema))
         elif args.command == "build":
-            records = build_jsonl(args.rules_dir, args.output, schema_path=args.schema)
+            records = build_jsonl(args.rules_dir, args.output, schema_path=args.schema, integrity_path=args.integrity)
             print(f"wrote {len(records)} records to {args.output}")
         elif args.command == "ingest":
             result = ingest_jsonl(args.input, namespace=args.namespace, text_field=args.text_field)

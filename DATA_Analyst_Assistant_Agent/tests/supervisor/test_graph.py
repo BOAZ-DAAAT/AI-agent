@@ -139,6 +139,16 @@ class ContractViolatingSubAgentAdapter:
         )
 
 
+class FailingSubAgentAdapter:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls: list[str] = []
+
+    def call(self, agent_name: str, state: dict[str, Any]) -> AgentToolResult:
+        self.calls.append(agent_name)
+        raise self.error
+
+
 def _state(user_query: str = "매출") -> dict[str, Any]:
     return empty_supervisor_state(
         thread_id="thread_sales_001",
@@ -221,12 +231,14 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
 - 이 원문도 state에 저장하면 안 된다.
 """
 
+    search_calls: list[dict[str, Any]] = []
+
     def fake_search(query: str, **kwargs: Any) -> list[CompanyContextHit]:
         assert query == "자주 구매하는 고객 특징을 분석해줘"
-        assert kwargs["top_k"] == 1
-        assert kwargs["metadata_filter"] == {
-            "doc_type": {"$eq": "analysis_query_rule"}
-        }
+        assert kwargs["top_k"] == 24
+        search_calls.append(kwargs["metadata_filter"])
+        if kwargs["metadata_filter"] != {"doc_type": "analysis_query_rule"}:
+            return []
         return [
             CompanyContextHit(
                 record_id="purchase_frequency",
@@ -234,7 +246,14 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
                 text=document_text,
                 document_id="purchase_frequency",
                 title="Olist 구매 빈도 분석 규칙",
-                metadata={"query_type": "purchase_frequency", "version": "1.0"},
+                metadata={
+                    "doc_type": "analysis_query_rule",
+                    "query_type": "purchase_frequency",
+                    "version": "1.0",
+                    "record_type": "rule_atom",
+                    "section": "metric_definitions",
+                    "integrity_cautions": ["integrity caution: orders status=STALE"],
+                },
             )
         ]
 
@@ -265,10 +284,88 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
     ]
     extraction_payload = json.loads(model.messages[0][1]["content"])
     assert extraction_payload["document"]["content"] == document_text
+    assert extraction_payload["documents"][0]["content"] == document_text
+    assert updates["analysis_rule_context"]["source_sections"] == ["metric_definitions"]
+    assert updates["analysis_rule_context"]["integrity_cautions"] == ["integrity caution: orders status=STALE"]
+    assert updates["analysis_rule_retrieval"]["retrieved_documents"] == [
+        {
+            "document_id": "purchase_frequency",
+            "doc_type": "analysis_query_rule",
+            "score": 0.94,
+            "sections": ["metric_definitions"],
+            "record_count": 1,
+        }
+    ]
+    assert updates["analysis_rule_retrieval"]["unique_document_count"] == 1
+    assert search_calls == [
+        {"doc_type": "analysis_query_rule"},
+        {"doc_type": "analysis_foundation"},
+        {"doc_type": "analysis_integrity_caution"},
+    ]
     serialized = json.dumps(updates["analysis_rule_context"], ensure_ascii=False)
     assert "이 예시는 state에 저장하면 안 된다" not in serialized
     assert "이 원문도 state에 저장하면 안 된다" not in serialized
     assert document_text not in serialized
+
+
+def test_retrieve_analysis_rules_reserves_context_for_foundation_documents() -> None:
+    def hit(
+        document_id: str,
+        doc_type: str,
+        score: float,
+        record_type: str,
+    ) -> CompanyContextHit:
+        return CompanyContextHit(
+            record_id=f"{document_id}-{record_type}-{score}",
+            score=score,
+            text=f"{document_id} planning guidance",
+            document_id=document_id,
+            title=document_id,
+            metadata={
+                "doc_type": doc_type,
+                "query_type": document_id.replace("-", "_"),
+                "record_type": record_type,
+                "section": "metric_definitions",
+            },
+        )
+
+    def fake_search(_: str, **kwargs: Any) -> list[CompanyContextHit]:
+        doc_type = kwargs["metadata_filter"]["doc_type"]
+        if doc_type == "analysis_query_rule":
+            return [
+                hit("seller-performance", doc_type, 0.99, "example"),
+                hit("seller-performance", doc_type, 0.80, "rule_atom"),
+                hit("delivery-delay", doc_type, 0.70, "section_chunk"),
+            ]
+        if doc_type == "analysis_foundation":
+            return [
+                hit("join-cardinality-rules", doc_type, 0.65, "rule_atom"),
+                hit("table-orders", doc_type, 0.60, "section_chunk"),
+            ]
+        return []
+
+    model = SequencedDecisionModel(
+        [{"applicable": True, "rules": ["selected rules"], "clarification_needed": False, "clarification_question": "", "reason": "relevant"}]
+    )
+    updates = make_retrieve_analysis_rules_node(fake_search, model)(
+        _state("seller delivery review")
+    )
+
+    retrieved = updates["analysis_rule_retrieval"]["retrieved_documents"]
+    assert [item["document_id"] for item in retrieved] == [
+        "seller-performance",
+        "delivery-delay",
+        "join-cardinality-rules",
+        "table-orders",
+    ]
+    assert [item["doc_type"] for item in retrieved] == [
+        "analysis_query_rule",
+        "analysis_query_rule",
+        "analysis_foundation",
+        "analysis_foundation",
+    ]
+    assert updates["analysis_rule_retrieval"]["hit_count"] == 4
+    assert updates["analysis_rule_retrieval"]["unique_document_count"] == 4
 
 
 def test_retrieve_analysis_rules_fails_open_when_search_errors() -> None:
@@ -364,13 +461,15 @@ def _semantic_decision(
     semantic_valid: bool = True,
     severity: str = "info",
     recommended_next_action: str = "",
+    reason: str = "의미 검증 advisory",
+    missing_evidence: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "semantic_valid": semantic_valid,
         "severity": severity,
         "recommended_next_action": recommended_next_action,
-        "reason": "의미 검증 advisory",
-        "missing_evidence": [],
+        "reason": reason,
+        "missing_evidence": missing_evidence or [],
         "alignment_notes": ["계획과 결과가 정렬되어 있습니다."],
     }
 
@@ -474,6 +573,41 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
     assert result["accepted_evidence"].keys() == {"sql_agent", "insight"}
     assert len(result["rejected_results"]) == 1
     assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["terminal_state"] == "completed"
+
+
+def test_missing_evidence_recommendation_promotes_candidate_then_routes_to_sql() -> None:
+    adapter = FakeSubAgentAdapter()
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(),
+            _plan_decision(),
+            _next_action_decision("call_analysis_agent"),
+            _semantic_decision(
+                recommended_next_action="call_sql_agent",
+                reason="",
+                missing_evidence=["monthly_sales"],
+            ),
+            _semantic_decision(recommended_next_action="finalize"),
+            _semantic_decision(),
+            _final_decision("completed", "후속 SQL 근거로 인사이트를 완료했습니다."),
+        ]
+    )
+    graph = build_graph(subagent_adapter=adapter, model=model)
+
+    result = graph.invoke(
+        _state(),
+        {"configurable": {"thread_id": "thread_missing_evidence_advisory"}},
+    )
+
+    assert adapter.calls == ["analysis_agent", "sql_agent"]
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["rejected_results"] == []
+    assert result["completed_agents"] == ["analysis_agent", "sql_agent", "insight"]
+    assert result["accepted_evidence"].keys() == {
+        "analysis_agent", "sql_agent", "insight",
+    }
+    assert "누락 근거: monthly_sales" in result["limitations"]
     assert result["terminal_state"] == "completed"
 
 
@@ -996,6 +1130,29 @@ def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> No
     ]
     assert ("agent.started", "sql_agent") in event_pairs
     assert ("agent.failed", "sql_agent") in event_pairs
+    assert result["active_node"] is None
+
+
+def test_execute_subagent_general_exception_emits_failed_lifecycle_event() -> None:
+    adapter = FailingSubAgentAdapter(TimeoutError("LLM request timed out"))
+    adapter.backend_adapter = RecordingBackendAdapter()
+    state = _state()
+    state["next_action"] = "call_eda_agent"
+    node = make_execute_subagent_node(adapter, None)
+
+    result = node(state)
+
+    assert adapter.calls == ["eda_agent"]
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["next_action"] == "finalize"
+    assert result["error_state"]["reason_code"] == "agent_execution_error"
+    assert result["error_state"]["exception_type"] == "TimeoutError"
+    event_pairs = [
+        (event["event_type"], event["node_name"])
+        for event in adapter.backend_adapter.events
+    ]
+    assert ("agent.started", "eda_agent") in event_pairs
+    assert ("agent.failed", "eda_agent") in event_pairs
     assert result["active_node"] is None
 
 

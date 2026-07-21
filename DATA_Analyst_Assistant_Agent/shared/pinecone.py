@@ -31,11 +31,18 @@ DEFAULT_RETURN_FIELDS = (
     "chunk_index",
     "chunk_count",
     "query_type",
+    "record_type",
+    "section",
+    "rule_strength",
+    "schema_warnings",
+    "integrity_cautions",
+    "referenced_columns",
     "rule_id",
     "rule",
     "rule_name",
     "rule_metadata",
 )
+MAX_UPSERT_RECORDS_PER_BATCH = 96
 
 
 class PineconeConfigurationError(ValueError):
@@ -175,10 +182,17 @@ def upsert_company_context(
 
     upsert_index = index or get_pinecone_index(resolved)
     try:
-        return upsert_index.upsert_records(
-            namespace=resolved.namespace,
-            records=normalized_records,
-        )
+        responses = [
+            upsert_index.upsert_records(namespace=resolved.namespace, records=batch)
+            for batch in _batches(normalized_records, MAX_UPSERT_RECORDS_PER_BATCH)
+        ]
+        if len(responses) == 1:
+            return responses[0]
+        return {
+            "record_count": len(normalized_records),
+            "batch_count": len(responses),
+            "responses": responses,
+        }
     except Exception as exc:
         raise PineconeUpsertError(f"Pinecone 문맥 업서트에 실패했습니다: {exc}") from exc
 
@@ -187,6 +201,11 @@ def _response_hits(response: Any) -> list[Any]:
     result = _read_value(response, "result", {})
     hits = _read_value(result, "hits", [])
     return list(hits or [])
+
+
+def _batches(records: list[CompanyContextRecord], size: int) -> Iterable[list[CompanyContextRecord]]:
+    for start in range(0, len(records), size):
+        yield records[start : start + size]
 
 
 def _normalize_hit(hit: Any, text_field: str) -> CompanyContextHit:
