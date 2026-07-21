@@ -20,7 +20,12 @@ from DATA_Analyst_Assistant_Agent.agents.analysis import AnalysisAgent
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda.agent import EDAAgent
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentEnvelope, AnalysisPlan, OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AgentEnvelope,
+    AgentStatus,
+    AnalysisPlan,
+    OrchestrationState,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.insight.agent import InsightGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import emit_node_lifecycle_event
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -61,6 +66,16 @@ class BranchResult:
         return ids
 
 
+@dataclass(frozen=True)
+class BranchPlanContext:
+    generated_sql: str = ""
+    target_table: str | None = None
+    source_tables: list[str] = field(default_factory=list)
+    business_grain: str | None = None
+    mart_design: dict[str, Any] = field(default_factory=dict)
+    analysis_data_contract: dict[str, Any] = field(default_factory=dict)
+
+
 def branch_from(
     start_stage: BranchStage,
     new_instruction: str,
@@ -87,6 +102,11 @@ def branch_from(
 
     goal = f"{original_question}\n\n[추가 지시사항] {new_instruction}".strip()
     artifact_ids = dict(upstream_artifact_ids)
+    plan_context = _branch_plan_context_from_sql_artifacts(
+        artifact_ids.get("sql_agent", []),
+        runtime,
+        fallback_target_table=target_table,
+    )
     result = BranchResult()
     node_sequence = 0
     current_parent = parent_node_id
@@ -102,7 +122,18 @@ def branch_from(
             user_query=original_question,
             goal=goal,
             route_kind=route_kind,
-            plan=AnalysisPlan(goal=goal, route_kind=route_kind, target_table=target_table),
+            generated_sql=plan_context.generated_sql,
+            plan=AnalysisPlan(
+                goal=goal,
+                route_kind=route_kind,
+                generated_sql=plan_context.generated_sql,
+                source_sql=plan_context.generated_sql,
+                target_table=plan_context.target_table or target_table,
+                source_tables=list(plan_context.source_tables),
+                business_grain=plan_context.business_grain,
+                mart_design=dict(plan_context.mart_design),
+                analysis_data_contract=dict(plan_context.analysis_data_contract),
+            ),
         )
         state.artifact_ids = dict(artifact_ids)
 
@@ -150,6 +181,29 @@ def branch_from(
         artifact_ids[agent_name] = stage_artifact_ids
         result.artifact_ids[agent_name] = stage_artifact_ids
 
+        if envelope.status == AgentStatus.failed:
+            failure_reason = envelope.error or envelope.summary or f"{agent_name} returned failed status"
+            failed_node = FailedNodeExecution(
+                node_id=node_id,
+                agent_name=agent_name,
+                parent_node_id=current_parent,
+                node_sequence=node_sequence,
+                attempt=1,
+                reason=failure_reason,
+                reason_code=envelope.retry_hint.reason_code or "agent_failed",
+            )
+            emit_node_lifecycle_event(
+                backend_adapter,
+                fake_state,
+                "agent.failed",
+                failed_node,
+                f"{agent_name} 작업이 실패했습니다(분기): {failure_reason}",
+            )
+            result.failed_agent = agent_name
+            result.failure_reason = failure_reason
+            result.last_node_id = current_parent or ""
+            return result
+
         summary_text, summary_artifact_id = _safe_summarize(
             agent_name,
             stage_artifact_ids,
@@ -186,6 +240,171 @@ def branch_from(
 
     result.last_node_id = current_parent or ""
     return result
+
+
+def _branch_plan_context_from_sql_artifacts(
+    artifact_ids: list[str],
+    runtime: AgentRuntime,
+    *,
+    fallback_target_table: str | None = None,
+) -> BranchPlanContext:
+    context = BranchPlanContext(target_table=fallback_target_table)
+    for artifact_id in artifact_ids:
+        text = _safe_read_artifact_text(runtime, artifact_id)
+        if not text:
+            continue
+        stripped = text.lstrip()
+        if stripped[:1] in {"{", "["}:
+            context = _merge_sql_json_context(context, _safe_load_json(stripped))
+        elif not context.generated_sql and _looks_like_sql(stripped):
+            context = _replace_context(context, generated_sql=stripped)
+    if not context.analysis_data_contract:
+        context = _replace_context(
+            context,
+            analysis_data_contract=_analysis_contract_from_plan_context(context),
+        )
+    return context
+
+
+def _safe_read_artifact_text(runtime: AgentRuntime, artifact_id: str) -> str:
+    try:
+        return runtime.adapter.read_artifact_text(artifact_id)
+    except Exception:  # noqa: BLE001 - branch hydration is best-effort.
+        return ""
+
+
+def _safe_load_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001 - non-JSON artifacts are ignored.
+        return None
+
+
+def _merge_sql_json_context(context: BranchPlanContext, payload: Any) -> BranchPlanContext:
+    if not isinstance(payload, dict):
+        return context
+
+    sql_draft = payload.get("sql_draft")
+    sql_draft = sql_draft if isinstance(sql_draft, dict) else {}
+    mart_design = payload.get("mart_design")
+    mart_design = mart_design if isinstance(mart_design, dict) else {}
+    plan = payload.get("plan")
+    plan = plan if isinstance(plan, dict) else {}
+    analysis_contract = payload.get("analysis_data_contract")
+    analysis_contract = analysis_contract if isinstance(analysis_contract, dict) else {}
+
+    generated_sql = (
+        context.generated_sql
+        or str(sql_draft.get("sql") or payload.get("generated_sql") or payload.get("sql") or "")
+    )
+    target_table = (
+        context.target_table
+        or _non_empty_string(sql_draft.get("target_table"))
+        or _target_table_from_mart_design(mart_design)
+        or _non_empty_string(plan.get("target_table"))
+    )
+    source_tables = (
+        context.source_tables
+        or _string_list(sql_draft.get("source_tables"))
+        or _string_list(mart_design.get("source_tables"))
+        or _string_list(plan.get("selected_join_tables"))
+        or _string_list(plan.get("candidate_tables"))
+    )
+    business_grain = (
+        context.business_grain
+        or _non_empty_string(sql_draft.get("business_grain"))
+        or _non_empty_string(mart_design.get("grain"))
+        or _non_empty_string(plan.get("business_grain"))
+    )
+    next_context = _replace_context(
+        context,
+        generated_sql=generated_sql,
+        target_table=target_table,
+        source_tables=source_tables,
+        business_grain=business_grain,
+        mart_design=context.mart_design or mart_design,
+        analysis_data_contract=context.analysis_data_contract or analysis_contract,
+    )
+    if not next_context.analysis_data_contract:
+        return _replace_context(
+            next_context,
+            analysis_data_contract=_analysis_contract_from_plan_context(next_context),
+        )
+    return next_context
+
+
+def _replace_context(context: BranchPlanContext, **updates: Any) -> BranchPlanContext:
+    values = {
+        "generated_sql": context.generated_sql,
+        "target_table": context.target_table,
+        "source_tables": list(context.source_tables),
+        "business_grain": context.business_grain,
+        "mart_design": dict(context.mart_design),
+        "analysis_data_contract": dict(context.analysis_data_contract),
+    }
+    values.update(updates)
+    return BranchPlanContext(**values)
+
+
+def _analysis_contract_from_plan_context(context: BranchPlanContext) -> dict[str, Any]:
+    mart_design = context.mart_design
+    if not mart_design and not (context.generated_sql or context.target_table):
+        return {}
+    column_plan = [item for item in mart_design.get("column_plan") or [] if isinstance(item, dict)]
+    grain_columns = _string_list(mart_design.get("grain_columns"))
+    source_tables = context.source_tables or _string_list(mart_design.get("source_tables"))
+    return {
+        "target_table": context.target_table or _target_table_from_mart_design(mart_design),
+        "row_grain": context.business_grain or _non_empty_string(mart_design.get("grain")) or "",
+        "grain_columns": grain_columns,
+        "entity_keys": [column for column in grain_columns if not _looks_temporal_column(column)],
+        "time_basis": [
+            item for item in column_plan
+            if _looks_temporal_column(str(item.get("output_column") or ""))
+            or any(_looks_temporal_column(str(source)) for source in item.get("source_columns") or [])
+        ],
+        "derived_columns": column_plan,
+        "aggregation_rules": [
+            item for item in column_plan
+            if str(item.get("aggregation_method") or "none").lower() != "none"
+        ],
+        "deduplication_keys": _string_list(mart_design.get("deduplication_keys")) or grain_columns,
+        "source_tables": source_tables,
+        "source_grains": dict(mart_design.get("source_grains") or {}),
+        "safe_interpretations": [
+            "선언된 row_grain 기준에서만 데이터마트를 해석합니다.",
+            "집계 수준의 관계를 개별 주문 또는 판매자 인과로 단정하지 않습니다.",
+        ],
+        "generated_sql": context.generated_sql,
+    }
+
+
+def _target_table_from_mart_design(mart_design: dict[str, Any]) -> str | None:
+    mart_name = _non_empty_string(mart_design.get("mart_name"))
+    if not mart_name:
+        return None
+    schema = _non_empty_string(mart_design.get("target_schema"))
+    return f"{schema}.{mart_name}" if schema else mart_name
+
+
+def _non_empty_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
+
+
+def _looks_like_sql(text: str) -> bool:
+    return text.upper().startswith(("CREATE ", "SELECT ", "WITH ", "INSERT "))
+
+
+def _looks_temporal_column(column: str) -> bool:
+    normalized = column.casefold()
+    return any(token in normalized for token in ("date", "time", "month", "year"))
 
 
 def _run_agent(agent_name: AgentName, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:

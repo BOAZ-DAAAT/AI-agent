@@ -157,11 +157,21 @@ def deterministic_precheck(
 
     method_decision = result.get("method_decision")
     if not isinstance(method_decision, dict):
-        issues.append("result.method_decision must explain the selected method")
+        _append_method_note(
+            result,
+            "method_decision이 비어 있어 후속 요약 단계에서 방법 선택 근거를 보강해야 합니다.",
+        )
     else:
-        for key in ("selected_method", "rationale"):
-            if not str(method_decision.get(key) or "").strip():
-                issues.append(f"result.method_decision.{key} is empty")
+        missing_keys = [
+            key for key in ("selected_method", "rationale")
+            if not str(method_decision.get(key) or "").strip()
+        ]
+        if missing_keys:
+            _append_method_note(
+                result,
+                "method_decision의 일부 필드가 비어 있어 후속 요약 단계에서 방법 선택 근거를 보강해야 합니다: "
+                + ", ".join(missing_keys),
+            )
 
     issues.extend(_review_request_issues(result.get("review_request")))
 

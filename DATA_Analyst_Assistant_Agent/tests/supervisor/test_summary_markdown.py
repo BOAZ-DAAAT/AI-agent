@@ -143,7 +143,7 @@ def test_sql_mart_preview_renders_as_markdown_table(adapter, runtime, tmp_path):
 
     markdown = render_node_summary_markdown(result, runtime, out_dir)
 
-    assert "최종 구성된 데이터마트는 다음과 같습니다" in markdown
+    assert "## 최종 데이터마트" in markdown
     assert "| customer_unique_id | monetary_total |" in markdown
     assert "| c1 | 120.5 |" in markdown
     assert "| c2 |  |" in markdown  # None은 빈 칸으로
@@ -221,7 +221,32 @@ def test_sql_without_preview_has_no_table(adapter, runtime, tmp_path):
 
     markdown = render_node_summary_markdown(result, runtime, out_dir)
 
-    assert "최종 구성된 데이터마트는 다음과 같습니다" not in markdown
+    assert "## 최종 데이터마트" not in markdown
+
+
+def test_sql_markdown_omits_source_tables_grain_and_sql_snippet(adapter, runtime, tmp_path):
+    result = NodeSummaryResult(
+        title="SQL 요약", subtitle="부제", background="배경",
+        conclusion="결론", key_finding="한줄요약", source_kind="sql_plan",
+        detail=SQLSummaryDetail(
+            source_tables=["orders"],
+            mart_grain="customer_unique_id 당 1행",
+            mart_columns=["customer_unique_id"],
+            sql_snippet="SELECT customer_unique_id FROM orders",
+            handoff="EDA 단계로 전달합니다.",
+        ),
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    markdown = render_node_summary_markdown(result, runtime, out_dir)
+    service_markdown = render_node_summary_artifact_markdown(result)
+
+    assert "사용한 원천 테이블" not in markdown
+    assert "customer_unique_id 당 1행" not in markdown
+    assert "SELECT customer_unique_id FROM orders" not in markdown
+    assert "EDA 단계로 전달합니다." not in service_markdown
+    assert "SELECT customer_unique_id FROM orders" not in service_markdown
 
 
 def test_service_markdown_keeps_rationale_chart_and_observation_in_order():
