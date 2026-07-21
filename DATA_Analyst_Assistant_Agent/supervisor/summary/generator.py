@@ -30,6 +30,7 @@ from DATA_Analyst_Assistant_Agent.shared.numeric_verify import collect_numbers, 
 from DATA_Analyst_Assistant_Agent.supervisor.summary.evidence import NodeEvidence, read_node_evidence
 from DATA_Analyst_Assistant_Agent.supervisor.summary.markdown import render_node_summary_artifact_markdown
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
+    AnalysisItem,
     AnalysisSummaryDetail,
     EDASummaryDetail,
     EvidenceTable,
@@ -40,7 +41,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
 )
 
 _TOOL_NAME = "supervisor.summary.generator"
-_SUMMARY_VERSION = 17                                  # v17: 분석 검정 서술 존댓말/핵심 수치 강조 강화
+_SUMMARY_VERSION = 18                                  # v18: Analysis 본 분석 카드 구조(analysis_items) 추가
                                                         # (v13: SQL 핵심 어구 강조 문법 반영)
                                                         # (v12: SQL 화면 구조/10행 데이터마트 미리보기 반영)
                                                         # (v11: SQL 요약 톤/중복 SQL 노출 정리)
@@ -641,6 +642,83 @@ def _analysis_decision_boundaries(raw_tests: Any) -> list[str]:
     return boundaries
 
 
+def _analysis_key_numbers(raw: dict[str, Any]) -> list[str]:
+    numbers: list[str] = []
+    for field_name, label in (
+        ("statistic", "statistic"),
+        ("p_value", "p-value"),
+        ("effect_size", "effect size"),
+        ("n", "n"),
+    ):
+        value = raw.get(field_name)
+        if value is not None and value != "":
+            numbers.append(f"{label}={value}")
+    return numbers
+
+
+def _analysis_caution(raw: dict[str, Any]) -> str:
+    caveats = raw.get("caveats") or []
+    if isinstance(caveats, str):
+        caveats = [caveats]
+    return " ".join(str(item).strip() for item in caveats if str(item).strip())
+
+
+def _analysis_result_sentence(raw: dict[str, Any]) -> str:
+    decision = str(raw.get("decision") or "").strip()
+    if not decision:
+        return ""
+    test_name = str(raw.get("test_name") or "").strip()
+    if test_name:
+        return f"{test_name} 결과의 원본 판정은 {decision}입니다."
+    return f"원본 판정은 {decision}입니다."
+
+
+def _analysis_item_title(raw: dict[str, Any], generated: FindingSection | None, index: int) -> str:
+    return str(
+        raw.get("hypothesis")
+        or raw.get("alternative_hypothesis")
+        or (generated.heading if generated else "")
+        or f"본 분석 {index + 1}"
+    ).strip()
+
+
+def _analysis_items_from_tests(
+    *,
+    raw_tests: Any,
+    generated_sections: list[FindingSection],
+) -> list[AnalysisItem]:
+    items: list[AnalysisItem] = []
+    if isinstance(raw_tests, list):
+        for index, raw in enumerate(raw_tests):
+            if not isinstance(raw, dict):
+                continue
+            generated = generated_sections[index] if index < len(generated_sections) else None
+            item = AnalysisItem(
+                title=_analysis_item_title(raw, generated, index),
+                method=str(raw.get("test_name") or "").strip(),
+                purpose=(generated.rationale if generated else "").strip(),
+                result=_analysis_result_sentence(raw),
+                key_numbers=_analysis_key_numbers(raw),
+                interpretation=(generated.body if generated else "").strip(),
+                caution=_analysis_caution(raw),
+                decision=str(raw.get("decision") or "").strip(),
+            )
+            items.append(item)
+
+    if items:
+        return items
+
+    return [
+        AnalysisItem(
+            title=section.heading,
+            purpose=section.rationale,
+            result=section.body,
+            interpretation=section.body,
+        )
+        for section in generated_sections
+    ]
+
+
 def _emphasize_sections(sections: list[FindingSection]) -> list[FindingSection]:
     return [
         section.model_copy(update={"body": _ensure_analysis_emphasis(section.body)})
@@ -665,6 +743,10 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
     ]
     detail = AnalysisSummaryDetail(
         method_decision=method_decision,
+        analysis_items=_analysis_items_from_tests(
+            raw_tests=raw_tests,
+            generated_sections=hypothesis_tests,
+        ),
         hypothesis_tests=hypothesis_tests,
         key_statistics=_emphasize_sections(_extract_sections(parsed.get("key_statistics"), known_chart_ids)),
         evidence_tables=[
