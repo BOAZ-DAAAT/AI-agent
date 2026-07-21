@@ -18,10 +18,10 @@ def enrich_schema_descriptions(engine, schema_data): # engine 인자 추가
     model_name = os.getenv("LLM_MODEL")
 
     if not model_name:
-        raise ValueError("🚨 .env에 'LLM_MODEL'이 설정되지 않았습니다.")
+        raise ValueError("[ERROR] .env에 'LLM_MODEL'이 설정되지 않았습니다.")
 
     llm = get_chat_model(model=model_name, temperature=0)
-    print(f"🤖 {model_name} 모델이 샘플 데이터를 분석 중입니다... (비용 발생)")
+    print(f"[INFO] {model_name} 모델이 샘플 데이터를 분석 중입니다... (비용 발생)")
 
     for table_name, details in schema_data.items():
         # 1. 회의 내용 반영: 직접 데이터 샘플 10개 접근
@@ -56,7 +56,7 @@ def enrich_schema_descriptions(engine, schema_data): # engine 인자 추가
                 col["description"] = res_json.get("column_descs", {}).get(col_name, "설명이 없습니다.")
                 
         except Exception as e:
-            print(f"⚠️ {table_name} 설명 생성 실패: {e}")
+            print(f"[WARN] {table_name} 설명 생성 실패: {e}")
             details["description"] = "설명 생성 중 오류가 발생했습니다."
             
     return schema_data
@@ -69,7 +69,7 @@ def get_schema_info(engine, use_llm=False, use_cache=True): # use_cache 추가
     # 1. 캐시 확인 (비용 방어) — use_llm=True로 명시 요청하면 캐시가 description 없는
     # 옛 스캐폴드일 수 있으니 무시하고 재생성한다(#123).
     if use_cache and not use_llm and os.path.exists(SCHEMA_CACHE_PATH):
-        print(f"📦 기존에 생성된 스키마 정보({SCHEMA_CACHE_PATH})를 활용합니다.")
+        print(f"[INFO] 기존에 생성된 스키마 정보({SCHEMA_CACHE_PATH})를 활용합니다.")
         with open(SCHEMA_CACHE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -115,7 +115,7 @@ def get_schema_info(engine, use_llm=False, use_cache=True): # use_cache 추가
 
         with open(SCHEMA_CACHE_PATH, "w", encoding="utf-8") as f:
             json.dump(schema_data, f, indent=4, ensure_ascii=False, default=json_default)
-            print(f"💾 스키마 정보가 {SCHEMA_CACHE_PATH}에 저장되었습니다.")
+            print(f"[INFO] 스키마 정보가 {SCHEMA_CACHE_PATH}에 저장되었습니다.")
             
     return schema_data
 
@@ -125,4 +125,4 @@ if __name__ == "__main__":
     if test_engine:
         # 처음 실행 시에는 use_llm=True, 그 다음부터는 저장된 파일을 쓰게 됩니다.
         info = get_schema_info(test_engine, use_llm=True, use_cache=True)
-        print("✅ 스키마 처리 완료")
+        print("[OK] 스키마 처리 완료")

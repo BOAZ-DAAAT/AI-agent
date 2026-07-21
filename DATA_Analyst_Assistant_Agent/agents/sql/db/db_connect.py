@@ -37,11 +37,11 @@ def get_db_engine():
     try:
         engine = create_engine(database_url)
         with engine.connect() as connection:
-            print(f"✅ DB 연결 성공: {config['database']}")
+            print(f"[OK] DB 연결 성공: {config['database']}")
         return engine
     except Exception as e:
         print(
-            f"❌ DB 연결 실패: {e}\n"
+            f"[FAIL] DB 연결 실패: {e}\n"
             "필요한 환경변수: MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USERNAME, MYSQL_PASSWORD"
         )
         return None
@@ -55,7 +55,7 @@ def get_table_samples(engine, table_name, sample_count=10):
             df = pd.read_sql(query, connection)
             return df.to_dict(orient="records")
     except Exception as e:
-        print(f"⚠️ {table_name} 샘플 추출 실패: {e}")
+        print(f"[WARN] {table_name} 샘플 추출 실패: {e}")
         return []
 
 
@@ -66,8 +66,8 @@ if __name__ == "__main__":
         test_table = "users"
         samples = get_table_samples(engine, test_table, 10)
 
-        print(f"\n🔍 '{test_table}' 테이블 샘플 데이터 (최대 10개):")
+        print(f"\n[INFO] '{test_table}' 테이블 샘플 데이터 (최대 10개):")
         for i, row in enumerate(samples, 1):
             print(f"{i}: {row}")
     else:
-        print("❌ 테스트 실패: 엔진을 생성할 수 없습니다.")
+        print("[FAIL] 테스트 실패: 엔진을 생성할 수 없습니다.")
