@@ -5,7 +5,7 @@ import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any, Iterator
 from uuid import uuid4
 
 from sqlalchemy import inspect
@@ -326,24 +326,32 @@ def launch_agent_run(
         raise
 
 
+_RESUME_MESSAGES = {
+    "clarification": "Clarification answer received. Resuming agent workflow.",
+    "analysis_review": "Analysis review decision received. Resuming agent workflow.",
+    "approval": "Approval received. Resuming agent workflow.",
+}
+
+
 def resume_agent_run(
     *,
     services: BackendServices,
     session: SessionResponse,
-    answer: str,
+    resume_payload: dict[str, Any],
     run_id: str,
     thread_id: str,
 ) -> None:
     run = services.run_service.get_run(run_id)
     interrupt_node = run.metadata.get("node")
     node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
+    resumed_from = str(run.metadata.get("resumed_from") or "clarification")
     services.run_service.append_event(
         run_id,
         "human_input.resumed",
-        "Clarification answer received. Resuming agent workflow.",
+        _RESUME_MESSAGES.get(resumed_from, _RESUME_MESSAGES["clarification"]),
         node_name=node_name,
         metadata={
-            "interrupt_type": "clarification",
+            "interrupt_type": resumed_from,
             "thread_id": thread_id,
             "node": node_name,
         },
@@ -354,7 +362,7 @@ def resume_agent_run(
         adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
         supervisor = SupervisorAgent(adapter, checkpoint_path=adapter.base_data_dir / f"{thread_id}.sqlite")
         with bind_session_database(session):
-            result = supervisor.resume(thread_id, {"answer": answer})
+            result = supervisor.resume(thread_id, resume_payload)
         if isinstance(result, SupervisorRunResult) and result.kind == "state":
             _append_terminal_event(services, run_id, result)
     except Exception as exc:

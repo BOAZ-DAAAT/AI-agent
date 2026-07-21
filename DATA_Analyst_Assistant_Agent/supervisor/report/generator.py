@@ -28,7 +28,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult,
 
 _TOOL_NAME = "supervisor.report.generator"
 _REPORT_KIND = "report"
-_REPORT_VERSION = 1                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화
+_REPORT_VERSION = 3                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화
 _MAX_ATTEMPTS = 2                                      # 최초 1회 + 재시도 1회
 
 _STAGE_LABELS = {"sql": "SQL 조회", "eda": "EDA 검증", "analysis": "분석", "insight": "인사이트"}
@@ -284,9 +284,22 @@ def _build_prompt(evidence: PathEvidence, feedback: str) -> str:
 하나의 이야기로 엮어라:
 - SQL에서 이 지표/테이블을 왜 선택했는지 → (있다면) EDA가 그 데이터의 신뢰도를 어떻게
   검증했는지, 그 결과가 이후 분석 방향에 어떤 영향을 줬는지
-- 분석에서 쓴 방법이 앞선 근거(SQL 설계나 EDA 발견) 때문이라면 그 인과를 밝혀라
+- 분석에서 어떤 방법을 왜 선택했고(method_decision이 있다면 그 rationale) 무엇을 확인했는지
+  (evidence의 각 항목: method/statistics/finding/caveats), 그 방법 선택이 앞선 근거(SQL
+  설계나 EDA 발견) 때문이라면 그 인과를 밝혀라 — 분석 근거의 evidence/method_decision은
+  analysis_kind와 무관하게 항상 있으니 절대 건너뛰지 말고 반드시 이 흐름 안에 녹여라.
+  **분석 방법이 실제로 무엇이었는지(상관검정/회귀/세그멘테이션/코호트/이상탐지 등)에 맞는
+  말로 서술하라 — 근거에 없는 개념(예: 가설검정이 아닌데 "귀무가설")을 갖다 붙이지 마라.**
+  분석 근거에 hypotheses(귀무/대립가설)가 실제로 있을 때만 그 표현을 써라.
 - (있다면) 최종 인사이트/결론이 앞의 어떤 구체적 발견에서 도출됐는지 반드시 되짚어 연결하라
-  (예: "앞서 확인된 X 이상치를 제외하고 재검토한 결과 Y로 나타났다" 같은 식)
+  (예: "앞서 확인된 X 이상치를 제외하고 재검토한 결과 Y로 나타났다" 같은 식). 인사이트 근거에
+  answer가 있다면 executive_summary는 그 answer와 결이 어긋나지 않게 써라
+
+[정직성 — 반드시 지켜라] 분석 evidence의 finding이나 hypotheses의 decision이 확정적이지
+않다면(예: "inconclusive"/판정불가, 또는 caveats에 불확실성이 명시됨) 확정된 경향이나
+결론처럼 서술하지 마라. "감소했다/확인되었다"처럼 단정하지 말고 "경향은 보이나 통계적으로
+판정되지 않았다" 식으로 그 불확실성을 그대로 남겨라. 확정된 것과 불확정인 것을 절대 같은
+확신도로 쓰지 마라.
 
 [금지] 각 문단을 "SQL 단계에서는~", "EDA 단계에서는~", "분석 단계에서는~" 같은 말로
 시작하지 마라. 이런 문장이 나오면 나열식으로 간주해 실패로 처리한다.
@@ -300,10 +313,14 @@ def _build_prompt(evidence: PathEvidence, feedback: str) -> str:
 
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 분석 여정 전체를 나타내는 구체적인 제목
-- executive_summary: 결론부터 먼저 요약. 3~5문장.
+- executive_summary: 결론부터 먼저 요약(인사이트 근거의 answer가 있다면 그 답변과 일관되게).
+  3~5문장.
 - background_and_question: 사용자가 뭘 궁금해했는지, 왜 이 분석 여정이 필요했는지. 1~2문단.
-- methodology_narrative: SQL/EDA를 하나로 묶어 "이렇게 데이터를 준비하고 검증했다"는
-  흐름으로 서술(있는 것만 자연스럽게). 최대 2문단.
+- methodology_narrative: SQL/EDA/분석을 하나로 묶어 "이렇게 데이터를 준비하고, 검증하고,
+  어떤 방법으로 무엇을 확인했는지"의 흐름으로 서술(있는 것만 자연스럽게). 분석 evidence가
+  있으면 어떤 방법(method)을 왜 선택했고 무엇을 확인했는지(finding)를 반드시 포함하라 —
+  hypotheses(귀무/대립가설)가 있으면 그 형태로, 없으면 evidence의 method/finding을 그
+  분석 방법에 맞는 말로 서술하라(위 [정직성] 규칙을 지키면서). 최대 3문단.
 - key_findings: 발견을 다루는 섹션 리스트(핵심 파트, 최소 1개 이상). 각 섹션:
   {{"heading":"소제목", "body":"본문(근거의 구체적 수치를 최대한 인용, 이전 발견과의
   연결이 자연스러우면 그 연결도 문장에 녹여라)",

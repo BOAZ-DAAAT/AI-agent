@@ -76,7 +76,7 @@ class PhysicalIntegrityManager:
         )
 
         for table_name, table in schema_info.items():
-            print(f"🚀 [{table_name}] 검증 준비", end=" -> ")
+            print(f"[START] [{table_name}] 검증 준비", end=" -> ")
             df = pd.read_sql(text(f"SELECT * FROM `{table_name}`"), self.engine)
             
             print(f"   - 데이터 건수: {len(df)}건")

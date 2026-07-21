@@ -47,3 +47,34 @@ def test_claim_waiting_input_is_atomic(tmp_path) -> None:
     with pytest.raises(BackendError, match="not waiting") as exc_info:
         services.run_service.claim_waiting_input(run.run_id)
     assert exc_info.value.code == "RUN_NOT_WAITING_INPUT"
+
+
+def test_claim_waiting_approval_is_atomic(tmp_path) -> None:
+    services = create_backend_services(BackendConfig(base_data_dir=tmp_path / ".data_agent"))
+    run = services.run_service.create_run(thread_id="thread_claim_approval")
+    services.run_service.update_status(run.run_id, RunStatus.running)
+    services.run_service.update_status(run.run_id, RunStatus.waiting_approval)
+
+    claimed = services.run_service.claim_waiting_approval(
+        run.run_id,
+        metadata={"resumed_from": "approval"},
+    )
+
+    assert claimed.status == RunStatus.running
+    assert claimed.metadata["resumed_from"] == "approval"
+    with pytest.raises(BackendError, match="not waiting") as exc_info:
+        services.run_service.claim_waiting_approval(run.run_id)
+    assert exc_info.value.code == "RUN_NOT_WAITING_APPROVAL"
+
+
+def test_claim_waiting_approval_does_not_claim_waiting_input(tmp_path) -> None:
+    """waiting_approval 전용 claim이 waiting_input 상태의 run은 못 건드리는지 — 두 상태를 섞어 쓰지 않는지 확인."""
+    services = create_backend_services(BackendConfig(base_data_dir=tmp_path / ".data_agent"))
+    run = services.run_service.create_run(thread_id="thread_claim_mismatch")
+    services.run_service.update_status(run.run_id, RunStatus.running)
+    services.run_service.update_status(run.run_id, RunStatus.waiting_input)
+
+    with pytest.raises(BackendError) as exc_info:
+        services.run_service.claim_waiting_approval(run.run_id)
+    assert exc_info.value.code == "RUN_NOT_WAITING_APPROVAL"
+    assert services.run_service.get_run(run.run_id).status == RunStatus.waiting_input
