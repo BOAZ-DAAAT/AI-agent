@@ -25,6 +25,9 @@ CLARIFY_DECISION_PROMPT = """
 - needs_clarification: boolean
 - clarified_query: string
 - clarification_question: string
+- input_mode: "free_text" | "choice_with_free_text"
+- options: list of {"id": string, "label": string, "description": string}; 선택지가 명확할 때만 사용하고, 필요하면 "건너뛰기/그대로 진행" 선택지도 포함하세요.
+- allow_free_text: boolean; 선택지 외 사용자 의견을 함께 받아야 하면 true로 두세요.
 - reason: string
 
 예시:

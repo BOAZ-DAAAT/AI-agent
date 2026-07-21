@@ -85,6 +85,7 @@ def build_analysis_context(
             "reason_code": "semantic_validation_failed",
             "failure_reason": f"{reason}{missing_text}".strip(),
         }
+    analysis_contract, mart_columns, contract_issues = _analysis_data_contract_from_plan(plan)
     return AnalysisContext(
         user_question=state.user_query,
         goal=state.goal or (plan.goal if plan else state.user_query),
@@ -104,6 +105,9 @@ def build_analysis_context(
         eda_candidate_insights=list(dict.fromkeys(candidate_insights)),
         eda_candidate_hypotheses=list(dict.fromkeys(candidate_hypotheses)),
         known_data_quality_issues=known_data_quality_issues,
+        analysis_data_contract=analysis_contract,
+        mart_columns=mart_columns,
+        contract_issues=contract_issues,
         source_artifact_ids=[item for ids in state.artifact_ids.values() for item in ids],
         last_failure=last_failure,
         review_request=review_request,
@@ -182,6 +186,155 @@ def _clean_candidate_text(text: str, *, max_chars: int) -> str:
     if len(cleaned) > max_chars:
         cleaned = cleaned[: max_chars - 3].rstrip() + "..."
     return cleaned
+
+
+def _analysis_data_contract_from_plan(plan: Any) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    if plan is None:
+        return {}, [], []
+    contract = dict(getattr(plan, "analysis_data_contract", None) or {})
+    mart_design = dict(getattr(plan, "mart_design", None) or {})
+    generated_sql = str(getattr(plan, "generated_sql", "") or getattr(plan, "source_sql", "") or "")
+    if not contract:
+        contract = _contract_from_mart_design(mart_design, plan, generated_sql)
+    if not contract:
+        contract = _contract_from_plan_sql(plan, generated_sql)
+
+    mart_columns = [item for item in list(contract.get("derived_columns") or []) if isinstance(item, dict)]
+    inferred = _infer_column_lineage_from_sql(generated_sql)
+    known = {str(item.get("output_column") or "") for item in mart_columns}
+    for item in inferred:
+        if item["output_column"] not in known:
+            mart_columns.append(item)
+    if mart_columns and not contract.get("derived_columns"):
+        contract["derived_columns"] = mart_columns
+
+    issues: list[str] = []
+    if getattr(plan, "target_table", None) and not str(contract.get("row_grain") or "").strip():
+        issues.append("SQL 데이터마트의 row_grain이 비어 있습니다.")
+    if any(item.get("output_column") == "month" for item in mart_columns):
+        has_month_source = any(
+            item.get("output_column") == "month" and item.get("source_columns")
+            for item in mart_columns
+        )
+        if not has_month_source:
+            issues.append("month 컬럼의 원본/파생 근거가 부족하므로 추세 해석을 제한해야 합니다.")
+    return contract, mart_columns, issues
+
+
+def _contract_from_mart_design(mart_design: dict[str, Any], plan: Any, generated_sql: str) -> dict[str, Any]:
+    if not mart_design:
+        return {}
+    column_plan = [item for item in mart_design.get("column_plan") or [] if isinstance(item, dict)]
+    grain_columns = list(mart_design.get("grain_columns") or [])
+    return {
+        "target_table": getattr(plan, "target_table", None) or mart_design.get("mart_name"),
+        "row_grain": mart_design.get("grain") or getattr(plan, "business_grain", None) or "",
+        "grain_columns": grain_columns,
+        "entity_keys": [column for column in grain_columns if not _looks_temporal_column(column)],
+        "time_basis": [
+            item for item in column_plan
+            if _looks_temporal_column(str(item.get("output_column") or ""))
+            or any(_looks_temporal_column(str(source)) for source in item.get("source_columns") or [])
+        ],
+        "derived_columns": column_plan,
+        "aggregation_rules": [
+            item for item in column_plan
+            if str(item.get("aggregation_method") or "none").lower() != "none"
+        ],
+        "deduplication_keys": list(mart_design.get("deduplication_keys") or []),
+        "source_tables": list(mart_design.get("source_tables") or getattr(plan, "source_tables", []) or []),
+        "source_grains": dict(mart_design.get("source_grains") or {}),
+        "safe_interpretations": [
+            "선언된 row_grain 기준에서만 데이터마트를 해석합니다.",
+            "집계 수준의 연관성을 개별 주문/사용자 수준 인과로 해석하지 않습니다.",
+        ],
+        "generated_sql": generated_sql,
+    }
+
+
+def _contract_from_plan_sql(plan: Any, generated_sql: str) -> dict[str, Any]:
+    if not generated_sql and not getattr(plan, "target_table", None):
+        return {}
+    inferred = _infer_column_lineage_from_sql(generated_sql)
+    group_columns = _infer_group_columns_from_sql(generated_sql)
+    return {
+        "target_table": getattr(plan, "target_table", None),
+        "row_grain": getattr(plan, "business_grain", None) or ", ".join(group_columns),
+        "grain_columns": group_columns,
+        "entity_keys": [column for column in group_columns if not _looks_temporal_column(column)],
+        "time_basis": [
+            item for item in inferred
+            if _looks_temporal_column(item.get("output_column", ""))
+            or any(_looks_temporal_column(source) for source in item.get("source_columns", []))
+        ],
+        "derived_columns": inferred,
+        "aggregation_rules": [
+            item for item in inferred
+            if str(item.get("aggregation_method") or "none").lower() != "none"
+        ],
+        "deduplication_keys": group_columns,
+        "source_tables": list(getattr(plan, "source_tables", []) or []),
+        "source_grains": {},
+        "safe_interpretations": [
+            "SQL에서 파생된 컬럼은 생성 SQL 표현식에 따라 해석합니다.",
+            "판매자/고객/그룹 요약은 집계 수준 한계를 함께 명시합니다.",
+        ],
+        "generated_sql": generated_sql,
+    }
+
+
+def _infer_column_lineage_from_sql(sql: str) -> list[dict[str, Any]]:
+    if not sql.strip():
+        return []
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+        select = tree.find(exp.Select) if tree is not None else None
+        if select is None:
+            return []
+        items: list[dict[str, Any]] = []
+        for expression in select.expressions:
+            alias = expression.alias_or_name
+            if not alias:
+                continue
+            source_columns = sorted({column.sql(dialect="mysql") for column in expression.find_all(exp.Column)})
+            aggregation = "none"
+            agg = next(expression.find_all(exp.AggFunc), None)
+            if agg is not None:
+                aggregation = agg.key.upper()
+            items.append(
+                {
+                    "output_column": alias,
+                    "source_columns": source_columns or [alias],
+                    "calculation_type": "derived" if expression.find(exp.Func) or expression.find(exp.AggFunc) else "passthrough",
+                    "calculation_rule": expression.sql(dialect="mysql"),
+                    "aggregation_method": aggregation,
+                }
+            )
+        return items
+    except Exception:
+        return []
+
+
+def _infer_group_columns_from_sql(sql: str) -> list[str]:
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql, error_level="ignore")
+        group = tree.find(exp.Group) if tree is not None else None
+        if group is None:
+            return []
+        return [item.sql(dialect="mysql").split(".")[-1] for item in group.expressions]
+    except Exception:
+        return []
+
+
+def _looks_temporal_column(name: str) -> bool:
+    normalized = str(name or "").casefold()
+    return any(token in normalized for token in ("date", "time", "month", "year", "timestamp"))
 
 
 def _column_profiles(dataframe: pd.DataFrame, numeric_columns: list[str]) -> dict[str, dict[str, Any]]:

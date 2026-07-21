@@ -49,7 +49,7 @@ def _repair_failure(state: AgentState, reason_code: str, detail: str, *, retryab
         "validation_findings": findings,
         "retry_hint": retry_hint,
         "feedback": detail,
-        "error": detail,
+        "error": state.get("error") or detail,
     }
 
 

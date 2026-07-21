@@ -281,5 +281,7 @@ class SubAgentAdapter:
                 "target_table": state.plan.target_table,
                 "source_tables": state.plan.source_tables,
                 "business_grain": state.plan.business_grain,
+                "mart_design": state.plan.mart_design,
+                "analysis_data_contract": state.plan.analysis_data_contract,
             }
         return updates

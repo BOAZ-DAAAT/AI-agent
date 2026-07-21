@@ -282,6 +282,9 @@ def make_clarify_query_node(model: Any | None):
             "clarified_query": decision.clarified_query,
             "needs_clarification": decision.needs_clarification,
             "clarification_question": decision.clarification_question,
+            "clarification_input_mode": decision.input_mode,
+            "clarification_options": decision.options,
+            "clarification_allow_free_text": decision.allow_free_text,
             "current_step": "clarify_query",
             "llm_decisions": _append_llm_decision(state, "clarify_query", decision),
         }
@@ -307,6 +310,9 @@ def make_collect_clarification_node():
             "question": question,
             "node": "collect_clarification",
             "expected_resume": {"answer": "string"},
+            "input_mode": state.get("clarification_input_mode") or "free_text",
+            "options": state.get("clarification_options") or [],
+            "allow_free_text": bool(state.get("clarification_allow_free_text", True)),
         }
         resume_value = interrupt(payload)
         answer = _clarification_answer_from_resume(resume_value)

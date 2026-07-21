@@ -306,6 +306,17 @@ def validate_subagent_result(
         )
 
     if result.status in {"success", "warning"}:
+        if (
+            result.agent == "sql_agent"
+            and result.retry_hint.reason_code == "analysis_data_contract_repaired"
+            and result.retry_hint.suggested_action == "call_analysis_agent"
+        ):
+            return ResultValidationDecision(
+                valid=True,
+                next_action="call_analysis_agent",
+                reason="분석 입력 계약이 보강되어 Analysis Agent를 다시 실행합니다.",
+                decision="accept",
+            )
         return ResultValidationDecision(
             valid=True,
             next_action="decide_next_action",
@@ -338,14 +349,24 @@ def _route_explicit_failure(
         "signature": signature,
         "consecutive_count": consecutive_count,
     }
+    suggested_action = str(result.retry_hint.suggested_action or "")
+    if suggested_action and suggested_action != "continue":
+        failure_streak["suggested_action"] = suggested_action
 
     retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
     max_retry = int(state.get("max_retry_per_agent", 0))
     retryable = bool(result.retryable or result.retry_hint.retryable)
     if not repeated_failure and retryable and retry_count < max_retry:
+        next_action = _AGENT_CALL_ACTIONS[result.agent]
+        if (
+            result.agent == "analysis_agent"
+            and result.retry_hint.reason_code == "analysis_contract_invalid"
+            and result.retry_hint.suggested_action == "repair_analysis_data_contract"
+        ):
+            next_action = "call_sql_agent"
         return ResultValidationDecision(
             valid=False,
-            next_action=_AGENT_CALL_ACTIONS[result.agent],
+            next_action=next_action,
             reason=(
                 f"{result.agent} 실패 [{reason_code}]: {failure_reason} "
                 f"(repeated_failure=false) 재시도 {retry_count}/{max_retry}"

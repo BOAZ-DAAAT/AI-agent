@@ -110,6 +110,9 @@ class AnalysisContext(BaseModel):
     eda_candidate_hypotheses: list[str] = Field(default_factory=list)
     # 상류 SQL 원천 테이블의 GE 정합성 이슈(스코핑+fail_only). 코드생성/검증이 해석 한계로 참고(#130).
     known_data_quality_issues: list[str] = Field(default_factory=list)
+    analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
+    mart_columns: list[dict[str, Any]] = Field(default_factory=list)
+    contract_issues: list[str] = Field(default_factory=list)
     source_artifact_ids: list[str] = Field(default_factory=list)
     last_failure: dict[str, str] | None = None
     review_request: "ReviewRequest | None" = None

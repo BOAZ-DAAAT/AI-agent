@@ -334,6 +334,8 @@ def test_subagent_adapter_returns_plan_metadata_state_updates() -> None:
         "target_table": None,
         "source_tables": [],
         "business_grain": None,
+        "mart_design": {},
+        "analysis_data_contract": {},
     }
 
 

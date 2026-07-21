@@ -16,6 +16,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     LocalCheck,
     OrchestrationState,
     RetryHint,
+    ValidationFinding,
     ValidationBlock,
 )
 
@@ -126,7 +127,8 @@ class EDAAgent:
             summary=payload["final_summary"] or "EDA LangGraph analysis completed.",
             artifact_refs=[ref, *key_chart_refs],
             validation=ValidationBlock(
-                local_checks=run_eda_self_check(source_ids, profile, payload["cautions"])
+                local_checks=run_eda_self_check(source_ids, profile, payload["cautions"]),
+                findings=run_eda_validation_findings(payload["cautions"]),
             ),
             retry_hint=_build_retry_hint(eda_result.get("validation_result", {})),
             # 서브에이전트는 핸드오프를 갖지 않는다 — 다음 단계 라우팅은 메인(supervisor)의 몫.
@@ -270,14 +272,16 @@ def run_eda_self_check(
     source_artifact_ids: list[str], profile: dict, cautions: list[dict] | None = None
 ) -> list[LocalCheck]:
     cautions = cautions or []
-    validator_failure = next(
+    validator_caution = next(
         (
-            c.get("message_ko", "")
+            c
             for c in cautions
             if isinstance(c, dict) and c.get("code") == "EDA_SELF_VALIDATION_FAILED"
         ),
         None,
     )
+    validator_failure = validator_caution.get("message_ko", "") if validator_caution else None
+    validator_retryable = bool((validator_caution or {}).get("details", {}).get("retryable"))
     return [
         LocalCheck(
             name="source_artifact_present",
@@ -300,10 +304,34 @@ def run_eda_self_check(
         LocalCheck(
             name="eda_self_validation",
             passed=validator_failure is None,
-            severity="error" if validator_failure is not None else "info",
+            severity="error" if validator_retryable else "warning" if validator_failure is not None else "info",
             detail=validator_failure or "EDA internal validator passed.",
         ),
     ]
+
+
+def run_eda_validation_findings(cautions: list[dict] | None = None) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    for caution in cautions or []:
+        if not isinstance(caution, dict):
+            continue
+        if caution.get("code") != "EDA_SELF_VALIDATION_FAILED":
+            continue
+        details = caution.get("details") if isinstance(caution.get("details"), dict) else {}
+        retryable = bool(details.get("retryable"))
+        findings.append(
+            ValidationFinding(
+                code=str(details.get("failure_code") or "eda_self_validation_failed"),
+                source="eda_validator",
+                severity="error" if retryable else "warning",
+                disposition="error" if retryable else "limitation",
+                message=str(caution.get("message_ko") or "EDA self validation requires review."),
+                retryable=retryable,
+                suggested_action="rerun_eda_agent" if retryable else "review_eda_before_use",
+                details=details,
+            )
+        )
+    return findings
 
 
 def _build_retry_hint(validation_result: dict | None) -> RetryHint:
