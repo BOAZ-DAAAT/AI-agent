@@ -52,14 +52,43 @@ def usable_time_columns(df: pd.DataFrame, candidate_cols: list[str]) -> list[str
     for col in candidate_cols:
         if col not in df.columns or _SNAPSHOT_NAME_RE.search(str(col)):
             continue
-        s = pd.to_datetime(df[col], errors="coerce").dropna()
-        if s.empty or n_rows == 0:
+        if n_rows == 0:
             continue
-        # Avoid dt.floor("D") here: on some Windows/Python 3.13 pandas builds it can
-        # crash the interpreter for object-origin datetimes. String day buckets are
-        # slower but safe, and load_mart only needs a small suitability check.
-        distinct_days = s.dt.strftime("%Y-%m-%d").nunique()
+        distinct_days = _distinct_day_bucket_count(df[col])
         if distinct_days < _MIN_TIME_BUCKETS or distinct_days > n_rows * _MAX_BUCKET_RATIO:
             continue
         out.append(col)
     return out
+
+
+def _distinct_day_bucket_count(series: pd.Series) -> int:
+    """Count distinct calendar-day buckets without mutating the source column.
+
+    Avoid pandas .dt formatting here: on some Windows/Python/pandas combinations,
+    object columns containing datetime.date values can hard-crash the interpreter.
+    """
+    buckets: set[str] = set()
+    for value in series.dropna():
+        bucket = _day_bucket(value)
+        if bucket:
+            buckets.add(bucket)
+    return len(buckets)
+
+
+def _day_bucket(value: object) -> str:
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return ""
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.date().isoformat()
+    return str(parsed)[:10]
