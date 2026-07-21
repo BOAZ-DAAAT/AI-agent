@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
+from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
+
 
 class AgentRunCreateRequest(BaseModel):
     session_id: str
@@ -16,6 +18,14 @@ class AgentRunResponse(BaseModel):
     status: str
     query: str
     session_id: str
+
+
+class AgentNodeSummaryResponse(BaseModel):
+    run_id: str
+    node_id: str
+    agent_name: str
+    summary_artifact_id: str
+    summary: NodeSummaryResult
 
 
 class AgentRunResumeRequest(BaseModel):

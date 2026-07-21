@@ -100,6 +100,7 @@ class StepSummary(BaseModel):
     action: str
     summary: str
     artifact_ids: list[str] = Field(default_factory=list)
+    summary_artifact_id: str | None = None
     next_action: str = ""
 
 
