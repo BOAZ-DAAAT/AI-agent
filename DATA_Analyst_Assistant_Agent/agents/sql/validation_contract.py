@@ -118,9 +118,18 @@ def _mask_from_arg_functions(sql_lower: str) -> str:
 def build_intent_contract(plan: dict[str, Any]) -> dict[str, Any]:
     route_kind = require_route_kind(plan)
     contract = dict(plan.get("validation_contract") or {})
-    contract["expected_result_shape"] = (
-        "datamart_creation" if route_kind == "comprehensive" else "table_preview"
-    )
+    if not contract.get("expected_result_shape"):
+        required_aggregations = list(plan.get("required_aggregations") or [])
+        dimensions = list(plan.get("dimensions") or [])
+        if route_kind == "comprehensive":
+            expected_result_shape = "datamart_creation"
+        elif required_aggregations and dimensions:
+            expected_result_shape = "grouped_aggregate"
+        elif required_aggregations:
+            expected_result_shape = "single_scalar"
+        else:
+            expected_result_shape = "table_preview"
+        contract["expected_result_shape"] = expected_result_shape
     contract.setdefault("required_columns", list(plan.get("required_columns") or []))
     contract.setdefault("required_aggregations", list(plan.get("required_aggregations") or []))
     contract.setdefault("required_tables", list(plan.get("selected_join_tables") or []))
@@ -193,7 +202,31 @@ def validate_sql_intent(plan: dict[str, Any], sql_draft: dict[str, Any]) -> list
     # 체크만 datamart_creation에서 자연히 스킵된다(아래 조건이 애초에 안 걸림).
     for agg in contract.get("required_aggregations", []):
         if not _has_required_aggregation(features, agg):
-            findings.append({"category": "intent_mismatch", "severity": "warning", "retryable": True, "detail": f"Required aggregation hint {agg} was not explicitly detected in SQL."})
+            details = {
+                "hint": str(agg),
+                "detected_aggregations": sorted(features.aggregations),
+                "detected_window_functions": sorted(features.window_functions),
+            }
+            if contract.get("expected_result_shape") in {"single_scalar", "grouped_aggregate"}:
+                findings.append({
+                    "category": "intent_mismatch",
+                    "code": "sql_required_aggregation_missing",
+                    "severity": "error",
+                    "disposition": "error",
+                    "retryable": True,
+                    "detail": f"Required aggregation hint {agg} was not explicitly detected in SQL.",
+                    "details": details,
+                })
+            else:
+                findings.append({
+                    "category": "semantic_hint_not_detected",
+                    "code": "sql_feature_hint_not_detected",
+                    "severity": "info",
+                    "disposition": "diagnostic",
+                    "retryable": False,
+                    "detail": f"Required aggregation hint {agg} was not explicitly detected in SQL.",
+                    "details": details,
+                })
     dimensions = [str(d) for d in contract.get("dimensions", []) if d]
     if contract.get("expected_result_shape") == "grouped_aggregate" and dimensions and not features.top_level_group_by:
         findings.append({"category": "result_shape_mismatch", "severity": "error", "retryable": True, "detail": "그룹 집계 질문인데 GROUP BY가 없습니다."})
@@ -325,11 +358,18 @@ def summarize_validation(findings: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def make_retry_hint(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    if not findings:
+    actionable_findings = [
+        item
+        for item in findings
+        if item.get("severity") == "error"
+        or item.get("retryable")
+        or item.get("disposition") == "error"
+    ]
+    if not actionable_findings:
         return {"retryable": False, "suggested_action": "continue", "reason_code": "none", "details": {}}
     priority = {"sql_generation_failed": 0, "sql_parse_error": 1, "mysql_dialect_error": 2, "missing_table": 3, "missing_column": 4, "intent_mismatch": 5, "result_shape_mismatch": 6, "invalid_join_plan": 7, "postcheck_failed": 8, "mart_summary_bias": 9, "mart_policy_mismatch": 10, "mart_grain_missing": 11, "execution_error": 12, "empty_result": 13}
     ranked_findings = sorted(
-        findings,
+        actionable_findings,
         key=lambda item: (
             0 if item.get("severity") == "error" else 1,
             priority.get(str(item.get("category")), 99),

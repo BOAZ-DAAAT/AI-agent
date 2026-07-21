@@ -13,13 +13,23 @@ from DATA_Analyst_Assistant_Agent.agents.sql.state import AgentState, FinalTable
 
 def _merge_plan(question_plan: dict[str, Any], table_plan: dict[str, Any]) -> dict[str, Any]:
     route_kind = str(question_plan["route_kind"])
+    required_aggregations = list(question_plan["required_aggregations"])
+    dimensions = list(question_plan["dimensions"])
+    if route_kind == "comprehensive":
+        expected_result_shape = "datamart_creation"
+    elif required_aggregations and dimensions:
+        expected_result_shape = "grouped_aggregate"
+    elif required_aggregations:
+        expected_result_shape = "single_scalar"
+    else:
+        expected_result_shape = "table_preview"
     validation_contract = {
         "required_tables": list(table_plan["selected_join_tables"]),
         "required_columns": list(table_plan["required_columns"]),
         "target_metrics": list(question_plan["target_metrics"]),
-        "dimensions": list(question_plan["dimensions"]),
-        "required_aggregations": list(question_plan["required_aggregations"]),
-        "expected_result_shape": "datamart_creation" if route_kind == "comprehensive" else "table_preview",
+        "dimensions": dimensions,
+        "required_aggregations": required_aggregations,
+        "expected_result_shape": expected_result_shape,
         "expected_aliases": [],
         "target_table": None,
         "mart_policy": "common_analysis_grain" if route_kind == "comprehensive" else None,

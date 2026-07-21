@@ -177,6 +177,26 @@ def test_mart_design_preserves_common_grain_contract_and_derives_legacy_lists():
     assert dumped["metric_support"][1]["metric_name"] == "재구매율"
 
 
+def test_mart_design_repairs_empty_source_columns_from_calculation_rule():
+    payload = mart_design_payload()
+    payload["column_plan"].append(
+        {
+            "output_column": "purchase_segment",
+            "role": "attribute",
+            "source_columns": [],
+            "calculation_type": "derived",
+            "calculation_rule": "item_amount_sum and category 기준으로 segment를 만든다.",
+            "aggregation_method": "none",
+            "inclusion_reason": "분석용 파생 세그먼트",
+        }
+    )
+
+    design = mart_design.validate_mart_design_state(payload, comprehensive_plan())
+
+    repaired = next(item for item in design.column_plan if item.output_column == "purchase_segment")
+    assert repaired.source_columns == ["category", "item_amount_sum"]
+
+
 @pytest.mark.parametrize(
     "mutator",
     [

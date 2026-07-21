@@ -239,9 +239,21 @@ def validate_subagent_result(
     result: AgentCompactResult,
 ) -> ResultValidationDecision:
     fallback_used = result.fallback_used
-    blocking_findings = [finding for finding in result.findings if finding.disposition == "blocking"]
-    retry_findings = [finding for finding in result.findings if finding.disposition == "retry_required"]
-    limitation_findings = [finding for finding in result.findings if finding.disposition == "limitation"]
+    retry_findings = [
+        finding
+        for finding in result.findings
+        if finding.disposition == "error" and finding.retryable
+    ]
+    blocking_findings = [
+        finding
+        for finding in result.findings
+        if finding.disposition == "error" and not finding.retryable
+    ]
+    limitation_findings = [
+        finding
+        for finding in result.findings
+        if finding.disposition in {"warning", "limitation"}
+    ]
     has_validation_errors = bool(result.validation_errors or blocking_findings)
 
     if result.status == "failed":

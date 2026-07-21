@@ -19,9 +19,6 @@ from data_agent_backend.models.common import BackendError
 from DATA_Analyst_Assistant_Agent.agents.sql.self_check import is_sql_safe, run_sql_self_check
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import split_sql_statements
 from DATA_Analyst_Assistant_Agent.agents.sql import _runtime as sql_runtime
-from DATA_Analyst_Assistant_Agent.agents.sql import planner as planner_module
-from DATA_Analyst_Assistant_Agent.agents.sql.planner import build_sql_plan, SQLPlan
-from DATA_Analyst_Assistant_Agent.agents.sql.mart import needs_mart_candidate
 from DATA_Analyst_Assistant_Agent.agents.sql import _runtime as sql_runtime
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import is_safe_mart_sql
 from DATA_Analyst_Assistant_Agent.agents.sql.sql_text import extract_sql_aliases, split_sql_statements
@@ -81,10 +78,14 @@ def install_two_stage_llm_adapter(monkeypatch) -> None:
     """기존 그래프 fixture의 1단계 응답을 새 2단계 계약으로 변환한다."""
     from DATA_Analyst_Assistant_Agent.agents.sql import planner_support
     from DATA_Analyst_Assistant_Agent.agents.sql.nodes import finalize_plan as finalize_plan_module
+    from DATA_Analyst_Assistant_Agent.agents.sql.nodes import generate as generate_module
+    from DATA_Analyst_Assistant_Agent.agents.sql.nodes import mart_design as mart_design_module
     from DATA_Analyst_Assistant_Agent.agents.sql.nodes import plan as plan_module
 
     original_try_llm_json = planner_support.try_llm_json
+    original_mart_try_llm_json = mart_design_module.try_llm_json
     last_question_plan: dict[str, object] = {}
+    last_legacy_plan: dict[str, object] = {}
 
     def adapted_question_plan(prompt: str):
         response = original_try_llm_json(prompt)
@@ -113,8 +114,13 @@ def install_two_stage_llm_adapter(monkeypatch) -> None:
                 "reasoning": parsed.get("reasoning") or "테스트 계획 근거",
             }
         last_question_plan.clear()
+        if normalized.get("route_kind") == "comprehensive" and not normalized.get("target_metrics"):
+            metric = str(parsed.get("target_metric") or parsed.get("mart_name") or "mart_metric").strip()
+            normalized["target_metrics"] = [metric] if metric else ["mart_metric"]
         last_question_plan.update(normalized)
         last_question_plan["required_columns"] = list(parsed.get("required_columns") or [])
+        last_legacy_plan.clear()
+        last_legacy_plan.update(parsed)
         return json.dumps(normalized, ensure_ascii=False)
 
     def synthesized_final_plan(prompt: str):
@@ -122,15 +128,130 @@ def install_two_stage_llm_adapter(monkeypatch) -> None:
         required_columns = list(last_question_plan.get("required_columns") or [])
         if not required_columns and candidates:
             required_columns = [f"{candidates[0]}.order_id"]
+        legacy_contract = dict(last_legacy_plan.get("validation_contract") or {})
+        if not legacy_contract:
+            shape = last_legacy_plan.get("expected_result_shape")
+            if shape:
+                legacy_contract["expected_result_shape"] = shape
+        route_kind = str(last_question_plan.get("route_kind") or last_legacy_plan.get("route_kind") or "simple")
+        if route_kind == "comprehensive":
+            legacy_contract.setdefault("expected_result_shape", "datamart_creation")
+            target_table = legacy_contract.get("target_table")
+            if not target_table and last_legacy_plan.get("mart_name"):
+                target_table = f"analytics.{last_legacy_plan['mart_name']}"
+                legacy_contract["target_table"] = target_table
+        else:
+            legacy_contract.setdefault("expected_result_shape", "table_preview")
+        target_metrics = list(last_question_plan.get("target_metrics") or [])
+        if route_kind == "comprehensive" and not target_metrics:
+            target_metrics = [str(last_legacy_plan.get("target_metric") or last_legacy_plan.get("mart_name") or "mart_metric")]
         return json.dumps({
+            "route_kind": route_kind,
+            "question_type": last_question_plan.get("question_type") or "detail",
+            "target_metrics": target_metrics,
+            "analysis_entities": list(last_question_plan.get("analysis_entities") or []),
+            "dimensions": list(last_question_plan.get("dimensions") or []),
+            "filters": list(last_question_plan.get("filters") or []),
             "selected_join_tables": candidates,
             "required_columns": required_columns,
+            "required_aggregations": list(last_question_plan.get("required_aggregations") or []),
             "business_keys": {},
+            "validation_contract": legacy_contract,
+            "mart_name": last_legacy_plan.get("mart_name"),
+            "grain": last_legacy_plan.get("grain"),
             "reasoning": "후보 상세 스키마를 사용한 테스트 최종 계획",
         }, ensure_ascii=False)
 
     monkeypatch.setattr(plan_module, "try_llm_json", adapted_question_plan)
     monkeypatch.setattr(finalize_plan_module, "try_llm_json", synthesized_final_plan)
+
+    def adapt_legacy_mart_design(prompt: str):
+        response = original_mart_try_llm_json(prompt)
+        if not response:
+            return response
+        cleaned = response.strip().replace("```json", "").replace("```", "").strip()
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            return response
+        if not isinstance(parsed, dict):
+            return response
+        if "column_plan" in parsed and "metric_support" in parsed:
+            return response
+
+        def legacy_column_names(values):
+            names = []
+            for item in values or []:
+                if isinstance(item, dict):
+                    name = str(item.get("column_name") or item.get("name") or item.get("column") or "").strip()
+                else:
+                    name = str(item).strip()
+                if name:
+                    names.append(name)
+            return names
+
+        grain_columns = legacy_column_names(parsed.get("key_columns") or [parsed.get("grain")])
+        if not grain_columns:
+            grain_columns = ["id"]
+        source_tables = [str(item).strip() for item in (parsed.get("source_tables") or last_question_plan.get("candidate_tables") or ["orders"]) if str(item).strip()]
+        dimensions = legacy_column_names(parsed.get("dimension_columns") or grain_columns)
+        measures = legacy_column_names(parsed.get("measure_columns") or [])
+        column_plan = []
+        for column in dict.fromkeys([*grain_columns, *dimensions]):
+            column_plan.append({
+                "output_column": column,
+                "role": "dimension",
+                "source_columns": [column],
+                "calculation_type": "passthrough",
+                "calculation_rule": f"{column} 그대로 사용",
+                "aggregation_method": "none",
+                "inclusion_reason": "grain/dimension column",
+            })
+        for column in measures:
+            if column in {item["output_column"] for item in column_plan}:
+                continue
+            column_plan.append({
+                "output_column": column,
+                "role": "measure",
+                "source_columns": [column],
+                "calculation_type": "passthrough",
+                "calculation_rule": f"{column} 그대로 사용",
+                "aggregation_method": "none",
+                "inclusion_reason": "measure column",
+            })
+        metric_names = list(last_question_plan.get("target_metrics") or [])
+        if not metric_names:
+            metric_names = [str(last_legacy_plan.get("target_metric") or parsed.get("mart_name") or "mart_metric")]
+        required_mart_columns = list(dict.fromkeys([item["output_column"] for item in column_plan]))
+        parsed.update({
+            "grain_columns": grain_columns,
+            "source_grains": {table: grain_columns for table in source_tables},
+            "deduplication_keys": grain_columns,
+            "column_plan": column_plan,
+            "metric_support": [
+                {
+                    "metric_name": metric,
+                    "calculation_grain": grain_columns,
+                    "required_mart_columns": required_mart_columns,
+                    "downstream_calculation": "마트 컬럼을 사용해 후속 분석",
+                }
+                for metric in metric_names
+            ],
+            "aggregation_policy": "preserve_common_grain",
+            "source_tables": source_tables,
+            "design_reasoning": parsed.get("design_reasoning") or "legacy mart fixture",
+        })
+        return json.dumps(parsed, ensure_ascii=False)
+
+    monkeypatch.setattr(mart_design_module, "try_llm_json", adapt_legacy_mart_design)
+
+    def invoke_structured_with_legacy_dummy(prompt: str, schema):
+        raw = planner_support.get_llm().invoke(prompt).content
+        parsed = json.loads(raw.strip().replace("```json", "").replace("```", "").strip())
+        return schema.model_validate(parsed)
+
+    monkeypatch.setattr(planner_support, "invoke_llm_structured", invoke_structured_with_legacy_dummy)
+    monkeypatch.setattr(generate_module, "invoke_llm_structured", invoke_structured_with_legacy_dummy)
 
 
 # ── self_check tests ──
@@ -654,20 +775,57 @@ class TestStagedSchemaContext:
     def test_detailed_schema_is_shared_by_mart_design_and_sql_generation_prompts(self):
         from DATA_Analyst_Assistant_Agent.agents.sql.prompts.generate import generate_mart_prompt, generate_query_prompt
         from DATA_Analyst_Assistant_Agent.agents.sql.prompts.mart_design import mart_design_prompt
+        from DATA_Analyst_Assistant_Agent.agents.sql.generation_context import build_generation_context
 
         scoped_schema = '{"orders":{"columns":[{"name":"order_id","nullable":false},{"name":"ignored_column","nullable":true}]}}'
         state = {
             "user_question": "주문 분석",
-            "plan": {"selected_join_tables": ["orders"]},
+            "plan": {"selected_join_tables": ["orders"], "required_columns": ["orders.order_id"]},
             "mart_design": {},
             "schema_text": scoped_schema,
             "integrity_text": "",
         }
 
-        assert scoped_schema in generate_query_prompt(state, "")
+        simple_context = build_generation_context(state, "simple", "").context
+        query_prompt = generate_query_prompt(simple_context)
+        assert "order_id" in query_prompt
         assert scoped_schema in mart_design_prompt(state)
-        assert scoped_schema in generate_mart_prompt(state, "")
-        assert "sample_data" not in generate_query_prompt(state, "")
+        state["mart_design"] = {
+            "mart_name": "orders_mart",
+            "target_schema": "analytics",
+            "grain": "order_id",
+            "grain_columns": ["order_id"],
+            "source_grains": {"orders": ["order_id"]},
+            "deduplication_keys": ["order_id"],
+            "column_plan": [
+                {
+                    "output_column": "order_id",
+                    "role": "dimension",
+                    "source_columns": ["order_id"],
+                    "calculation_type": "passthrough",
+                    "calculation_rule": "order_id 그대로 사용",
+                    "aggregation_method": "none",
+                    "inclusion_reason": "주문 grain",
+                }
+            ],
+            "metric_support": [
+                {
+                    "metric_name": "orders_mart",
+                    "calculation_grain": ["order_id"],
+                    "required_mart_columns": ["order_id"],
+                    "downstream_calculation": "주문 분석",
+                }
+            ],
+            "aggregation_policy": "preserve_common_grain",
+            "source_tables": ["orders"],
+            "load_strategy": "full_refresh",
+            "design_reasoning": "주문 분석용 마트",
+        }
+        state["plan"]["target_metrics"] = ["orders_mart"]
+        mart_context = build_generation_context(state, "comprehensive", "").context
+        mart_prompt = generate_mart_prompt(mart_context)
+        assert "order_id" in mart_prompt
+        assert "sample_data" not in query_prompt
 
 
 class TestSQLLangGraphSmoke:
@@ -819,7 +977,7 @@ class TestSQLLangGraphSmoke:
         assert result["sql_draft"]["source_column_refs"] == ["orders.order_id", "orders.order_date"]
         assert "columns_used" not in result["sql_draft"]
         assert result["validation"]["result"] == "valid"
-        assert "simple 경로" in result["final_answer"]
+        assert "simple route" in result["final_answer"]
 
     def test_build_app_simple_average_delivery_days_uses_aggregate_sql(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -845,7 +1003,7 @@ class TestSQLLangGraphSmoke:
         assert "AVG(DATEDIFF(order_delivered_customer_date, order_approved_at))" in result["sql_draft"]["sql"]
         assert "WHERE order_approved_at IS NOT NULL" in result["sql_draft"]["sql"]
         assert result["validation"]["result"] == "valid"
-        assert result["plan"]["validation_contract"]["expected_result_shape"] == "table_preview"
+        assert result["plan"]["validation_contract"]["expected_result_shape"] == "single_scalar"
 
     def test_build_app_rejects_non_aggregate_sql_for_average_question(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -1072,7 +1230,6 @@ class TestSQLLangGraphSmoke:
         responses = iter([
             '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"plan 1"}',
             '{bad json',
-            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build","requested_output":"create_table","target_metric":"","dimensions":[],"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],"candidate_tables":["orders"],"mart_name":"category_performance_analysis","grain":"order_id","load_strategy":"full_refresh","expected_result_shape":"datamart_creation","required_columns":[],"required_aggregations":[],"validation_contract":{"expected_result_shape":"datamart_creation","required_tables":["orders"],"target_table":"analytics.category_performance_analysis"},"reasoning":"plan 2"}',
             '{"mart_name":"category_performance_analysis","target_schema":"analytics","grain":"order_id","base_grain":"order_id","source_tables":["orders"],"key_columns":["order_id"],"measure_columns":["amount"],"dimension_columns":["order_id"],"incremental_column":null,"load_strategy":"full_refresh","row_preserving_strategy":"order row preserving","aggregation_policy":"prefer_row_preserving","aggregation_rationale":"row level mart","design_reasoning":"order mart"}',
             '{"sql":"CREATE TABLE analytics.category_performance_analysis AS SELECT * FROM orders;","sql_type":"create_table_as","target_table":"analytics.category_performance_analysis","source_tables":["orders"],"source_column_refs":["orders.order_id","orders.amount"],"derived_columns":[],"output_columns":[],"postcheck_sql":"SELECT COUNT(*) FROM analytics.category_performance_analysis;","reasoning":"build mart"}',
         ])
@@ -1118,7 +1275,7 @@ class TestSQLLangGraphSmoke:
         assert result["mart_design"]["mart_name"] == "category_performance_analysis"
         assert committed and committed[0].lower().startswith("create table analytics.")
 
-    def test_replan_uses_new_route_while_sql_regeneration_keeps_current_route(self, monkeypatch):
+    def test_intent_mismatch_repairs_sql_without_replanning_route(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql import planner_support as planner_support_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import execute as sql_steps_module
@@ -1156,42 +1313,13 @@ class TestSQLLangGraphSmoke:
                 ),
                 json.dumps(
                     {
-                        "route_kind": "comprehensive",
-                        "task_type": "query_answer",
-                        "requested_output": "execute_and_answer",
-                        "expected_result_shape": "table_preview",
-                        "selected_join_tables": ["orders"],
-                        "mart_name": "orders_analysis_mart",
-                        "grain": "order_id",
-                    },
-                    ensure_ascii=False,
-                ),
-                json.dumps(
-                    {
-                        "mart_name": "orders_analysis_mart",
-                        "target_schema": "analytics",
-                        "grain": "order_id",
-                        "base_grain": "order_id",
+                        "sql": "SELECT AVG(amount) AS avg_order_amount FROM orders;",
+                        "sql_type": "select",
                         "source_tables": ["orders"],
-                        "key_columns": ["order_id"],
-                        "measure_columns": ["amount"],
-                        "dimension_columns": [],
-                        "load_strategy": "full_refresh",
-                        "row_preserving_strategy": "원본 주문 행 수준 유지",
-                        "aggregation_policy": "prefer_row_preserving",
-                        "design_reasoning": "원본 주문 행 수준 유지",
-                    },
-                    ensure_ascii=False,
-                ),
-                json.dumps(
-                    {
-                        "sql": "CREATE TABLE analytics.orders_analysis_mart AS SELECT * FROM orders;",
-                        "sql_type": "create_table_as",
-                        "target_table": "analytics.orders_analysis_mart",
-                        "source_tables": ["orders"],
-                        "source_column_refs": ["orders.order_id", "orders.amount"],
-                        "postcheck_sql": "SELECT COUNT(*) FROM analytics.orders_analysis_mart;",
-                        "reasoning": "재사용 가능한 주문 마트",
+                        "source_column_refs": ["orders.amount"],
+                        "derived_columns": ["avg_order_amount"],
+                        "output_columns": ["avg_order_amount"],
+                        "reasoning": "집계를 보강한 수정 SQL",
                     },
                     ensure_ascii=False,
                 ),
@@ -1238,12 +1366,12 @@ class TestSQLLangGraphSmoke:
         )
 
         assert result["retry_count"] == 1
-        assert result["plan"]["route_kind"] == "comprehensive"
-        assert result["plan"]["validation_contract"]["expected_result_shape"] == "datamart_creation"
+        assert result["plan"]["route_kind"] == "simple"
+        assert result["plan"]["validation_contract"]["expected_result_shape"] == "single_scalar"
         assert result["validation"]["result"] == "valid"
-        assert committed == ["CREATE TABLE analytics.orders_analysis_mart AS SELECT * FROM orders;"]
-        assert sum("MySQL 기반 SQL/데이터마트 planner" in prompt for prompt in prompts_seen) == 2
-        assert any("분석용 데이터마트 설계자" in prompt for prompt in prompts_seen)
+        assert result["sql_draft"]["sql"] == "SELECT AVG(amount) AS avg_order_amount FROM orders;"
+        assert committed == []
+        assert sum("planner" in prompt for prompt in prompts_seen) == 1
 
     def test_build_app_normalizes_object_based_mart_design_columns(self, monkeypatch):
         from DATA_Analyst_Assistant_Agent.agents.sql.nodes import context as context_module
@@ -1255,39 +1383,33 @@ class TestSQLLangGraphSmoke:
         monkeypatch.setattr(sql_steps_module, "can_use_live_db", lambda: True)
         monkeypatch.setattr(sql_steps_module, "run_sql_commit", lambda sql: None)
 
+        responses = iter([
+            '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build",'
+            '"requested_output":"create_table","target_metric":"재구매 분석","dimensions":["customer_id"],'
+            '"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],'
+            '"expected_result_shape":"datamart_creation","required_aggregations":[],"mart_name":"customer_reorder_mart",'
+            '"grain":"customer","load_strategy":"full_refresh","reasoning":"마트 생성"}',
+            '{"mart_name":"customer_reorder_mart","target_schema":"analytics","grain":"customer","base_grain":"customer",'
+            '"source_tables":["orders"],'
+            '"key_columns":[{"column_name":"customer_id","description":"고객 식별자"}],'
+            '"measure_columns":[{"column_name":"total_orders","description":"총 주문수"}],'
+            '"dimension_columns":[{"column_name":"customer_id","description":"고객 축"}],'
+            '"load_strategy":"full_refresh","row_preserving_strategy":"고객 단위 유지",'
+            '"aggregation_policy":"aggregate_if_justified","aggregation_rationale":"고객 단위 집계 필요",'
+            '"design_reasoning":"재구매 분석용 고객 단위 마트"}',
+            '{"sql":"CREATE TABLE analytics.customer_reorder_mart AS SELECT customer_id FROM orders;",'
+            '"sql_type":"create_table_as","target_table":"analytics.customer_reorder_mart",'
+            '"source_tables":["orders"],"source_column_refs":["orders.customer_id"],"derived_columns":[],"output_columns":["customer_id"],'
+            '"postcheck_sql":"SELECT COUNT(*) FROM analytics.customer_reorder_mart;","reasoning":"마트 생성"}',
+        ])
+
         class DummyResponse:
             def __init__(self, content: str):
                 self.content = content
 
         class DummyLLM:
             def invoke(self, prompt: str):
-                if "SQL/데이터마트 planner다" in prompt or "planner다" in prompt:
-                    return DummyResponse(
-                        '{"route_kind":"comprehensive","question_type":"mart_build","task_type":"data_mart_build",'
-                        '"requested_output":"create_table","target_metric":"재구매 분석","dimensions":["customer_id"],'
-                        '"filters":[],"time_condition":null,"selected_join_tables":["orders"],"relevant_tables":["orders"],'
-                        '"expected_result_shape":"datamart_creation","required_aggregations":[],"mart_name":"customer_reorder_mart",'
-                        '"grain":"customer","load_strategy":"full_refresh","reasoning":"마트 생성"}'
-                    )
-                if "분석용 데이터마트 설계자다" in prompt:
-                    return DummyResponse(
-                        '{"mart_name":"customer_reorder_mart","target_schema":"analytics","grain":"customer","base_grain":"customer",'
-                        '"source_tables":["orders"],'
-                        '"key_columns":[{"column_name":"customer_id","description":"고객 식별자"}],'
-                        '"measure_columns":[{"column_name":"total_orders","description":"총 주문수"}],'
-                        '"dimension_columns":[{"column_name":"customer_id","description":"고객 축"}],'
-                        '"load_strategy":"full_refresh","row_preserving_strategy":"고객 단위 유지",'
-                        '"aggregation_policy":"aggregate_if_justified","aggregation_rationale":"고객 단위 집계 필요",'
-                        '"design_reasoning":"재구매 분석용 고객 단위 마트"}'
-                    )
-                if "MySQL SQL 작성기다. 데이터마트 생성 SQL" in prompt:
-                    return DummyResponse(
-                        '{"sql":"CREATE TABLE analytics.customer_reorder_mart AS SELECT customer_id FROM orders;",'
-                        '"sql_type":"create_table_as","target_table":"analytics.customer_reorder_mart",'
-                        '"source_tables":["orders"],"source_column_refs":["orders.customer_id"],"derived_columns":[],"output_columns":["customer_id"],'
-                        '"postcheck_sql":"SELECT COUNT(*) FROM analytics.customer_reorder_mart;","reasoning":"마트 생성"}'
-                    )
-                raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+                return DummyResponse(next(responses))
 
         monkeypatch.setattr(planner_support_module, "get_llm", lambda: DummyLLM())
         app = build_app()
@@ -1690,7 +1812,7 @@ class TestSQLAgentIntegration:
     def _adapt_legacy_llm_fixtures(self, monkeypatch):
         install_two_stage_llm_adapter(monkeypatch)
 
-    def test_main_sql_envelope_preserves_retry_required_findings_on_success(self, adapter):
+    def test_main_sql_envelope_preserves_warning_findings_on_success(self, adapter):
         from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 
         runtime = AgentRuntime(adapter)
@@ -1743,7 +1865,7 @@ class TestSQLAgentIntegration:
 
         assert envelope.status == AgentStatus.success
         assert envelope.validation.findings[0].code == "invalid_join_plan"
-        assert envelope.validation.findings[0].disposition == "retry_required"
+        assert envelope.validation.findings[0].disposition == "warning"
         assert envelope.retry_hint.retryable is True
         assert envelope.retry_hint.details == {"join": "orders-customers"}
         artifact_payloads = [

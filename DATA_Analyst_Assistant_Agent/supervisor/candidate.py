@@ -131,7 +131,7 @@ def validate_candidate(
             code="approval_contract_mismatch",
             source="supervisor",
             severity="error",
-            disposition="blocking",
+            disposition="error",
             message="status=approval_required이지만 approval.required=false입니다.",
         )
     ]
@@ -207,7 +207,7 @@ def validate_candidate(
                         code="semantic_model_failed",
                         source="supervisor",
                         severity="error",
-                        disposition="blocking",
+                        disposition="error",
                         message=reason,
                     )
                 ],
@@ -248,7 +248,7 @@ def validate_candidate(
                 code="semantic_validation_failed",
                 source="supervisor",
                 severity="error",
-                disposition="blocking",
+                disposition="error",
                 message=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
                 details={"missing_evidence": list(semantic_decision.missing_evidence)},
             )
@@ -383,7 +383,7 @@ def commit_candidate(
         finding.message
         for check in record.checks
         for finding in check.findings
-        if finding.disposition == "limitation" and finding.message
+        if finding.disposition in {"warning", "limitation"} and finding.message
     ]
     if limitation_messages:
         working["limitations"] = _append_unique(
