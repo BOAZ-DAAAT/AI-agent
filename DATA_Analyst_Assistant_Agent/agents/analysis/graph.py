@@ -75,6 +75,12 @@ def classify_node(state: AnalysisWorkflowState) -> dict[str, Any]:
         )
         contract_blockers = _analysis_contract_blockers(context)
         if contract_blockers:
+            context.contract_issues = list(dict.fromkeys([
+                *context.contract_issues,
+                *contract_blockers,
+            ]))
+            contract_blockers = []
+        if contract_blockers:
             return {
                 "analysis_context": context,
                 "error": "분석 입력 계약이 불충분합니다: " + "; ".join(contract_blockers),

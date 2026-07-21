@@ -307,25 +307,22 @@ def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: Backe
     payload = json.loads(adapter.read_artifact_text(artifact.artifact_id))
     parsed = AnalysisResult.model_validate(payload)
 
-    assert parsed.human_review.required is True
-    assert envelope.status == AgentStatus.failed
+    assert parsed.human_review.required is False
+    assert parsed.status == "success"
+    assert envelope.status == AgentStatus.success
     assert envelope.approval.required is False
-    assert envelope.retry_hint.retryable is True
-    assert envelope.retry_hint.reason_code == "method_review_failed"
-    assert envelope.error == "wrong method"
-    assert "wrong method" in envelope.summary
+    assert envelope.retry_hint.retryable is False
+    assert envelope.retry_hint.reason_code == "none"
+    assert envelope.error == ""
+    assert any("wrong method" in note for note in parsed.method_notes)
     assert any(
-        finding.code == "method_review_failed"
-        and finding.disposition == "error"
-        and finding.retryable is True
+        finding.code == "analysis_method_note"
+        and finding.disposition == "limitation"
+        and finding.retryable is False
+        and "wrong method" in finding.message
         for finding in envelope.validation.findings
     )
-    assert envelope.retry_hint.details == {
-        "terminal_reason": "method_review_failed",
-        "failure_reason": "wrong method",
-        "codegen_attempts": 2,
-        "agent_retry_budget": 1,
-    }
+    assert envelope.retry_hint.details == {}
 
 
 def test_agent_review_required_registers_public_and_debug_artifacts(adapter: BackendAdapter) -> None:

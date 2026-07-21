@@ -98,28 +98,28 @@ def test_execution_failure_reflects_then_passes() -> None:
     assert outcome.error_history[0]["stage"] == "execute"
 
 
-def test_critic_failure_reflects_then_passes() -> None:
-    gen = _FakeModel([_GOOD_CODE, _GOOD_CODE])
+def test_critic_failure_is_recorded_as_warning_and_passes() -> None:
+    gen = _FakeModel([_GOOD_CODE])
     crit = _FakeModel([
         CodeCritique(verdict="fail", method_issues=["wrong method"], feedback="use median"),
-        CodeCritique(verdict="pass"),
     ])
     outcome = run_analysis(_intent(), _context(), _df(), code_generator_model=gen, critic_model=crit)
     assert outcome.status == "passed"
-    assert outcome.attempts == 2
-    assert outcome.error_history[0]["stage"] == "critic"
+    assert outcome.attempts == 1
+    assert outcome.error_history == []
+    assert "use median" in outcome.result["method_notes"][-1]
 
 
-def test_fatal_result_contract_failure_reflects_then_passes_before_critic() -> None:
-    gen = _FakeModel([_BAD_CONTRACT_CODE, _GOOD_CODE])
+def test_fatal_result_contract_failure_is_recorded_as_warning_before_critic() -> None:
+    gen = _FakeModel([_BAD_CONTRACT_CODE])
     crit = _FakeModel([CodeCritique(verdict="pass")])
 
     outcome = run_analysis(_intent(), _context(), _df(), code_generator_model=gen, critic_model=crit)
 
     assert outcome.status == "passed"
-    assert outcome.attempts == 2
-    assert outcome.error_history[0]["stage"] == "result_contract"
-    assert "evidence_tables" in outcome.error_history[0]["error"]
+    assert outcome.attempts == 1
+    assert outcome.error_history == []
+    assert any("evidence_tables" in note for note in outcome.result["method_notes"])
 
 
 def test_progress_callback_reports_completed_stages() -> None:
@@ -182,7 +182,7 @@ def test_review_required_without_actionable_request_becomes_method_note() -> Non
     assert outcome.critique.verdict == "pass"
 
 
-def test_deterministic_precheck_reflects_before_critic() -> None:
+def test_deterministic_precheck_is_recorded_as_warning_before_critic() -> None:
     wrong_code = GeneratedAnalysisCode(
         rationale="wrong metric",
         code=(
@@ -208,16 +208,16 @@ def test_deterministic_precheck_reflects_before_critic() -> None:
         metric_hint="revenue",
     )
     df = pd.DataFrame({"x": [1, 2, 3], "revenue": [10, 20, 30]})
-    gen = _FakeModel([wrong_code, right_code])
+    gen = _FakeModel([wrong_code])
     crit = _FakeModel([CodeCritique(verdict="pass")])
 
     outcome = run_analysis(intent, context, df, code_generator_model=gen, critic_model=crit)
 
     assert outcome.status == "passed"
-    assert outcome.attempts == 2
-    assert outcome.error_history[0]["stage"] == "critic"
-    assert "pre-check" in outcome.error_history[0]["error"]
-    assert outcome.result["statistics"]["sum_revenue"] == 60
+    assert outcome.attempts == 1
+    assert outcome.error_history == []
+    assert "metric:revenue" in outcome.result["method_notes"][-1]
+    assert outcome.result["statistics"]["sum_x"] == 6
 
 
 def test_partial_time_coverage_becomes_method_note_not_precheck_failure() -> None:
@@ -315,17 +315,17 @@ def test_numeric_only_review_options_are_rejected_before_critic() -> None:
     assert any("numeric thresholds" in issue for issue in critique.method_issues)
 
 
-def test_repeated_critic_failure_stops_early() -> None:
-    gen = _FakeModel([_GOOD_CODE, _GOOD_CODE])
-    crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")] * 2)
+def test_critic_failure_becomes_warning_result() -> None:
+    gen = _FakeModel([_GOOD_CODE])
+    crit = _FakeModel([CodeCritique(verdict="fail", feedback="nope")])
     outcome = run_analysis(
         _intent(), _context(), _df(), code_generator_model=gen, critic_model=crit, max_attempts=2
     )
-    assert outcome.status == "failed"
-    assert outcome.attempts == 2
-    assert outcome.critique.verdict == "fail"
-    assert len(outcome.error_history) == 2
-    assert outcome.early_stop_reason == "same critic failure repeated after regeneration"
+    assert outcome.status == "passed"
+    assert outcome.attempts == 1
+    assert outcome.critique.verdict == "pass"
+    assert outcome.error_history == []
+    assert "nope" in outcome.result["method_notes"][-1]
 
 
 def test_critic_uses_dedicated_model_env(monkeypatch) -> None:

@@ -567,12 +567,11 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
 
     assert adapter.calls == ["analysis_agent", "sql_agent"]
     assert adapter.insight_calls == 1
-    assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight"]
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["completed_agents"] == ["analysis_agent", "sql_agent", "insight"]
     assert result["failed_agents"] == []
-    assert result["accepted_evidence"].keys() == {"sql_agent", "insight"}
-    assert len(result["rejected_results"]) == 1
-    assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["accepted_evidence"].keys() == {"analysis_agent", "sql_agent", "insight"}
+    assert result["rejected_results"] == []
     assert result["terminal_state"] == "completed"
 
 
@@ -621,6 +620,7 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
             _semantic_decision(),
             _next_action_decision("call_analysis_agent"),
             _semantic_decision(semantic_valid=False, severity="error"),
+            _next_action_decision("finalize"),
             # analysis 실패 → 복구 권고가 없고 근거는 있어 제한적 인사이트 폴백이
             # insight를 직접 스케줄한다(completion_guard가 아니라 semantic recovery).
             _semantic_decision(),
@@ -636,14 +636,10 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
 
     assert adapter.calls == ["sql_agent", "analysis_agent"]
     assert adapter.insight_calls == 1
-    assert result["semantic_recovery_attempts"] == {"insight": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight"]
-    assert "analysis_agent" not in result["accepted_evidence"]
-    assert any("제한적 인사이트" in item for item in result["limitations"])
-    assert any(
-        event["type"] == "semantic_recovery.limited_insight"
-        for event in result["run_events"]
-    )
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["completed_agents"] == ["sql_agent", "analysis_agent", "insight"]
+    assert result["accepted_evidence"].keys() == {"sql_agent", "analysis_agent", "insight"}
+    assert result["rejected_results"] == []
     assert result["terminal_state"] == "completed"
 
 

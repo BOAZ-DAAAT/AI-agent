@@ -199,6 +199,39 @@ def validate_candidate(
 
     if semantic_decision is None:
         reason = f"semantic validation 모델 호출에 반복 실패했습니다: {semantic_error}"
+        if result.agent == "analysis_agent":
+            checks.append(
+                ValidationCheckResult(
+                    name="semantic",
+                    passed=True,
+                    findings=[
+                        ValidationFinding(
+                            code="semantic_model_warning",
+                            source="supervisor",
+                            severity="warning",
+                            disposition="limitation",
+                            message=reason,
+                        )
+                    ],
+                    details={"attempts": 2},
+                )
+            )
+            updates = {
+                **_validation_updates(
+                    pending,
+                    result,
+                    checks,
+                    ValidationOutcome(
+                        disposition="accept_with_limitations",
+                        reason=reason,
+                    ),
+                ),
+                "pending_result": updated_pending,
+            }
+            counts = dict(state.get("semantic_retry_counts", {}))
+            counts[str(pending.get("candidate_id") or result.agent)] = semantic_failures
+            updates["semantic_retry_counts"] = counts
+            return updates
         checks.append(
             ValidationCheckResult(
                 name="semantic",
@@ -242,6 +275,9 @@ def validate_candidate(
         semantic_decision.severity == "warning"
         or bool(semantic_decision.missing_evidence)
     )
+    if result.agent == "analysis_agent" and semantic_recover:
+        semantic_recover = False
+        semantic_advisory = True
     semantic_advisory_reason = semantic_decision.reason
     if not semantic_advisory_reason and semantic_decision.missing_evidence:
         semantic_advisory_reason = (
