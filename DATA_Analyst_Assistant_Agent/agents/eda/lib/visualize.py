@@ -1049,7 +1049,7 @@ def plot_scatter_pairs(df: pd.DataFrame, top_n_pairs: int = 5, measure_cols: lis
             pass
         ax.set_ylim(pair_df[y_col].min() - pair_df[y_col].std() * 0.3,
                     pair_df[y_col].max() + pair_df[y_col].std() * 0.3)
-        _apply_style(ax, f"Scatter: {x_col} vs {y_col}  (r={corr_val})", xlabel=x_col, ylabel=y_col)
+        _apply_style(ax, f"Scatter: {x_col} vs {y_col}", xlabel=x_col, ylabel=y_col)
         fig.tight_layout()
         path = os.path.join(OUTPUT_DIR, f"scatter_{x_col}_vs_{y_col}.png")
         fig.savefig(path, bbox_inches="tight", dpi=120)

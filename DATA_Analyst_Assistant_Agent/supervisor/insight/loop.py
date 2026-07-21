@@ -25,7 +25,7 @@ MAX_VERIFY_FAILS = 2                                  # finish 검증 실패 허
 MAX_FAIL_STREAK = 3                                   # 연속 실패(거부·반복·파싱) 시 조기 폴백 — 토큰 낭비 방지
 _OBS_CHARS = 700                                      # 관찰 1건당 프롬프트 상한
 
-# 게이트 거부 시 교정 힌트 — codegen 프롬프트 강화와 같은 교훈(거부당할 관용구는 미리/즉시 알려준다)
+# 게이트 거부 시 교정 힌트(거부당할 관용구는 미리/즉시 알려준다)
 _GATE_FIX_HINT = ("→ 수정: 단일 표현식만. comprehension·lambda·query·eval·apply·merge 금지. "
                   "조건 필터는 불리언 마스크 + df.loc[...], '그룹 N건 이상' 필터는 "
                   "df.loc[df.groupby('그룹컬럼')['컬럼'].transform('size')>=N] 패턴을 쓰라.")
@@ -34,7 +34,7 @@ _GATE_FIX_HINT = ("→ 수정: 단일 표현식만. comprehension·lambda·query
 def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") -> InsightResult:
     # 표현식 작성 능력이 중요한 루프라 모델을 env 로 선택 가능하게 둔다
     # (INSIGHT_MODEL 미설정 시 LLM_MODEL — 스모크에서 gemini flash 는 lambda/apply 를 고집해 실패,
-    #  codegen 과 같은 교훈: 코드 작성은 상위 모델이 안정적).
+    #  코드 작성은 상위 모델이 안정적).
     llm = llm or get_chat_model(model=os.getenv("INSIGHT_MODEL") or None)
     observations: list[str] = []
     steps: list[dict[str, Any]] = []
@@ -108,7 +108,7 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
                                      kind=out["kind"], local_path=out["local_path"]))
         note = json.dumps(out, ensure_ascii=False, default=str)[:_OBS_CHARS]
         if not ok and "gate_rejected" in str(out.get("error", "")):
-            note += f" {_GATE_FIX_HINT}"               # 즉시 교정 힌트 (codegen retry 프롬프트와 같은 원리)
+            note += f" {_GATE_FIX_HINT}"               # 즉시 교정 힌트
         observations.append(f"[{round_idx + 1}] {call.tool}({call.reason}) → {note}")
         steps.append({"round": round_idx, "tool": call.tool, "reason": call.reason, "ok": ok,
                       "note": out.get("error", "") if not ok else ""})
@@ -168,11 +168,7 @@ def _fallback(pack: EvidencePack, steps: list[dict], charts: list[ChartEntry]) -
 # 프롬프트 / 파싱
 # ─────────────────────────────
 def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -> str:
-    eda_brief = {k: pack.eda.get(k) for k in ("final_summary", "cautions", "out_of_domain") if pack.eda.get(k)}
-    # codegen 이 이미 계산해 둔 질문 맞춤 결과(adhoc_analysis)는 가장 강한 증거라 기본 노출한다
-    adhoc = (pack.eda.get("statistical_metadata") or {}).get("adhoc_analysis")
-    if adhoc:
-        eda_brief["adhoc_analysis"] = {k: adhoc.get(k) for k in ("intent", "result") if adhoc.get(k)}
+    eda_brief = {k: pack.eda.get(k) for k in ("final_summary", "cautions") if pack.eda.get(k)}
     obs_text = "\n".join(observations[-6:]) or "(아직 없음 — 첫 라운드)"
     pressure = ("\n⚠️ 라운드가 거의 소진됐다. look 을 더 하지 말고, 필요하면 compute 한 번 뒤 즉시 finish 하라."
                 if round_idx >= MAX_ROUNDS - 3 else "")

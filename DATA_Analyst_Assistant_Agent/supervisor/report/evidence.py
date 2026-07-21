@@ -165,8 +165,7 @@ def _read_eda_stage(entries: list[tuple[str, str]], runtime: AgentRuntime) -> St
         "data_level": payload.get("data_level", {}),
         "statistical_metadata": payload.get("statistical_metadata", {}),
     }
-    adhoc = (payload.get("statistical_metadata") or {}).get("adhoc_analysis") or {}
-    code_used = str(adhoc.get("code") or "")
+    code_used = ""
 
     key_charts = payload.get("key_charts") or []
     charts = [

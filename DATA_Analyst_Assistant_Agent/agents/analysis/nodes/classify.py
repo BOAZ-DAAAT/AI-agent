@@ -59,6 +59,8 @@ Return the AnalysisIntent schema. Rules:
 - EDA candidate insights/hypotheses are exploratory hints only. Use them to
   clarify relevant focus when they match the user request; do not turn every
   candidate into required analysis work.
+- Treat EDA final_summary as a handoff summary, not as a final answer or tested
+  statistical result.
 """
 
 

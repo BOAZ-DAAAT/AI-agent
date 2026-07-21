@@ -1,6 +1,6 @@
 """도구 실행기(결정론) — look / compute / chart. LLM은 args 만 제안한다.
 
-compute·chart 의 표현식은 EDA codegen 안전 게이트(validate_expression)를 그대로 재사용하고,
+compute·chart 의 표현식은 공용 표현식 안전 게이트(validate_expression)를 사용하고,
 그 위에 인사이트 범위 제한을 더한다: 이 도구는 '인사이트 문장을 만들기 위한 계산기'지
 분석 에이전트 2호가 아니다 (허용: 증감률·차이·비율·top/bottom·정렬·집계·reshape /
 금지: 회귀·행렬분해 등 — 프롬프트 + _SCOPE_DENY 이중 차단).
@@ -21,8 +21,7 @@ import matplotlib.pyplot as plt                        # noqa: E402
 import numpy as np                                     # noqa: E402
 import pandas as pd                                    # noqa: E402
 
-# codegen 게이트 재사용(순수 함수 모듈 — EDA 코드 수정 없음)
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.codegen_gate import validate_expression
+from DATA_Analyst_Assistant_Agent.shared.expression_gate import validate_expression
 
 # 보조계산 범위 밖(회귀·행렬분해 등) — 게이트(보안)를 통과해도 역할 경계에서 거부한다.
 _SCOPE_DENY = {"polyfit", "lstsq", "svd", "eig", "eigh", "qr", "cholesky", "corrcoef"}

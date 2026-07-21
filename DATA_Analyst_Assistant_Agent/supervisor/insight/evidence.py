@@ -118,7 +118,6 @@ def _slim_eda(payload: dict[str, Any]) -> dict[str, Any]:
         "hypotheses": payload.get("hypotheses", ""),
         "cautions": payload.get("cautions", []),
         "data_level": payload.get("data_level", {}),
-        "out_of_domain": payload.get("out_of_domain"),
         "statistical_metadata": payload.get("statistical_metadata", {}),
         "key_charts": payload.get("key_charts", []),
     }

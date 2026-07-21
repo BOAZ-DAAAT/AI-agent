@@ -7,6 +7,7 @@ EDA 코드는 mini-ReAct/LLM 부분과 순수 계산 부분이 섞여 있다. �
 
 from __future__ import annotations
 
+import json as _json
 import numpy as np
 import pandas as pd
 
@@ -231,29 +232,26 @@ def test_route_after_planner_unknown_goes_to_insight():
     assert route_after_planner({"next_analysis": "not_a_real_node"}) == "insight"
 
 
-def test_route_after_planner_selects_codegen():
-    # 질문기준: 플래너가 codegen을 직접 고르면 codegen 노드로 (존재기준 fallback 아님).
-    assert route_after_planner({"next_analysis": "codegen"}) == "codegen"
+def test_route_after_planner_rejects_unknown_choice():
+    assert route_after_planner({"next_analysis": "external_analysis"}) == "insight"
 
 
-def test_planner_prompt_offers_codegen_with_guardrail():
+def test_planner_prompt_points_advanced_work_to_analysis():
     from DATA_Analyst_Assistant_Agent.agents.eda.prompts.planner import planner_prompt
     shape = {"row_count": 100, "numeric_cols": ["a"], "cat_cols": ["b"], "time_cols": []}
     p = planner_prompt("파생 비율 질문", "", shape,
                        [{"name": "distribution", "desc": "분포"}], {},
-                       round_idx=0, max_rounds=5, need_priority=False, codegen_selectable=True)
-    assert "codegen" in p                       # 카드 노출
-    assert "최후수단" in p and "도구 우선" in p   # over-fire 방지 울타리 문구
+                       round_idx=0, max_rounds=5, need_priority=False)
+    assert "p-value" in p
 
 
-def test_planner_prompt_hides_codegen_when_not_selectable():
-    # 기본값(codegen_selectable=False)일 땐 codegen 카드/문구가 안 나온다.
+def test_planner_prompt_only_mentions_feasible_cards():
     from DATA_Analyst_Assistant_Agent.agents.eda.prompts.planner import planner_prompt
     shape = {"row_count": 100, "numeric_cols": ["a"], "cat_cols": ["b"], "time_cols": []}
     p = planner_prompt("정상 질문", "", shape,
                        [{"name": "distribution", "desc": "분포"}], {},
                        round_idx=0, max_rounds=5, need_priority=False)
-    assert "codegen" not in p
+    assert "distribution" in p
 
 
 # ─────────────────────────────
@@ -715,13 +713,9 @@ class _BoomLLM:
         raise RuntimeError("boom")
 
 
-def test_insight_node_merges_llm_inferred_caution(monkeypatch):
-    # 첫 콜(_llm_infer_cautions)=caution JSON, 둘째 콜(insight)=텍스트 → source=llm_inferred 병합 확인
+def test_insight_node_uses_structured_cautions_only(monkeypatch):
     import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
-    caution_json = ('[{"code": "POSSIBLE_SEASONALITY", "severity": "low", '
-                    '"message_ko": "계절성 가능", "recommended_action": ["check"], '
-                    '"evidence_keys": ["time_result"]}]')
-    monkeypatch.setattr(I, "get_llm", lambda shared=_SeqLLM([caution_json, "핵심 패턴"]): shared)
+    monkeypatch.setattr(I, "get_llm", lambda shared=_SeqLLM(["핵심 패턴"]): shared)
     reset_context()
     set_context(EdaContext(df=pd.DataFrame({"cat": ["a", "a", "b"], "val": [1.0, 2.0, 3.0]}),
                            key_col="cat", measure_cols=["val"]))
@@ -730,7 +724,7 @@ def test_insight_node_merges_llm_inferred_caution(monkeypatch):
     finally:
         reset_context()
     cautions = update["statistical_metadata"]["cautions"]
-    assert any(c.get("source") == "llm_inferred" for c in cautions)
+    assert all(c.get("source") != "llm_inferred" for c in cautions)
 
 
 def test_insight_node_falls_back_when_llm_raises(monkeypatch):
@@ -845,7 +839,7 @@ def test_insight_node_aggregated_key_col_becomes_group_key(monkeypatch):
 
 
 # ─────────────────────────────
-# get_llm model_env 배선 (codegen 전용 모델 라우팅 선행) — 토큰 0
+# get_llm model_env 배선 — 토큰 0
 # ─────────────────────────────
 def test_get_llm_caches_per_model_env(monkeypatch):
     import DATA_Analyst_Assistant_Agent.agents.eda._runtime as R
@@ -865,21 +859,21 @@ def test_get_llm_caches_per_model_env(monkeypatch):
     try:
         default = R.get_llm()
         same = R.get_llm()                              # 같은 model_env → 캐시 재사용
-        codegen = R.get_llm("CODE_GENERATOR_MODEL")     # 다른 model_env → 별도 인스턴스
+        alternate = R.get_llm("OTHER_MODEL")            # 다른 model_env → 별도 인스턴스
         assert default is same
         assert default.model_env == "LLM_MODEL"         # 기본값 = 하위호환
-        assert codegen.model_env == "CODE_GENERATOR_MODEL"
-        assert default is not codegen
-        assert calls == ["LLM_MODEL", "CODE_GENERATOR_MODEL"]  # 캐시 히트는 재생성 안 함
+        assert alternate.model_env == "OTHER_MODEL"
+        assert default is not alternate
+        assert calls == ["LLM_MODEL", "OTHER_MODEL"]  # 캐시 히트는 재생성 안 함
     finally:
         R._llms.clear()
 
 
 # ─────────────────────────────
-# codegen AST 게이트 + denylist (안전 핵심) — 토큰 0
+# 표현식 AST 게이트 + denylist (안전 핵심) — 토큰 0
 # ─────────────────────────────
-from DATA_Analyst_Assistant_Agent.agents.eda.lib.codegen_gate import (
-    CodegenRequest,
+from DATA_Analyst_Assistant_Agent.shared.expression_gate import (
+    ExpressionRequest,
     validate_expression,
     validate_request,
 )
@@ -963,16 +957,16 @@ def test_gate_rejects_lambda():
 
 
 def test_validate_request_ok():
-    req = CodegenRequest(intent="평균가", target_columns=["order_price"],
-                         expression='df["order_price"].mean()', expected_shape="scalar")
+    req = ExpressionRequest(intent="평균가", target_columns=["order_price"],
+                            expression='df["order_price"].mean()', expected_shape="scalar")
     assert validate_request(req, _COLS).ok
 
 
 def test_validate_request_allows_derived_target_column():
     # target_columns는 실행 안 되는 '선언'이라(오직 expression만 eval) 보안과 무관하고,
-    # 파생·중간 컬럼이 섞일 수 있어(codegen의 본질) 하드 거부하지 않는다.
-    req = CodegenRequest(intent="x", target_columns=["prop"],   # 원본에 없는 계산 컬럼명
-                         expression='df["order_price"].mean()')
+    # 파생·중간 컬럼이 섞일 수 있어 하드 거부하지 않는다.
+    req = ExpressionRequest(intent="x", target_columns=["prop"],   # 원본에 없는 계산 컬럼명
+                            expression='df["order_price"].mean()')
     assert validate_request(req, _COLS).ok
 
 
@@ -1007,6 +1001,12 @@ def test_gate_allows_df_empty_property():
 # ─────────────────────────────
 # 차트 셀렉터 (#71 B) — 가설 연계 + 선정 이유 캡션
 # ─────────────────────────────
+def _write_tiny_png(path):
+    from PIL import Image
+    img = Image.new("RGB", (2, 2), "white")
+    img.save(path, format="PNG")
+
+
 def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
     import os
     import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
@@ -1014,7 +1014,7 @@ def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
     paths = []
     for name in ("bar_top_a.png", "dist_b.png", "violin_b.png"):
         p = tmp_path / name
-        p.write_bytes(b"png")
+        _write_tiny_png(p)
         paths.append(str(p))
 
     seen_prompts = []
@@ -1026,12 +1026,18 @@ def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
                 "remove": ["violin_b.png"],
                 "reason": {"violin_b.png": "dist와 중복"},
                 "keep_captions": {"bar_top_a.png": "a 순위 — 가설1 근거",
-                                  "dist_b.png": "b 분포",
-                                  "violin_b.png": "(제거됨)"},
+                                  "dist_b.png": "b 분포"},
+            }))
+
+    class _FakeVisionLLM:
+        def invoke(self, content):
+            return _FakeResp(_json.dumps({
+                "bar_top_a.png": {"ok": True, "issue": ""},
+                "dist_b.png": {"ok": True, "issue": ""},
             }))
 
     monkeypatch.setattr(CS, "_load_llm", lambda: _FakeSelLLM())
-    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeSelLLM())
+    monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeVisionLLM())
     selected, captions, visual_debug = CS.run_chart_selector_skill(
         chart_paths=paths, user_question="a 상위는?", analysis_results={},
         statistical_metadata={}, hypotheses="[가설 1] a는 그룹별로 다르다")
@@ -1050,19 +1056,16 @@ def test_visual_sanity_check_drops_chart_flagged_as_broken(monkeypatch, tmp_path
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
     p_ok = tmp_path / "interval_ok.png"
     p_bad = tmp_path / "interval_bad.png"
-    p_ok.write_bytes(b"png")
-    p_bad.write_bytes(b"png")
+    _write_tiny_png(p_ok)
+    _write_tiny_png(p_bad)
 
     class _FakeVisionLLM:
         def invoke(self, content):
-            # HumanMessage(content=[...])의 image_url 안 base64로 어느 파일인지 구분은
-            # 안 하고, 호출 순서로 구분한다(두 번째 호출을 "깨짐"으로 응답).
-            calls.append(1)
-            if len(calls) == 2:
-                return _FakeResp('{"ok": false, "issue": "배지가 점을 가림"}')
-            return _FakeResp('{"ok": true, "issue": ""}')
+            return _FakeResp(_json.dumps({
+                "interval_ok.png": {"ok": True, "issue": ""},
+                "interval_bad.png": {"ok": False, "issue": "배지가 점을 가림"},
+            }))
 
-    calls: list = []
     monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _FakeVisionLLM())
     kept, dropped, failures = CS._visual_sanity_check([str(p_ok), str(p_bad)])
     names = [os.path.basename(p) for p in kept]
@@ -1077,7 +1080,7 @@ def test_visual_sanity_check_passthrough_when_no_api_key(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     p = tmp_path / "interval_x.png"
-    p.write_bytes(b"png")
+    _write_tiny_png(p)
     kept, dropped, failures = CS._visual_sanity_check([str(p)])
     assert kept == [str(p)]
     assert dropped == []
@@ -1090,7 +1093,7 @@ def test_visual_sanity_check_counts_failures_separately_from_drops(monkeypatch, 
     import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
     p = tmp_path / "interval_x.png"
-    p.write_bytes(b"png")
+    _write_tiny_png(p)
 
     class _FakeBrokenLLM:
         def invoke(self, content):
@@ -1110,12 +1113,14 @@ def test_backfill_after_visual_drop_fills_from_remaining_candidates(monkeypatch,
     import DATA_Analyst_Assistant_Agent.agents.eda.lib.chart_selector_skill as CS
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
     for name in ("segment_profile_a.png", "dist_b.png", "interval_c.png"):
-        (tmp_path / name).write_bytes(b"png")
+        _write_tiny_png(tmp_path / name)
     filtered = [str(tmp_path / n) for n in ("segment_profile_a.png", "dist_b.png", "interval_c.png")]
 
     class _AlwaysOkLLM:
         def invoke(self, content):
-            return _FakeResp('{"ok": true, "issue": ""}')
+            return _FakeResp(_json.dumps({
+                "interval_c.png": {"ok": True, "issue": ""},
+            }))
 
     monkeypatch.setattr(CS, "_load_chart_reader_llm", lambda: _AlwaysOkLLM())
     # segment_profile_a는 이미 시각점검에서 드롭된 상태를 흉내: dist_b만 살아남았고 자리 1개 빔.
@@ -1302,7 +1307,7 @@ def test_clustering_excludes_id_and_flag_features():
 
 
 def test_plot_top_n_barplot_top_only_skips_bottom(tmp_path):
-    # top_only=True면 하위 잉여차트를 안 그린다(codegen용).
+    # top_only=True면 하위 잉여차트를 안 그린다.
     from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
     visualize.set_output_dirs(str(tmp_path))
     d = pd.DataFrame({"cat": list("abcdef"), "value": [6.0, 5, 4, 3, 2, 1]})
@@ -1519,8 +1524,8 @@ def test_plot_multiline_timeseries_no_crash_when_key_col_equals_metric(tmp_path)
 
 
 def test_validate_request_rejects_bad_shape():
-    req = CodegenRequest(intent="x", target_columns=["order_price"],
-                         expression='df["order_price"].mean()', expected_shape="matrix")
+    req = ExpressionRequest(intent="x", target_columns=["order_price"],
+                            expression='df["order_price"].mean()', expected_shape="matrix")
     r = validate_request(req, _COLS)
     assert not r.ok and "invalid_expected_shape" in r.reason
 
@@ -1529,211 +1534,10 @@ def test_chart_hint_string_null_normalized_to_none():
     # LLM이 '차트 없음'을 문자열 "null"/"none"/""로 뱉어도 None으로 정규화 → 유효한 스칼라 답이
     # invalid_chart_hint로 잘못 거부되지 않아야 한다.
     for bad in ("null", "None", "NULL", "", "  none  "):
-        req = CodegenRequest(intent="x", target_columns=["order_price"],
-                             expression='df["order_price"].mean()', chart_hint=bad)
+        req = ExpressionRequest(intent="x", target_columns=["order_price"],
+                                expression='df["order_price"].mean()', chart_hint=bad)
         assert req.chart_hint is None, bad
         assert validate_request(req, _COLS).ok
-
-
-def test_codegen_generate_prompt_forbids_denied_idioms():
-    # 게이트가 거부하는 관용구를 생성 프롬프트가 미리 금지하는지(신뢰성 fix, 보안 완화 아님).
-    # 실제 LLM이 지키는지는 비결정적이라 테스트하지 않고, 프롬프트 문자열만 deterministic하게 검증.
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-    p = C._generate_prompt("q", ["a", "b"])
-    assert "query" in p          # .query() 문자열 eval 금지 명시
-    assert "eval" in p
-    assert "df.loc" in p         # 필터링 대안 제시
-
-
-# ─────────────────────────────
-# codegen 노드 + 결정론 트리거 (커밋3) — 토큰 0 (FakeLLM)
-# ─────────────────────────────
-import json as _json
-from DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner import route_after_planner
-
-
-def _run_codegen(monkeypatch, df, judge_json, generate_json, question="X 계산"):
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-
-    def fake_get_llm(model_env="LLM_MODEL"):
-        return _FakeLLM(generate_json if model_env == "CODE_GENERATOR_MODEL" else judge_json)
-
-    monkeypatch.setattr(C, "get_llm", fake_get_llm)
-    reset_context()
-    set_context(EdaContext(df=df))
-    try:
-        return C.codegen_node({"user_question": question})["codegen"]
-    finally:
-        reset_context()
-
-
-def _run_codegen_seq(monkeypatch, df, judge_json, generate_jsons, question="X 계산"):
-    """생성 LLM이 호출마다 generate_jsons를 순서대로 돌려주는 버전(재시도 테스트용).
-    judge는 1회만 호출되고, CODE_GENERATOR_MODEL 호출마다 다음 응답을 소비한다."""
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-    seq = list(generate_jsons)
-
-    def fake_get_llm(model_env="LLM_MODEL"):
-        if model_env == "CODE_GENERATOR_MODEL":
-            return _FakeLLM(seq.pop(0) if seq else "{}")
-        return _FakeLLM(judge_json)
-
-    monkeypatch.setattr(C, "get_llm", fake_get_llm)
-    reset_context()
-    set_context(EdaContext(df=df))
-    try:
-        return C.codegen_node({"user_question": question})["codegen"]
-    finally:
-        reset_context()
-
-
-def test_codegen_success_path(monkeypatch):
-    df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
-    gen = _json.dumps({"intent": "평균가", "target_columns": ["order_price"],
-                       "expression": 'df["order_price"].mean()', "expected_shape": "scalar"})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', gen)
-    assert out["status"] == "success"
-    assert out["result"] == 20.0
-    assert out["expression"] == 'df["order_price"].mean()'      # provenance
-    assert "llm_generated" in out["cautions"]
-    assert out["telemetry"]["output_shape"] == "scalar"
-    assert out["telemetry"]["attempts"] == 1                    # 첫 시도 성공
-    assert out["telemetry"]["recovered_by_retry"] is False
-
-
-def test_codegen_judge_says_not_computable(monkeypatch):
-    df = pd.DataFrame({"order_price": [1.0]})
-    out = _run_codegen(monkeypatch, df,
-                       '{"computable": false, "reason": "외부 데이터 필요"}', "{}")
-    assert out["status"] == "out_of_domain" and "외부 데이터" in out["reason"]
-    assert out["attempts"] == 0                                 # 생성 시도 안 함(judge에서 컷)
-
-
-def test_codegen_gate_rejects_dangerous_expression(monkeypatch):
-    df = pd.DataFrame({"order_price": [1.0]})
-    gen = _json.dumps({"intent": "나쁨", "target_columns": [],
-                       "expression": '__import__("os")', "expected_shape": "scalar"})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', gen)
-    assert out["status"] == "out_of_domain" and "gate_rejected" in out["reason"]
-
-
-def test_codegen_bad_generate_json_falls_back(monkeypatch):
-    df = pd.DataFrame({"order_price": [1.0]})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "가능"}', "not json")
-    assert out["status"] == "out_of_domain" and "generate_error" in out["reason"]
-
-
-def test_codegen_retry_recovers_execution_error(monkeypatch):
-    # attempt1: 게이트는 통과하나 런타임에서 터지는 코드(.dt on float) → execution_error
-    # attempt2: 유효한 코드 → 성공. 재시도로 회복돼야 한다.
-    df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
-    bad = _json.dumps({"intent": "x", "target_columns": ["order_price"],
-                       "expression": 'df["order_price"].dt.month.mean()', "expected_shape": "scalar"})
-    good = _json.dumps({"intent": "평균가", "target_columns": ["order_price"],
-                        "expression": 'df["order_price"].mean()', "expected_shape": "scalar"})
-    out = _run_codegen_seq(monkeypatch, df, '{"computable": true, "reason": "가능"}', [bad, good])
-    assert out["status"] == "success" and out["result"] == 20.0
-    assert out["telemetry"]["attempts"] == 2
-    assert out["telemetry"]["recovered_by_retry"] is True
-
-
-def test_codegen_retry_exhausted_reports_both_errors(monkeypatch):
-    # 두 시도 모두 실패 → retry_failed + errors에 attempt1/attempt2 둘 다 기록.
-    df = pd.DataFrame({"order_price": [10.0, 20.0]})
-    bad1 = _json.dumps({"intent": "x", "target_columns": ["order_price"],
-                        "expression": 'df["order_price"].dt.month.mean()', "expected_shape": "scalar"})
-    bad2 = _json.dumps({"intent": "x", "target_columns": ["order_price"],
-                        "expression": 'df.query("order_price > 0")', "expected_shape": "frame"})
-    out = _run_codegen_seq(monkeypatch, df, '{"computable": true, "reason": "가능"}', [bad1, bad2])
-    assert out["status"] == "out_of_domain"
-    assert out["reason"].startswith("retry_failed:")
-    assert out["attempts"] == 2
-    assert len(out["errors"]) == 2
-    assert out["errors"][0].startswith("attempt1:") and out["errors"][1].startswith("attempt2:")
-
-
-def test_codegen_judge_failure_does_not_retry(monkeypatch):
-    # judge computable=false는 재시도 대상이 아님(생성 자체를 시작하지 않음).
-    df = pd.DataFrame({"order_price": [1.0]})
-    out = _run_codegen_seq(monkeypatch, df, '{"computable": false, "reason": "외부 필요"}', ["{}", "{}"])
-    assert out["status"] == "out_of_domain" and out["attempts"] == 0
-    assert "errors" not in out                              # 시도 자체가 없어 errors 없음
-
-
-def test_codegen_judge_error_redacts_provider_message(monkeypatch):
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-
-    class BoomLLM:
-        def invoke(self, _prompt):
-            raise RuntimeError(
-                "Error code: 402 - This request requires more credits, or fewer max_tokens. "
-                "https://openrouter.ai/workspaces/default/keys/secret"
-            )
-
-    monkeypatch.setattr(C, "get_llm", lambda model_env="LLM_MODEL": BoomLLM())
-    reset_context()
-    set_context(EdaContext(df=pd.DataFrame({"order_price": [1.0]})))
-    try:
-        update = C.codegen_node({"user_question": "X"})
-    finally:
-        reset_context()
-
-    assert update["codegen"]["reason"] == "judge_error: llm_token_budget_exceeded"
-    assert "openrouter.ai" not in update["final_summary"].lower()
-    assert "secret" not in update["final_summary"].lower()
-
-
-def test_codegen_success_emits_chart_request(monkeypatch, tmp_path):
-    # codegen 성공(차트 있음) → PNG와 별개로 chart_request 계약도 ctx에 발행된다.
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-    from DATA_Analyst_Assistant_Agent.agents.eda._runtime import get_context
-    from DATA_Analyst_Assistant_Agent.agents.eda.lib import visualize
-    visualize.set_output_dirs(str(tmp_path))                # 차트 파일 오염 방지
-    df = pd.DataFrame({"cat": list("aabbcc"), "order_price": [1.0, 2, 3, 4, 5, 6]})
-    gen = _json.dumps({"intent": "카테고리별 평균가", "target_columns": ["cat", "order_price"],
-                       "expression": 'df.groupby("cat")["order_price"].mean()',
-                       "expected_shape": "series", "chart_hint": "bar"})
-
-    def fake_get_llm(model_env="LLM_MODEL"):
-        return _FakeLLM(gen if model_env == "CODE_GENERATOR_MODEL"
-                        else '{"computable": true, "reason": "ok"}')
-
-    monkeypatch.setattr(C, "get_llm", fake_get_llm)
-    reset_context()
-    set_context(EdaContext(df=df))
-    try:
-        out = C.codegen_node({"user_question": "카테고리별 평균가"})["codegen"]
-        reqs = list(get_context().chart_requests)
-    finally:
-        reset_context()
-    assert out["status"] == "success"
-    assert len(reqs) == 1
-    assert reqs[0]["hint"] == "bar" and reqs[0]["stats"]["source"] == "codegen"
-    assert reqs[0]["stats"]["expression"] == 'df.groupby("cat")["order_price"].mean()'
-    # 컬럼 타입은 df에서 실제 추론(unknown 퉁치기 아님)
-    assert reqs[0]["columns"]["cat"]["type"] == "categorical"
-    assert reqs[0]["columns"]["order_price"]["type"] == "numeric"
-
-
-def test_route_done_without_substantive_goes_codegen():
-    state = {"next_analysis": "done", "controller_log": [{"choice": "quality"}],
-             "quality_result": "품질 점검"}          # quality만 = 실질분석 없음 → codegen
-    assert route_after_planner(state) == "codegen"
-
-
-def test_planner_node_can_select_codegen(monkeypatch):
-    # 질문기준 발동: 플래너가 codegen을 고르면 환각가드가 죽이지 않고 그대로 통과시킨다.
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
-    df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
-    monkeypatch.setattr(P, "get_llm",
-                        lambda *a, **k: _FakeLLM('{"next": "codegen", "reason": "파생 비율은 도구로 불가"}'))
-    reset_context()
-    set_context(EdaContext(df=df, measure_cols=["order_price"]))
-    try:
-        out = P.planner_node({"user_question": "X 이상 비율", "controller_log": [], "round": 0})
-    finally:
-        reset_context()
-    assert out["next_analysis"] == "codegen"
 
 
 def test_planner_node_rejects_zero_attempt_done_when_feasible(monkeypatch):
@@ -1752,7 +1556,7 @@ def test_planner_node_rejects_zero_attempt_done_when_feasible(monkeypatch):
 
 
 def test_planner_node_rejects_hallucinated_choice(monkeypatch):
-    # codegen은 허용하되, 목록 밖 엉뚱한 값은 여전히 done으로 강등한다.
+    # 목록 밖 엉뚱한 값은 done으로 강등한다.
     import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
     df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
     monkeypatch.setattr(P, "get_llm",
@@ -1766,48 +1570,27 @@ def test_planner_node_rejects_hallucinated_choice(monkeypatch):
     assert out["next_analysis"] == "done"
 
 
-def test_build_app_compiles_with_codegen():
+def test_build_app_compiles_with_eda_only_routes():
     from DATA_Analyst_Assistant_Agent.agents.eda.graph import build_app
-    assert build_app() is not None                  # codegen 노드 포함 그래프 컴파일
+    assert build_app() is not None
 
 
 # ─────────────────────────────
-# codegen 결과 eda_summary 편입 (커밋4) — 토큰 0
-# ─────────────────────────────
-def test_insight_folds_codegen_success_into_adhoc_analysis(monkeypatch):
+def test_insight_does_not_add_ad_hoc_metadata(monkeypatch):
     import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
     monkeypatch.setattr(I, "get_llm", lambda *a, **k: _FakeLLM("[]"))
     df = pd.DataFrame({"order_price": [10.0, 20.0, 30.0]})
     reset_context()
     set_context(EdaContext(df=df, measure_cols=["order_price"]))
-    codegen = {"status": "success", "intent": "평균", "expression": 'df["order_price"].mean()',
-               "result": 20.0, "cautions": ["llm_generated"]}
     try:
-        update = I.insight_node({"user_question": "q", "question_type": "", "codegen": codegen})
+        update = I.insight_node({"user_question": "q", "question_type": ""})
     finally:
         reset_context()
-    adhoc = update["statistical_metadata"]["adhoc_analysis"]
-    assert adhoc["result"] == 20.0
-    assert adhoc["expression"] == 'df["order_price"].mean()'      # provenance 전달됨
-    assert "llm_generated" in adhoc["cautions"]
-
-
-def test_insight_does_not_fold_out_of_domain(monkeypatch):
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.insight as I
-    monkeypatch.setattr(I, "get_llm", lambda *a, **k: _FakeLLM("[]"))
-    df = pd.DataFrame({"order_price": [1.0, 2.0]})
-    reset_context()
-    set_context(EdaContext(df=df, measure_cols=["order_price"]))
-    try:
-        update = I.insight_node({"user_question": "q", "question_type": "",
-                                 "codegen": {"status": "out_of_domain", "reason": "불가"}})
-    finally:
-        reset_context()
-    assert "adhoc_analysis" not in update["statistical_metadata"]  # 실패는 편입 안 함(플래그로만)
+    assert ("adhoc" + "_analysis") not in update["statistical_metadata"]
 
 
 # ─────────────────────────────
-# _resolve_target: priority_metrics dict 정규화 (커밋5, codegen 경로가 노출한 기존 버그 회귀)
+# _resolve_target: priority_metrics dict 정규화
 # ─────────────────────────────
 def test_resolve_target_handles_priority_metrics_dicts():
     from DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis import _resolve_target
@@ -1836,7 +1619,7 @@ def test_resolve_target_empty_when_no_candidate_matches():
 
 
 # ─────────────────────────────
-# codegen 게이트 numpy IO 우회 차단 (보안 회귀 — 리뷰 발견 벡터)
+# 표현식 게이트 numpy IO 우회 차단 (보안 회귀 — 리뷰 발견 벡터)
 # ─────────────────────────────
 def test_gate_rejects_numpy_fromfile():
     r = validate_expression('np.fromfile("/etc/passwd")', _COLS)     # 파일 읽기
@@ -1879,88 +1662,8 @@ def test_gate_still_allows_legit_numpy_compute():
 
 
 # ─────────────────────────────
-# codegen 결과 차트화 (LLM chart_hint → 기존 함수 재사용) — 토큰 0
-# ─────────────────────────────
-def test_codegen_chart_hint_bar_renders(monkeypatch):
-    import DATA_Analyst_Assistant_Agent.agents.eda.lib.visualize as V
-    monkeypatch.setattr(V, "plot_top_n_barplot",
-                        lambda *a, **k: {"chart_paths": ["/x/bar_top_success_rate.png"], "stats": {}})
-    df = pd.DataFrame({"region": ["a", "a", "b", "b"], "status": ["ok", "fail", "ok", "ok"]})
-    gen = _json.dumps({"intent": "지역별 성공률", "target_columns": ["region", "status"],
-                       "expression": "df['status'].eq('ok').groupby(df['region']).mean()",
-                       "expected_shape": "series", "chart_hint": "bar"})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
-    assert out["status"] == "success"
-    assert out["chart"] == "bar_top_success_rate.png"    # LLM이 bar 골라 → 기존 함수 렌더
-
-
-def test_codegen_chart_hint_null_no_chart(monkeypatch):
-    df = pd.DataFrame({"region": ["a", "a", "b", "b"], "status": ["ok", "fail", "ok", "ok"]})
-    gen = _json.dumps({"intent": "지역별 성공률", "target_columns": ["region", "status"],
-                       "expression": "df['status'].eq('ok').groupby(df['region']).mean()",
-                       "expected_shape": "series", "chart_hint": None})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
-    assert out["status"] == "success"
-    assert out["chart"] is None                          # LLM이 차트 부적합 판단 → 차트 없음
-
-
-def test_codegen_scalar_no_chart_even_with_hint(monkeypatch):
-    df = pd.DataFrame({"region": ["a", "a", "b"], "status": ["ok", "fail", "ok"]})
-    gen = _json.dumps({"intent": "최고 지역", "target_columns": ["region", "status"],
-                       "expression": "df['status'].eq('ok').groupby(df['region']).mean().idxmax()",
-                       "expected_shape": "scalar", "chart_hint": "bar"})
-    out = _run_codegen(monkeypatch, df, '{"computable": true, "reason": "ok"}', gen)
-    assert out["status"] == "success"
-    assert out["chart"] is None                          # 스칼라 → 그릴 범주 축 없음(힌트 있어도)
-
-
-def test_bar_value_col_filters_bool_flag():
-    # 값 컬럼 선택이 bool 플래그(is_top)를 제외하고 실제 값(0/1 비율 포함)을 고르는가
-    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import _first_value_col
-    df = pd.DataFrame({"region": ["a", "b"], "success_rate": [1.0, 0.0], "is_top": [True, False]})
-    assert _first_value_col(df) == "success_rate"        # 0/1 비율값은 유지, bool 플래그만 제외
-
-
 def test_gate_rejects_invalid_chart_hint():
-    req = CodegenRequest(intent="x", target_columns=["order_price"],
-                         expression='df["order_price"].mean()', chart_hint="pie")
+    req = ExpressionRequest(intent="x", target_columns=["order_price"],
+                            expression='df["order_price"].mean()', chart_hint="pie")
     r = validate_request(req, _COLS)
     assert not r.ok and "invalid_chart_hint" in r.reason
-
-
-# ─────────────────────────────
-# out_of_domain short-circuit (도메인 밖이면 insight/hypothesis 안 돌고 정직 종료)
-# ─────────────────────────────
-def test_route_after_codegen_out_of_domain_ends():
-    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
-    # 실질 결과 전혀 없음(진짜 도메인 밖) → 종료
-    assert route_after_codegen({"codegen": {"status": "out_of_domain"}}) == "end"
-    assert route_after_codegen({"codegen": {"status": "success"}}) == "insight"
-
-
-def test_route_after_codegen_out_of_domain_with_tool_output_goes_insight():
-    # 플래너가 codegen을 오버픽했지만 실패(out_of_domain) — 도구가 이미 실질 결과를 냈으면
-    # 그 분석을 버리지 않고 insight로. (over-fire 피해 방지)
-    from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import route_after_codegen
-    state = {"codegen": {"status": "out_of_domain"},
-             "controller_log": [{"choice": "comparison"}, {"choice": "codegen"}],
-             "comparison_result": "카테고리별 평균 비교 결과"}
-    assert route_after_codegen(state) == "insight"
-
-
-def test_out_of_domain_is_honest_not_mixed_summary(monkeypatch):
-    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
-    monkeypatch.setattr(C, "get_llm",
-                        lambda model_env="LLM_MODEL": _FakeLLM('{"computable": false, "reason": "외부 데이터 필요"}'))
-    reset_context()
-    set_context(EdaContext(df=pd.DataFrame({"region": ["a", "b"]})))
-    try:
-        update = C.codegen_node({"user_question": "경쟁사 점유율 반영해서 평가해줘"})
-    finally:
-        reset_context()
-    assert update["codegen"]["status"] == "out_of_domain"
-    assert "답할 수 없습니다" in update["final_summary"]      # 정직한 요약
-    assert "distribution" not in update["statistical_metadata"]  # 일반 통계 안 섞임
-    assert any(c["code"] == "OUT_OF_DOMAIN" for c in update["cautions"])          # top-level
-    assert any(c["code"] == "OUT_OF_DOMAIN"
-               for c in update["statistical_metadata"].get("cautions", []))       # stat_metadata에도

@@ -84,6 +84,9 @@ Rules:
 - Treat EDA insights and hypotheses as exploratory candidate hints, not as a
   checklist. Select only candidates that directly support the analysis plan and
   user question; ignore unrelated candidates without mentioning every omission.
+- Do not copy EDA insight_result, hypotheses, or final_summary into the final
+  analysis as evidence. Recompute coefficients, p-values, test decisions, effect
+  sizes, and interpretations from `df` in this analysis stage.
 - You may add new analysis hypotheses when they are needed to answer the plan
   and are supported by the available columns/data. Include them in
   `hypothesis_tests` when tested.

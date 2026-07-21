@@ -501,13 +501,6 @@ def insight_node(state: EDAState) -> dict:
             } if (clustering and not clustering.get("skip")) else {"skip": True},
         }
 
-        # codegen 탈출구 성공 결과를 수치 계약에 편입(도구로 답 못 낸 질문에만 채워짐).
-        # 생성코드 원문(provenance)·계측·llm_generated caution 포함. 실패(out_of_domain)는
-        # 여기 안 넣고 agent.py payload의 top-level 플래그로 노출한다.
-        codegen = state.get("codegen") or {}
-        if codegen.get("status") == "success":
-            statistical_metadata["adhoc_analysis"] = codegen
-
     def _facts_block(facts_key: str, result_key: str, label: str) -> str:
         # 원문 대신 각 노드가 뽑은 짧은 facts로 insight 입력을 줄인다(#194 후속).
         # facts가 비어있으면(노드 미실행 등) 원문으로 폴백 — 정보 완전 누락 방지.
