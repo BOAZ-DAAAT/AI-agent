@@ -98,9 +98,10 @@ def _enrich_step_summary_with_node_finding(
         ref = generate_node_summary(step_summary.artifact_ids, runtime)
         payload = json.loads(backend_adapter.read_artifact_text(ref.artifact_id))
         key_finding = str(payload.get("key_finding") or "").strip()
-        if not key_finding:
-            return step_summary
-        return step_summary.model_copy(update={"summary": key_finding})
+        updates: dict[str, Any] = {"summary_artifact_id": ref.artifact_id}
+        if key_finding:
+            updates["summary"] = key_finding
+        return step_summary.model_copy(update=updates)
     except Exception:  # noqa: BLE001 - 서머리는 부가 정보, 실패해도 완료 흐름은 계속
         return step_summary
 
