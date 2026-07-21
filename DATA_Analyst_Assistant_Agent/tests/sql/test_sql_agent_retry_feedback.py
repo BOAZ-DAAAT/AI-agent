@@ -110,7 +110,7 @@ def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monk
     assert payload["query_rules"] == state.plan.query_rules
 
 
-def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
+def test_retryable_warning_finding_uses_warning_disposition_not_error() -> None:
     finding = SQLAgent._validation_finding(
         {
             "category": "intent_mismatch",
@@ -120,5 +120,5 @@ def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
         }
     )
 
-    assert finding.disposition == "limitation"
+    assert finding.disposition == "warning"
     assert finding.retryable is True

@@ -320,14 +320,15 @@ class SQLAgent:
     def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
         severity = str(item.get("severity") or "info")
         retryable = bool(item.get("retryable", False))
-        if retryable and severity == "error":
-            disposition = "retry_required"
+        explicit_disposition = str(item.get("disposition") or "").strip()
+        if explicit_disposition:
+            disposition = explicit_disposition
         elif severity == "error":
-            disposition = "blocking"
+            disposition = "error"
         elif severity == "warning":
-            disposition = "limitation"
+            disposition = "warning"
         else:
-            disposition = "advisory"
+            disposition = "diagnostic"
         return ValidationFinding(
             code=str(item.get("code") or item.get("category") or "sql_validation"),
             source=str(item.get("source") or "sql_langgraph"),

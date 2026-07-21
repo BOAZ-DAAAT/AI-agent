@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
@@ -50,7 +51,66 @@ def _normalize_mart_design_payload(payload: dict[str, Any]) -> dict[str, Any]:
             for table, columns in source_grains.items()
             if str(table).strip()
         }
+    normalized["column_plan"] = _repair_empty_source_columns(normalized.get("column_plan"))
     return normalized
+
+
+def _repair_empty_source_columns(column_plan: Any) -> Any:
+    if not isinstance(column_plan, list):
+        return column_plan
+
+    output_names: list[str] = []
+    source_names: list[str] = []
+    for item in column_plan:
+        if not isinstance(item, dict):
+            continue
+        output = str(item.get("output_column") or "").strip()
+        if output and output not in output_names:
+            output_names.append(output)
+        for source in _normalize_column_list(item.get("source_columns")):
+            for candidate in (source, source.split(".")[-1]):
+                if candidate and candidate not in source_names:
+                    source_names.append(candidate)
+
+    repaired: list[Any] = []
+    for item in column_plan:
+        if not isinstance(item, dict):
+            repaired.append(item)
+            continue
+        current = dict(item)
+        if _normalize_column_list(current.get("source_columns")):
+            repaired.append(current)
+            continue
+        if str(current.get("calculation_type") or "").strip().lower() != "derived":
+            repaired.append(current)
+            continue
+
+        text = " ".join(
+            str(current.get(key) or "")
+            for key in ("calculation_rule", "inclusion_reason", "output_column")
+        )
+        own_output = str(current.get("output_column") or "").strip()
+        inferred: list[str] = []
+        for candidate in [*output_names, *source_names]:
+            if candidate == own_output:
+                continue
+            if _mentions_column(text, candidate) and candidate not in inferred:
+                inferred.append(candidate)
+        if inferred:
+            current["source_columns"] = inferred
+        repaired.append(current)
+    return repaired
+
+
+def _mentions_column(text: str, column: str) -> bool:
+    needle = str(column or "").strip()
+    if not needle:
+        return False
+    folded_text = text.casefold()
+    folded = needle.casefold()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", folded):
+        return re.search(rf"(?<![A-Za-z0-9_$]){re.escape(folded)}(?![A-Za-z0-9_$])", folded_text) is not None
+    return folded in folded_text
 
 
 def _validate_target_metric_support(design: MartDesign, plan: dict[str, Any]) -> None:
@@ -68,6 +128,21 @@ def validate_mart_design_state(payload: dict[str, Any], plan: dict[str, Any]) ->
     design = MartDesign(**_normalize_mart_design_payload(payload))
     _validate_target_metric_support(design, plan)
     return design
+
+
+def _mart_design_validation_detail(normalized: dict[str, Any], exc: Exception) -> str:
+    detail = f"LLM mart design response does not satisfy the required contract: {exc}"
+    empty_source_outputs = [
+        str(item.get("output_column") or "").strip()
+        for item in normalized.get("column_plan") or []
+        if isinstance(item, dict) and not _normalize_column_list(item.get("source_columns"))
+    ]
+    if empty_source_outputs:
+        detail += (
+            " source_columns가 빈 파생 컬럼은 계산에 사용한 원천/중간 컬럼을 명시해야 합니다. "
+            f"대상 컬럼: {empty_source_outputs}."
+        )
+    return detail
 
 
 def _mart_design_failure(*, reason_code: str, detail: str, retryable: bool) -> dict[str, Any]:
@@ -143,7 +218,7 @@ def design_mart(state: AgentState):
     except Exception as exc:
         return _mart_design_failure(
             reason_code="invalid_mart_design_payload",
-            detail=f"LLM mart 설계 응답이 필수 구조를 만족하지 못했습니다: {exc}",
+            detail=_mart_design_validation_detail(normalized, exc),
             retryable=True,
         )
 

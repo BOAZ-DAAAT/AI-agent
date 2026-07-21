@@ -36,18 +36,36 @@ class BusinessFlag(BaseModel):
     message: str
 
 
-FindingDisposition = Literal["advisory", "limitation", "retry_required", "blocking"]
+FindingDisposition = Literal["error", "warning", "diagnostic", "semantic_evidence", "limitation"]
 
 
 class ValidationFinding(BaseModel):
     code: str
     source: str
     severity: Literal["info", "warning", "error"] = "info"
-    disposition: FindingDisposition = "advisory"
+    disposition: FindingDisposition = "diagnostic"
     message: str
     retryable: bool = False
     suggested_action: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_disposition(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        disposition = str(normalized.get("disposition") or "").strip()
+        if disposition == "blocking":
+            normalized["disposition"] = "error"
+        elif disposition == "retry_required":
+            normalized["disposition"] = "error"
+            normalized["retryable"] = True
+        elif disposition == "advisory":
+            normalized["disposition"] = "diagnostic"
+        elif not disposition:
+            normalized["disposition"] = "diagnostic"
+        return normalized
 
 
 class ValidationBlock(BaseModel):
@@ -63,7 +81,7 @@ class ValidationBlock(BaseModel):
                 code=check.name,
                 source="local_check",
                 severity=check.severity,
-                disposition="blocking" if check.severity == "error" else "limitation",
+                disposition="error" if check.severity == "error" else "limitation",
                 message=check.detail or check.name,
                 retryable=check.severity == "error",
             )
@@ -75,7 +93,7 @@ class ValidationBlock(BaseModel):
                 code=flag.code,
                 source="business_flag",
                 severity=flag.severity,
-                disposition="blocking" if flag.severity == "error" else "limitation",
+                disposition="error" if flag.severity == "error" else "limitation",
                 message=flag.message,
             )
             for flag in self.business_flags
@@ -85,12 +103,12 @@ class ValidationBlock(BaseModel):
 
     @property
     def has_errors(self) -> bool:
-        return any(finding.disposition == "blocking" for finding in self.normalized_findings())
+        return any(finding.disposition == "error" for finding in self.normalized_findings())
 
     @property
     def has_warnings(self) -> bool:
         return any(
-            finding.disposition in {"limitation", "retry_required"}
+            finding.disposition in {"warning", "limitation"}
             for finding in self.normalized_findings()
         )
 
