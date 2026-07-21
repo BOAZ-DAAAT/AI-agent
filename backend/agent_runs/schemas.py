@@ -42,7 +42,7 @@ class AgentRunResumeRequest(BaseModel):
 
     - clarification: answer
     - analysis_review: approval_id + (selected_option_id 또는 free_text 중 하나)
-    - approval: approved(true여야 함)
+    - approval: approved(true/false 모두 허용) + reason(거부 시 선택)
     """
 
     type: ResumeType
@@ -51,6 +51,7 @@ class AgentRunResumeRequest(BaseModel):
     selected_option_id: str | None = None
     free_text: str | None = None
     approved: bool | None = None
+    reason: str | None = None
 
     @model_validator(mode="after")
     def validate_fields_for_type(self) -> "AgentRunResumeRequest":
@@ -71,8 +72,9 @@ class AgentRunResumeRequest(BaseModel):
             if (selected_option_id is None) == (free_text is None):
                 raise ValueError("selected_option_id 또는 free_text 중 정확히 하나를 입력해주세요.")
         elif self.type == "approval":
-            if self.approved is not True:
-                raise ValueError("approved는 true여야 합니다.")
+            if not isinstance(self.approved, bool):
+                raise ValueError("approved는 boolean이어야 합니다.")
+            self.reason = (self.reason or "").strip() or None
         return self
 
 

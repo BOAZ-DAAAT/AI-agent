@@ -25,7 +25,7 @@ def check_sample_reliability_fn(df: pd.DataFrame, min_samples: int = 30, key_col
         key_col = cat_cols[0]
 
     # LLM이 분류한 count_col 우선, 없으면 키워드 휴리스틱 폴백
-    if count_col and count_col in df.columns:
+    if count_col and count_col in df.columns and pd.api.types.is_numeric_dtype(df[count_col]):
         pass
     else:
         fallback = [

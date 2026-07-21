@@ -94,11 +94,15 @@ def assess_sample_reliability(df: pd.DataFrame, key_col: Optional[str] = None,
     out: Dict[str, Any] = {"threshold": min_n, "basis": "", "low_n_groups": [],
                            "low_n_count": 0, "total_groups": 0, "note": ""}
 
+    count_col_usable = bool(
+        count_col and count_col in df.columns and pd.api.types.is_numeric_dtype(df[count_col])
+    )
+
     sizes = None
-    if count_col and count_col in df.columns and key_col and key_col in df.columns:
+    if count_col_usable and key_col and key_col in df.columns:
         sizes = df.groupby(key_col)[count_col].sum()
         out["basis"] = f"{count_col} 합(그룹별)"
-    elif count_col and count_col in df.columns:
+    elif count_col_usable:
         sizes = df[count_col]
         out["basis"] = f"{count_col}(행별)"
     elif data_level == "raw" and key_col and key_col in df.columns:

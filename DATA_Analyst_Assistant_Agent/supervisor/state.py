@@ -255,7 +255,7 @@ def empty_supervisor_state(
         "error_state": {},
         "retry_counts": {},
         "failure_streaks": {},
-        "max_retry_per_agent": 1,
+        "max_retry_per_agent": 2,
         "llm_decisions": [],
         "decision_errors": [],
         "pending_result": None,

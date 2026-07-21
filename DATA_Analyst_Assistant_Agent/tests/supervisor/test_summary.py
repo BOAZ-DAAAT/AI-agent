@@ -106,6 +106,38 @@ def test_analysis_evidence_includes_method_decision_and_hypothesis_tests(adapter
     assert evidence.facts["hypothesis_tests"] == [{"null_hypothesis": "H0", "decision": "supported"}]
 
 
+def test_analysis_evidence_includes_tables_and_successfully_read_charts(adapter, runtime):
+    run = adapter.create_run(thread_id="thread_analysis_visual_ev")
+    chart_ref = adapter.register_artifact(
+        run.run_id, ArtifactType.chart, content_bytes=b"chart", filename="scatter.png",
+        created_by_tool="test.summary", metadata={"kind": "eda_chart"},
+    )
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {
+            "title": "t", "executive_summary": "e", "key_findings": [], "limitations": [],
+            "method_notes": [], "method_decision": {}, "hypothesis_tests": [],
+            "evidence_tables": [{
+                "title": "검정 결과",
+                "columns": ["method", "value"],
+                "rows": [{"method": f"m{i}", "value": i} for i in range(7)],
+            }],
+            "visual_evidence": [{
+                "chart_artifact_id": chart_ref.artifact_id,
+                "status": "read_success",
+                "multimodal_summary": "배송기간과 리뷰점수 산점도",
+            }],
+        },
+        kind="analysis_result", filename="analysis_result.json",
+    )
+
+    evidence = read_node_evidence([artifact_id], runtime)
+
+    assert len(evidence.facts["evidence_tables"][0]["rows"]) == 5
+    assert evidence.charts[0].artifact_id == chart_ref.artifact_id
+    assert evidence.charts[0].caption == "배송기간과 리뷰점수 산점도"
+
+
 def test_insight_evidence_found_even_when_final_report_is_listed_first(adapter, runtime):
     """실사례 버그: InsightGenerator.run()은 artifact_refs를
     [report_ref(final_report), payload_ref(insight_payload), *chart_refs] 순으로 반환하므로,
@@ -212,6 +244,14 @@ def test_generate_sql_summary_uses_sql_detail(adapter, runtime, monkeypatch):
     assert payload["detail"]["source_tables"] == ["orders", "order_payments"]
     assert payload["detail"]["sql_snippet"] == "CREATE TABLE analytics.dm AS SELECT customer_unique_id FROM orders"
     assert payload["fallback_used"] is False
+    summary_record = adapter.get_artifact(ref.artifact_id)
+    markdown_id = summary_record.metadata.get("markdown_artifact_id")
+    assert isinstance(markdown_id, str) and markdown_id
+    markdown_record = adapter.get_artifact(markdown_id)
+    assert markdown_record.metadata["kind"] == "node_summary_markdown"
+    markdown = adapter.read_artifact_text(markdown_id)
+    assert markdown.startswith("# 고객 RFM 마트")
+    assert "실제 실행 SQL 보기" in markdown
 
 
 def test_sql_evidence_merges_plan_and_result_and_includes_preview(adapter, runtime):

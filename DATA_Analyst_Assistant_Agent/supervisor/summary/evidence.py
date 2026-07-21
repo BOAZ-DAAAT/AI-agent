@@ -189,9 +189,47 @@ def _read_analysis_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvid
         "method_notes": payload.get("method_notes", []),
         "method_decision": payload.get("method_decision") or {},   # selected_method/rationale/... (근거 그대로)
         "hypothesis_tests": payload.get("hypothesis_tests", []),
+        "evidence_tables": _analysis_evidence_tables(payload.get("evidence_tables")),
+        "interpretation": payload.get("interpretation", []),
     }
     code_used = str(payload.get("generated_code") or "")
-    return NodeEvidence(source_kind="analysis_result", facts=facts, code_used=code_used)
+    charts: list[ChartRef] = []
+    seen_chart_ids: set[str] = set()
+    for visual in payload.get("visual_evidence") or []:
+        if not isinstance(visual, dict) or visual.get("status") != "read_success":
+            continue
+        chart_id = str(visual.get("chart_artifact_id") or "").strip()
+        if not chart_id or chart_id in seen_chart_ids:
+            continue
+        caption = str(
+            visual.get("multimodal_summary")
+            or visual.get("title")
+            or visual.get("filename")
+            or chart_id
+        ).strip()
+        charts.append(ChartRef(artifact_id=chart_id, caption=caption))
+        seen_chart_ids.add(chart_id)
+    return NodeEvidence(source_kind="analysis_result", facts=facts, code_used=code_used, charts=charts)
+
+
+def _analysis_evidence_tables(raw: Any) -> list[dict[str, Any]]:
+    """분석 결과표를 화면 근거로 쓸 수 있는 최대 5행 미리보기로 제한한다."""
+    if not isinstance(raw, list):
+        return []
+    tables: list[dict[str, Any]] = []
+    for index, table in enumerate(raw):
+        if not isinstance(table, dict):
+            continue
+        rows = [row for row in (table.get("rows") or []) if isinstance(row, dict)][:5]
+        columns = [str(column) for column in (table.get("columns") or [])]
+        if not columns and rows:
+            columns = list(rows[0].keys())
+        tables.append({
+            "title": str(table.get("title") or f"근거표 {index + 1}"),
+            "columns": columns,
+            "rows": rows,
+        })
+    return tables
 
 
 def _read_insight_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvidence:

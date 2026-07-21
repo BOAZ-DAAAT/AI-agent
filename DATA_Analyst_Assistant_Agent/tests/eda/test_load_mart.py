@@ -88,6 +88,29 @@ def test_load_mart_rejects_timestamp_columns_with_too_few_time_buckets() -> None
     assert result["time_detection_status"] == "no_usable_time_columns"
 
 
+def test_load_mart_never_selects_datetime_column_as_count_column() -> None:
+    # review_creation_date는 "n_" 마커를 우연히 포함하는 datetime 컬럼 — 실제 라이브 크래시 재현
+    # (Invalid comparison between dtype=datetime64[ns] and int).
+    df = pd.DataFrame(
+        {
+            "seller_id": ["s1", "s2", "s1", "s2"],
+            "order_purchase_timestamp": pd.to_datetime(
+                ["2018-01-01", "2018-01-02", "2018-01-03", "2018-01-04"]
+            ),
+            "review_creation_date": pd.to_datetime(
+                ["2018-01-05", "2018-01-06", "2018-01-07", "2018-01-08"]
+            ),
+            "delivery_days": [3, 5, 2, 8],
+            "review_score": [4, 5, 3, 2],
+        }
+    )
+    set_context(EdaContext(df=df, question_type="mart"))
+
+    result = load_mart_node({"question_type": "mart", "mart_design": {}})
+
+    assert result["count_column"] != "review_creation_date"
+
+
 def test_load_mart_continues_without_time_columns_when_detection_errors(monkeypatch) -> None:
     df = pd.DataFrame(
         {

@@ -643,6 +643,56 @@ def test_resume_approval_rejects_duplicate_submission(tmp_path, monkeypatch) -> 
     assert calls == [run.run_id]
 
 
+def test_resume_approval_rejects_with_reason(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": False, "reason": "다시 검토가 필요합니다"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "approval"
+    assert seen["resume_payload"] == {"approved": False, "reason": "다시 검토가 필요합니다"}
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_resume_approval_requires_boolean_approved(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_approval", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 422
+
+
 def _succeeded_run(services, *, thread_id: str = "thread_branch_src"):
     run = services.run_service.create_run(
         thread_id=thread_id,

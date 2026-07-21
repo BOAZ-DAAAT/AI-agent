@@ -69,11 +69,15 @@ def _select_count_column(df: pd.DataFrame, measure_cols: list) -> str:
     markers = ("count", "cnt", "frequency", "qty", "quantity", "num_", "n_")
     for col in df.columns:
         lowered = str(col).lower()
-        if col in measure_set and any(marker in lowered for marker in markers):
+        if (
+            col in measure_set
+            and any(marker in lowered for marker in markers)
+            and pd.api.types.is_numeric_dtype(df[col])
+        ):
             return str(col)
     for col in df.columns:
         lowered = str(col).lower()
-        if any(marker in lowered for marker in markers):
+        if any(marker in lowered for marker in markers) and pd.api.types.is_numeric_dtype(df[col]):
             return str(col)
     return ""
 

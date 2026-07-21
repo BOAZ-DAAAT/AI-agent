@@ -20,18 +20,28 @@ from pydantic import BaseModel, Field
 
 
 class FindingSection(BaseModel):
-    """소제목 + 본문 + (있으면) 관련 차트들 — 여러 detail 필드에서 재사용되는 반복 단위."""
+    """방법 선택의 이유와 관찰 결과를 실제 근거에 묶는 반복 단위."""
 
     heading: str
-    body: str
+    rationale: str = ""                              # 왜 이 방법/차트를 사용했는지
+    body: str                                          # 해당 근거에서 무엇을 관찰했는지
     source_label: str | None = None                   # "분포 차트/요약 테이블" 같은 짧은 카테고리 태그
     chart_artifact_ids: list[str] = Field(default_factory=list)   # 복수형 — 한 섹션에 차트 여러 장 가능
+
+
+class EvidenceTable(BaseModel):
+    """분석 결과에 포함된 실제 근거표. UI/Markdown에는 최대 5행만 노출한다."""
+
+    title: str
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SQLSummaryDetail(BaseModel):
     """SQL 단계 — 정합성 확인 → 파생변수 생성 → 데이터마트 설계라는 고유 역할을 반영."""
 
     kind: Literal["sql"] = "sql"
+    design_rationale: str = ""                         # grain/조인/집계를 이렇게 정한 이유
     source_tables: list[str] = Field(default_factory=list)     # 사용한 원천 테이블
     integrity_checks: list[str] = Field(default_factory=list)  # 정합성/결측/중복 처리 항목
     derived_columns: list[FindingSection] = Field(default_factory=list)  # 파생변수 각각(정의·계산식)
@@ -39,6 +49,8 @@ class SQLSummaryDetail(BaseModel):
     mart_columns: list[str] = Field(default_factory=list)      # 최종 마트 컬럼 목록
     mart_preview: list[dict[str, Any]] = Field(default_factory=list)  # 실제 CSV 앞 5행(근거 그대로, LLM이 안 씀)
     sql_snippet: str = ""                                # 실행된 SQL(근거 그대로, LLM이 안 씀)
+    interpretation_scope: list[str] = Field(default_factory=list)
+    handoff: str = ""                                  # 다음 EDA 단계가 이어받을 분석 가능 범위
 
 
 class EDASummaryDetail(BaseModel):
@@ -50,7 +62,9 @@ class EDASummaryDetail(BaseModel):
     statistical_findings: list[FindingSection] = Field(default_factory=list)  # 분포/상관/그룹비교
     hypotheses: list[str] = Field(default_factory=list)        # 제안된 가설 텍스트 요약
     primary_hypothesis: dict[str, Any] = Field(default_factory=dict)  # 근거 그대로 발췌(LLM이 안 씀)
-    charts_generated: list[FindingSection] = Field(default_factory=list)  # 어떤 차트를 왜 만들었는지
+    charts_generated: list[FindingSection] = Field(default_factory=list)  # 구버전 호환용, 신규 생성에서는 비움
+    interpretation_scope: list[str] = Field(default_factory=list)
+    handoff: str = ""                                  # 분석 단계에서 검증할 가설/조건
 
 
 class AnalysisSummaryDetail(BaseModel):
@@ -60,13 +74,18 @@ class AnalysisSummaryDetail(BaseModel):
     method_decision: dict[str, Any] = Field(default_factory=dict)   # 근거 그대로 발췌(LLM이 안 씀)
     hypothesis_tests: list[FindingSection] = Field(default_factory=list)   # H0/H1/판정/근거
     key_statistics: list[FindingSection] = Field(default_factory=list)    # 핵심 수치 근거
+    evidence_tables: list[EvidenceTable] = Field(default_factory=list)    # 원본 analysis_result의 실제 표
+    supporting_charts: list[FindingSection] = Field(default_factory=list) # 분석이 실제로 읽은 차트
+    interpretation: str = ""                            # 검정들을 함께 읽었을 때의 의미
     limitations: list[str] = Field(default_factory=list)
+    handoff: str = ""                                  # 인사이트 단계에서 채택할 결론과 해석 경계
 
 
 class InsightSummaryDetail(BaseModel):
     """인사이트 단계 — 상류 근거 종합 → 사용자 질문 직답이라는 고유 역할을 반영."""
 
     kind: Literal["insight"] = "insight"
+    evidence_synthesis: str = ""                        # 어떤 상류 근거가 결론을 지지하는지
     answer: str = ""
     key_insights: list[str] = Field(default_factory=list)
     action_plan: list[str] = Field(default_factory=list)

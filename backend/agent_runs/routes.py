@@ -207,7 +207,9 @@ def resume_run(
                     detail="이미 재개되었거나 더 이상 승인 대기 상태가 아닙니다.",
                 ) from exc
             raise
-        resume_payload = {"approved": True}
+        resume_payload = {"approved": payload.approved}
+        if payload.reason:
+            resume_payload["reason"] = payload.reason
 
     background_tasks.add_task(
         resume_agent_run,
