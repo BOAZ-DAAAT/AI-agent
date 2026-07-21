@@ -61,6 +61,20 @@ class SupervisorAgent:
                 "supervisor": "langgraph",
             },
         )
+        self.adapter.update_run_status(
+            run.run_id,
+            RunStatus.running,
+            metadata={"query": query, "supervisor": "langgraph"},
+        )
+        append_event = getattr(self.adapter, "append_run_event", None)
+        if append_event is not None:
+            append_event(
+                run.run_id,
+                "run.started",
+                "Supervisor workflow started.",
+                node_name="supervisor",
+                metadata={"thread_id": thread_id},
+            )
 
         try:
             datasource_id = self._resolve_datasource_id(datasource_id)
