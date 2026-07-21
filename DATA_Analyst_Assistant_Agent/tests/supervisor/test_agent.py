@@ -56,6 +56,7 @@ class FakeBackendAdapter:
         event_type,
         message,
         *,
+        event_key=None,
         node_name=None,
         tool_name=None,
         artifact_ids=None,
@@ -68,6 +69,7 @@ class FakeBackendAdapter:
                 "run_id": run_id,
                 "event_type": event_type,
                 "message": message,
+                "event_key": event_key,
                 "node_name": node_name,
                 "metadata": metadata,
             }
@@ -473,6 +475,35 @@ def test_resume_invokes_graph_with_command_resume(monkeypatch) -> None:
     assert config == {"configurable": {"thread_id": "thread_sales_001"}}
 
 
+def test_get_checkpoint_state_reads_without_invoking_graph(monkeypatch) -> None:
+    checkpoint_state = {
+        "thread_id": "thread_sales_001",
+        "current_run_id": "run_resumed_001",
+        "latest_user_query": "월별 매출 추이를 분석해줘",
+        "analysis_plan": {"target_table": "analytics.mart_sales", "goal": "월별 매출 추이"},
+        "agent_results": [{"agent": "sql_agent", "artifact_ids": ["art_sql_1"]}],
+        "accepted_evidence": {},
+        "state_schema_version": 2,
+        "last_completed_node_id": "node_1",
+    }
+    graph = CheckpointResumeGraph(checkpoint_state, result={"unused": True})
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    values = agent.get_checkpoint_state("thread_sales_001")
+
+    assert values == checkpoint_state
+    assert graph.state_reads == [{"configurable": {"thread_id": "thread_sales_001"}}]
+    assert graph.invocations == []
+
+
+def test_get_checkpoint_state_returns_none_without_checkpoint(monkeypatch) -> None:
+    agent = SupervisorAgent(FakeBackendAdapter(), checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: CapturingGraph())
+
+    assert agent.get_checkpoint_state("thread_missing") is None
+
+
 def test_resume_with_clarification_answer_uses_command_resume_and_updates_status(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
     checkpoint_state = {
@@ -576,7 +607,7 @@ def _analysis_review_checkpoint() -> tuple[dict[str, Any], dict[str, Any]]:
         "thread_id": "thread_sales_001",
         "current_run_id": "run_resumed_001",
         "latest_user_query": "매출 분석",
-        "state_schema_version": 5,
+        "state_schema_version": 6,
         "pending_result": {
             "candidate_id": "candidate_001",
             "validation_id": "validation_001",

@@ -22,9 +22,11 @@ from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     ArtifactSummary,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     merge_agent_result,
     stage_candidate_result,
+    wait_active_node,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentContractError, AgentToolResult
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
@@ -689,6 +691,100 @@ def test_finalize_node_preserves_protected_terminal_state_without_report(
     assert result["final_answer"] == "기존 terminal 상태를 보존합니다."
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    ["failed_terminal", "failed_with_recoverable_context"],
+)
+def test_finalize_terminal_failure_closes_active_node(terminal_state: str) -> None:
+    backend = RecordingBackendAdapter()
+    state = _state()
+    state["last_completed_node_id"] = "run_001:node:1"
+    state["node_sequence"] = 1
+    state, active_node, _ = begin_or_retry_agent_node(state, "sql_agent")
+    state["terminal_state"] = terminal_state
+    state["final_answer"] = "복구할 수 없는 오류로 종료합니다."
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision()]),
+        backend,
+    )
+
+    result = node(state)
+    merged = {**state, **result}
+
+    assert merged["active_node"] is None
+    assert merged["last_completed_node_id"] == "run_001:node:1"
+    assert merged["node_sequence"] == 2
+    assert merged["failed_agents"] == ["sql_agent"]
+    assert backend.events[-1]["event_type"] == "agent.failed"
+    assert backend.events[-1]["metadata"]["node_id"] == active_node.node_id
+    assert backend.events[-1]["metadata"]["terminal_state"] == terminal_state
+
+
+def test_finalize_preserves_waiting_node_for_user_approval() -> None:
+    backend = RecordingBackendAdapter()
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
+    state, waiting_node, _ = wait_active_node(
+        state,
+        agent_name="sql_agent",
+        reason="SQL 실행 승인이 필요합니다.",
+    )
+    state["terminal_state"] = "needs_user_approval"
+    state["final_answer"] = "SQL 실행 승인이 필요합니다."
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision()]),
+        backend,
+    )
+
+    result = node(state)
+    merged = {**state, **result}
+
+    assert merged["terminal_state"] == "needs_user_approval"
+    assert merged["active_node"] == waiting_node.model_dump(mode="json")
+    assert backend.events == []
+
+
+def test_finalize_rejects_completed_state_with_active_node() -> None:
+    backend = RecordingBackendAdapter()
+    state = merge_agent_result(
+        _state(),
+        AgentCompactResult(
+            agent="insight",
+            status="success",
+            summary="인사이트 완료",
+            artifact_ids=["artifact_insight"],
+        ),
+    )
+    state, _, _ = begin_or_retry_agent_node(state, "sql_agent")
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision("completed", "완료")]),
+        backend,
+    )
+
+    result = node(state)
+
+    assert result["terminal_state"] == "failed_terminal"
+    assert result["active_node"] is None
+    assert result["error_state"]["reason_code"] == "active_node_in_completed_state"
+    assert backend.events[-1]["event_type"] == "agent.failed"
+
+
+def test_repeated_finalize_does_not_emit_duplicate_agent_failed() -> None:
+    backend = RecordingBackendAdapter()
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
+    state["terminal_state"] = "failed_terminal"
+    state["final_answer"] = "최종 실패"
+    node = make_finalize_node(
+        SequencedDecisionModel([_final_decision(), _final_decision()]),
+        backend,
+    )
+
+    first = {**state, **node(state)}
+    second = {**first, **node(first)}
+
+    assert second["active_node"] is None
+    assert [event["event_type"] for event in backend.events] == ["agent.failed"]
+
+
 def test_decide_next_action_fail_sets_terminal_failure_immediately() -> None:
     node = make_decide_next_action_node(
         SequencedDecisionModel([_next_action_decision("fail")])
@@ -875,9 +971,10 @@ def test_execute_subagent_emits_agent_lifecycle_events() -> None:
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
     assert ("result.staged", "sql_agent") in event_pairs
-    assert ("node.completed", "sql_agent") in event_pairs
+    assert ("agent.completed", "sql_agent") not in event_pairs
+    assert result["active_node"]["status"] == "running"
 
 
 def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> None:
@@ -894,8 +991,9 @@ def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> No
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
     ]
-    assert ("node.started", "sql_agent") in event_pairs
-    assert ("node.failed", "sql_agent") in event_pairs
+    assert ("agent.started", "sql_agent") in event_pairs
+    assert ("agent.failed", "sql_agent") in event_pairs
+    assert result["active_node"] is None
 
 
 def test_execute_subagent_unsupported_action_fails_terminally() -> None:
@@ -1313,8 +1411,9 @@ def test_resolve_candidate_uses_only_approval_required_flag() -> None:
 
 
 def test_resolve_success_with_required_approval_waits_without_promotion() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "analysis_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="analysis_agent",
             status="success",
@@ -1373,8 +1472,9 @@ def test_analysis_plan_sql_fields_are_not_overwritten_by_empty_state_updates() -
 
 
 def test_resolve_candidate_uses_validated_semantic_recommendation() -> None:
+    state, _, _ = begin_or_retry_agent_node(_state(), "sql_agent")
     state = stage_candidate_result(
-        _state(),
+        state,
         AgentCompactResult(
             agent="sql_agent",
             status="success",

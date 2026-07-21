@@ -89,7 +89,18 @@ _FACT_LABELS = {
 }
 
 
-def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef:
+def generate_node_summary(
+    artifact_ids: list[str],
+    runtime: AgentRuntime,
+    *,
+    branch_instruction: str | None = None,
+) -> ArtifactRef:
+    """branch_instruction: 분기(재분석) 시 이 단계에 추가로 반영된 지시사항.
+
+    원본 파이프라인 실행에서는 항상 None이라 기존 동작에 영향이 없다. 분기 실행에서
+    값이 있으면, 이 단계가 그 지시사항을 어떻게 반영했는지 결과 서술에 명시적으로
+    드러나도록 프롬프트에 덧붙인다(_generate_with_llm 참고).
+    """
     if not artifact_ids:
         raise ValueError("generate_node_summary는 artifact_ids가 최소 1개 필요합니다.")
 
@@ -98,6 +109,8 @@ def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> Art
         return cached
 
     evidence = read_node_evidence(artifact_ids, runtime)
+    if branch_instruction and branch_instruction.strip():
+        evidence.facts["branch_instruction"] = branch_instruction.strip()
     result = _generate_with_llm(evidence) if evidence.facts else None
     if result is None:
         result = _fallback_result(evidence)
@@ -106,9 +119,15 @@ def generate_node_summary(artifact_ids: list[str], runtime: AgentRuntime) -> Art
 
 
 def _find_cached(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef | None:
-    """이미 만들어둔 같은 버전 요약이 있으면 그걸 그대로 쓴다(재생성 없음, LLM 호출 0)."""
+    """이미 만들어둔 같은 버전 요약이 있으면 그걸 그대로 쓴다(재생성 없음, LLM 호출 0).
+
+    list_artifacts는 created_at 오름차순(오래된 것부터)이라, 매칭되는 게 여러 개면
+    가장 나중 것(=최신)을 쓴다 — 재생성으로 더 나은 결과가 생겼는데도 옛날 폴백
+    아티팩트를 계속 돌려주는 걸 방지한다.
+    """
     anchor = runtime.adapter.get_artifact(artifact_ids[0])
     wanted = set(artifact_ids)
+    latest: ArtifactRef | None = None
     for record in runtime.adapter.list_artifacts(run_id=anchor.run_id, artifact_type=ArtifactType.file):
         meta = record.metadata
         if meta.get("kind") != "node_summary":
@@ -117,8 +136,8 @@ def _find_cached(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef 
             continue
         if meta.get("summary_version") != _SUMMARY_VERSION:
             continue
-        return record.ref()
-    return None
+        latest = record.ref()
+    return latest
 
 
 def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
@@ -132,11 +151,23 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
     known_chart_ids = {c.artifact_id for c in evidence.charts}
     build_prompt = _PROMPT_BUILDERS[detail_kind]
     parse_result = _RESULT_PARSERS[detail_kind]
+    branch_instruction = str(evidence.facts.get("branch_instruction") or "").strip()
 
     feedback = ""
     for _ in range(_MAX_ATTEMPTS):
         try:
-            raw = llm.invoke(build_prompt(evidence, feedback)).content
+            prompt = build_prompt(evidence, feedback)
+            if branch_instruction:
+                prompt += (
+                    "\n\n[분기 지시사항] 이 결과는 원본 분석에서 분기하여 다음 추가 지시사항을 "
+                    f"반영해 재실행한 것이다: \"{branch_instruction}\"\n"
+                    "이 지시사항을 어떻게 반영했는지 background 또는 conclusion에서 명시적으로 서술하라.\n"
+                    "key_finding(전체를 압축한 한 문장)에도 이 지시사항이 결과에 영향을 줬는지 "
+                    "짧게 드러내라 — 예: '~에도 관계는 유지되었다', '~로 제한하니 검정이 불가했다', "
+                    "'~기준으로도 동일한 경향이 확인되었다'처럼, 지시사항 반영 여부와 결과가 "
+                    "달라졌는지/유지됐는지를 한 문장 안에 압축하라."
+                )
+            raw = llm.invoke(prompt).content
         except Exception:  # noqa: BLE001 — LLM 호출 실패는 폴백으로 처리
             return None
         parsed = _parse_llm_json(raw)

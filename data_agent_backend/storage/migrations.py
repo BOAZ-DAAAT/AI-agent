@@ -225,4 +225,14 @@ MIGRATIONS: list[tuple[int, str]] = [
             ON integrity_summaries(dataset_name, status, created_at);
         """,
     ),
+    (
+        5,
+        """
+        ALTER TABLE run_events ADD COLUMN event_key TEXT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run_event_key
+            ON run_events(run_id, event_key)
+            WHERE event_key IS NOT NULL;
+        """,
+    ),
 ]

@@ -155,6 +155,16 @@ class SupervisorAgent:
                 raise ValueError(f"thread_id={thread_id!r}에 해당하는 checkpoint를 찾지 못했습니다.")
         return self._update_run_status_from_resume_result(result)
 
+    def get_checkpoint_state(self, thread_id: str) -> dict[str, Any] | None:
+        """thread_id의 마지막 체크포인트를 읽기 전용으로 반환한다(그래프를 진행시키지 않음).
+
+        분기(재분석) 트리거가 이전 단계의 artifact_ids/target_table을 알아내는 데 쓴다.
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+        with open_sqlite_checkpointer(self.checkpoint_path) as checkpointer:
+            graph = self._build_runtime_graph(checkpointer)
+            return self._checkpoint_values_from_graph(graph, config)
+
     @classmethod
     def _validated_unchecked_resume(
         cls,
@@ -299,7 +309,7 @@ class SupervisorAgent:
         normalized = normalize_supervisor_state(values)
         if hashes_match:
             updates = commit_candidate(
-                normalized,
+                values,
                 self.adapter,
                 approval_granted=True,
             )

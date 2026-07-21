@@ -91,8 +91,17 @@ def build_result_from_outcome(
     review_request = _review_request_from_payload(result_payload.get("review_request"))
     method_decision = _method_decision_from_payload(result_payload.get("method_decision"))
     if outcome.status == "failed":
-        reason = outcome.critique.feedback if outcome.critique else "did not pass method review"
-        limitations.append(f"Analysis did not pass method review after {outcome.attempts} attempts: {reason}")
+        last_failure = outcome.error_history[-1] if outcome.error_history else None
+        failure_stage = str((last_failure or {}).get("stage") or "")
+        if failure_stage in {"generate", "execute", "result_contract"}:
+            last_error = (last_failure or {}).get("error") or "unknown error"
+            limitations.append(
+                f"Analysis code failed at the {failure_stage} stage after {outcome.attempts} "
+                f"attempts: {last_error}"
+            )
+        else:
+            reason = outcome.critique.feedback if outcome.critique else "did not pass method review"
+            limitations.append(f"Analysis did not pass method review after {outcome.attempts} attempts: {reason}")
         if outcome.early_stop_reason:
             limitations.append(f"Analysis stopped early: {outcome.early_stop_reason}.")
     elif outcome.status == "review_required" and outcome.critique and review_request is None:
@@ -146,6 +155,7 @@ def build_result_from_outcome(
         generated_code=(outcome.code.code if outcome.code else ""),
         code_critique=outcome.critique,
         codegen_attempts=outcome.attempts,
+        error_history=list(outcome.error_history),
     )
     return result.model_dump(mode="json")
 

@@ -10,6 +10,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     SupervisorTerminalState,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
+    ActiveNodeExecution,
     AgentCompactResult,
     ArtifactSummary,
     artifact_ids_by_agent,
@@ -45,6 +46,9 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["state_schema_version"] == 6
     assert state["analysis_rule_context"] is None
     assert state["analysis_rule_retrieval"] == {"status": "not_started"}
+    assert state["active_node"] is None
+    assert state["last_completed_node_id"] is None
+    assert state["node_sequence"] == 0
     assert state["analysis_selection_response"] is None
     assert state["analysis_selection_review_request"] is None
     assert state["analysis_review_decisions"] == []
@@ -52,6 +56,21 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert state["limitations"] == []
     assert state["failure_streaks"] == {}
     assert state["terminal_state"] == "running"
+
+
+def test_active_node_execution_tracks_retry_attempt_without_changing_node() -> None:
+    node = ActiveNodeExecution(
+        node_id="run_001:node:1",
+        agent_name="sql_agent",
+        parent_node_id=None,
+        node_sequence=1,
+        attempt=3,
+    )
+
+    assert node.node_id == "run_001:node:1"
+    assert node.agent_name == "sql_agent"
+    assert node.node_sequence == 1
+    assert node.attempt == 3
 
 
 def test_normalize_v2_validation_arrays_into_v4_history() -> None:
