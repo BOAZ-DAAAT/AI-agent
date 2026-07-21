@@ -46,7 +46,7 @@ def read_node_evidence(artifact_ids: list[str], runtime: AgentRuntime) -> NodeEv
     참고) 0번 인덱스는 final_report(마크다운 리포트, 이 함수가 처리 못 하는 kind)가 걸려
     근거가 통째로 비어버린다(실사례로 확인됨).
 
-    SQL만 예외적으로 여러 아티팩트를 병합한다 — sql_agent는 보통 sql_result(CSV, 5행
+    SQL만 예외적으로 여러 아티팩트를 병합한다 — sql_agent는 보통 sql_result(CSV, 미리보기)
     미리보기)와 sql_plan(실행된 SQL·grain·근거)을 각각 따로 등록하는데, 실제로는 둘 다
     있어야 "무슨 SQL을 실행해서 어떤 마트가 나왔는지"를 온전히 설명할 수 있다.
     """
@@ -113,13 +113,14 @@ def _read_sql_evidence(artifact_id: str, kind: str, runtime: AgentRuntime) -> No
         df = pd.read_csv(io.StringIO(text))
     except Exception:  # noqa: BLE001 — 파싱 실패해도 빈 미리보기로 폴백(EmptyDataError 포함)
         df = pd.DataFrame()
-    preview = df.head(5).where(pd.notna(df.head(5)), None).to_dict(orient="records")
+    preview_df = df.head(10)
+    preview = preview_df.where(pd.notna(preview_df), None).to_dict(orient="records")
     facts = {"columns": list(df.columns), "row_count": int(len(df)), "preview": preview}
     return NodeEvidence(source_kind=kind, facts=facts, code_used="")
 
 
 def _read_sql_evidence_merged(sql_ids: list[str], kinds: dict[str, str], runtime: AgentRuntime) -> NodeEvidence:
-    """sql_plan(SQL 텍스트·grain·근거)과 sql_result(CSV 5행 미리보기)를 합친다.
+    """sql_plan(SQL 텍스트·grain·근거)과 sql_result(CSV 미리보기)를 합친다.
 
     한 아티팩트만으론 "무슨 SQL을 실행해서 어떤 마트가 나왔는지"를 다 설명 못 한다 —
     sql_plan엔 실제 행 데이터가 없고 sql_result엔 SQL 텍스트가 없다.

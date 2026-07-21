@@ -36,11 +36,16 @@ def mart_design_prompt(state) -> str:
 - aggregation_method는 none / SUM / COUNT / COUNT_DISTINCT / MIN / MAX / AVG / DEDUPLICATE 중 하나만 사용
 - 모든 aggregation_method가 none일 때만 preserve_common_grain 사용
 - 하나라도 집계 또는 DEDUPLICATE가 필요하면 aggregate_to_common_grain 사용
-- 질문별 최종 비율, 순위, 최종 판정값, 카테고리 요약 지표는 column_plan에 포함하지 않음
-- 배송 지연 산정 대상 여부, 배송 지연 여부, 지연 일수처럼 후속 지표에 필요한 원자적 파생값은 포함 가능
+- target_metrics마다 최종 표시용 지표와 분석 필수 파생변수를 먼저 구분
+- 관계·분포·상관·구간화·모델링의 직접 입력으로 반복 사용되는 연속형 비율은 분석 필수 파생변수로 분류하여 column_plan에 포함
+- 분석 필수 파생변수는 derived 컬럼으로 선언하고, 상위 계획에 정의된 분자·분모·연산 순서와 grain을 calculation_rule에 그대로 보존하며 임의로 재정의하지 않음
+- 비율의 분모가 0이거나 NULL일 때의 처리 규칙도 calculation_rule에 명시
+- 최종 집계 뒤에만 계산 가능한 표시용 비율, 순위, 최종 판정값, 카테고리 요약 지표는 column_plan에 포함하지 않음
+- 배송 지연 산정 대상 여부, 배송 지연 여부, 지연 일수처럼 후속 분석에 직접 쓰이는 원자적 파생값도 포함 가능
 - metric_support는 고유 target_metrics를 주어진 순서로 정확히 한 번씩 포함
 - metric_support.calculation_grain은 최종 지표 출력 grain이며 전역 지표만 빈 목록 허용
 - 중간 grain과 다단계 계산 순서는 downstream_calculation에 자연어로 기록
+- target_metric 자체를 분석 필수 파생변수로 column_plan에 포함한 경우 required_mart_columns에 해당 output_column을 포함하고 downstream_calculation에는 마트 컬럼을 직접 사용한다고 기록
 - metric_support가 참조하는 calculation_grain과 required_mart_columns는 모두 column_plan의 output_column이어야 함
 - 최종 계획의 required_columns를 마트 컬럼 선택의 우선 근거로 사용
 - 최종 계획의 business_keys를 조인과 key_columns 선택의 우선 근거로 사용

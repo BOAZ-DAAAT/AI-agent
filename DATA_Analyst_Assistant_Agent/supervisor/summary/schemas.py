@@ -47,7 +47,7 @@ class SQLSummaryDetail(BaseModel):
     derived_columns: list[FindingSection] = Field(default_factory=list)  # 파생변수 각각(정의·계산식)
     mart_grain: str = ""                                 # 최종 마트의 grain(행 단위)
     mart_columns: list[str] = Field(default_factory=list)      # 최종 마트 컬럼 목록
-    mart_preview: list[dict[str, Any]] = Field(default_factory=list)  # 실제 CSV 앞 5행(근거 그대로, LLM이 안 씀)
+    mart_preview: list[dict[str, Any]] = Field(default_factory=list)  # 실제 CSV 앞 10행(근거 그대로, LLM이 안 씀)
     sql_snippet: str = ""                                # 실행된 SQL(근거 그대로, LLM이 안 씀)
     interpretation_scope: list[str] = Field(default_factory=list)
     handoff: str = ""                                  # 다음 EDA 단계가 이어받을 분석 가능 범위

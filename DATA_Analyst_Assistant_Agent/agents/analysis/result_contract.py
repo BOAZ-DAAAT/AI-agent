@@ -31,6 +31,7 @@ def normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
         normalized.get("method_decision"),
         notes,
     )
+    normalized["method_decision"] = _fallback_method_decision(normalized, notes)
     _extend_method_notes(normalized, notes)
     return normalized
 
@@ -178,6 +179,103 @@ def _normalize_method_decision(value: Any, notes: list[str]) -> dict[str, Any] |
             notes,
         )
     return decision
+
+
+def _fallback_method_decision(payload: dict[str, Any], notes: list[str]) -> dict[str, Any] | Any:
+    existing = payload.get("method_decision")
+    if isinstance(existing, dict):
+        selected = str(existing.get("selected_method") or "").strip()
+        rationale = str(existing.get("rationale") or "").strip()
+        if selected and rationale:
+            return existing
+
+    selected_method = _infer_selected_method(payload)
+    rationale = _infer_method_rationale(payload)
+    if not selected_method and not rationale:
+        return existing
+
+    fallback = existing if isinstance(existing, dict) else {}
+    fallback["selected_method"] = selected_method or "unspecified_analysis_method"
+    fallback["rationale"] = rationale or "분석 결과와 method_notes를 바탕으로 후처리 단계에서 방법 선택 근거를 복원했습니다."
+    fallback["assumptions_checked"] = _normalize_string_list(
+        fallback.get("assumptions_checked"),
+        "method_decision.assumptions_checked",
+        notes,
+    )
+    fallback["fallbacks_considered"] = _normalize_string_list(
+        fallback.get("fallbacks_considered"),
+        "method_decision.fallbacks_considered",
+        notes,
+    )
+    notes.append("Filled missing method_decision from generated analysis evidence.")
+    return fallback
+
+
+def _infer_selected_method(payload: dict[str, Any]) -> str:
+    tests = payload.get("hypothesis_tests")
+    if isinstance(tests, list):
+        for test in tests:
+            if not isinstance(test, dict):
+                continue
+            name = str(test.get("test_name") or "").strip()
+            if name:
+                return name
+
+    for note in _all_method_text(payload):
+        lowered = note.casefold()
+        if "spearman" in lowered:
+            return "spearman_correlation"
+        if "pearson" in lowered:
+            return "pearson_correlation"
+        if "kruskal" in lowered:
+            return "kruskal_wallis"
+        if "mann-whitney" in lowered or "mann whitney" in lowered:
+            return "mann_whitney_u"
+        if "chi-square" in lowered or "chi square" in lowered:
+            return "chi_square_test"
+        if "regression" in lowered or "회귀" in note:
+            return "regression_analysis"
+        if "trend" in lowered or "추세" in note:
+            return "trend_analysis"
+        if "correlation" in lowered or "상관" in note:
+            return "correlation_analysis"
+    return ""
+
+
+def _infer_method_rationale(payload: dict[str, Any]) -> str:
+    for note in payload.get("method_notes") or []:
+        text = str(note or "").strip()
+        if text:
+            return text
+    for field in ("interpretation", "summary"):
+        value = payload.get(field)
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        else:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _all_method_text(payload: dict[str, Any]) -> list[str]:
+    collected: list[str] = []
+    for field in ("summary",):
+        text = str(payload.get(field) or "").strip()
+        if text:
+            collected.append(text)
+    for field in ("method_notes", "interpretation", "findings", "limitations"):
+        value = payload.get(field)
+        if isinstance(value, list):
+            collected.extend(str(item).strip() for item in value if str(item).strip())
+        else:
+            text = str(value or "").strip()
+            if text:
+                collected.append(text)
+    return collected
 
 
 def _normalize_string_list(value: Any, field: str, notes: list[str]) -> list[str]:

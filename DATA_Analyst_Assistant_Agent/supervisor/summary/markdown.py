@@ -91,29 +91,18 @@ def _render_service_sql(detail: SQLSummaryDetail) -> list[str]:
     lines: list[str] = []
     if detail.design_rationale:
         lines += ["## 데이터 구성 논리", "", detail.design_rationale, ""]
-    if detail.source_tables:
-        tables = " · ".join(f"`{table}`" for table in detail.source_tables)
-        lines += [f"사용한 원천 테이블: {tables}", ""]
-    if detail.sql_snippet:
-        lines += [
-            "<details>", "<summary><strong>실제 실행 SQL 보기</strong></summary>", "",
-            "```sql", detail.sql_snippet, "```", "", "</details>", "",
-        ]
     if detail.mart_grain or detail.mart_columns or detail.mart_preview:
-        lines += ["## 구성된 데이터마트", ""]
-        if detail.mart_grain:
-            lines += [f"분석 단위: {detail.mart_grain}", ""]
+        lines += ["## 최종 데이터마트", ""]
         if detail.mart_columns:
             columns = ", ".join(f"`{column}`" for column in detail.mart_columns)
             lines += [f"포함 컬럼: {columns}", ""]
         if detail.mart_preview:
-            lines += [*_render_table(detail.mart_preview[:5]), ""]
+            lines += [*_render_table(detail.mart_preview[:10]), ""]
     if detail.derived_columns:
         lines += ["<details>", "<summary><strong>파생 변수 정의 보기</strong></summary>", ""]
         lines += _kv_table(("컬럼", "정의"), [(item.heading, item.body) for item in detail.derived_columns])
         lines += ["", "</details>", ""]
     lines += _service_scope(detail.interpretation_scope)
-    lines += _service_handoff(detail.handoff)
     return lines
 
 
@@ -290,24 +279,19 @@ def _render_chart_section(section: FindingSection, chart_map: dict[str, str]) ->
 # ─────────────────────────────
 def _render_sql_detail(detail: SQLSummaryDetail, chart_map: dict[str, str]) -> list[str]:
     lines: list[str] = []
-    if detail.source_tables:
-        lines += ["## 사용한 원천 테이블", "", " · ".join(f"`{t}`" for t in detail.source_tables), ""]
     lines += _callout("NOTE", "정합성 확인", detail.integrity_checks)
     if detail.derived_columns:
         lines += ["## 파생 변수", ""]
         lines += _kv_table(("컬럼", "설명"), [(s.heading, s.body) for s in detail.derived_columns])
         lines += [""]
-    if detail.mart_grain or detail.mart_columns:
+    if detail.mart_columns:
         rows = []
-        if detail.mart_grain:
-            rows.append(("grain", detail.mart_grain))
-        if detail.mart_columns:
-            rows.append(("컬럼", ", ".join(detail.mart_columns)))
+        rows.append(("컬럼", ", ".join(detail.mart_columns)))
         lines += ["## 데이터마트 설계", ""]
         lines += _kv_table(("항목", "값"), rows)
         lines += [""]
     if detail.mart_preview:
-        lines += ["### 최종 구성된 데이터마트는 다음과 같습니다", "", *_render_table(detail.mart_preview), ""]
+        lines += ["## 최종 데이터마트", "", *_render_table(detail.mart_preview), ""]
     return lines
 
 

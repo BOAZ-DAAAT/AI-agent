@@ -4,6 +4,9 @@ import pandas as pd
 from pydantic import ValidationError
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.graph import run_analysis_workflow
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
+    GENERATE_SYSTEM_PROMPT,
+)
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisIntent,
     AnalysisResult,
@@ -185,6 +188,16 @@ def test_graph_blocks_sql_datamart_with_incomplete_analysis_contract() -> None:
     assert terminal == "analysis_contract_invalid"
     assert parsed.status == "failed"
     assert any("row_grain" in limitation for limitation in parsed.limitations)
+
+
+def test_generate_prompt_guards_entity_sample_filters() -> None:
+    prompt = GENERATE_SYSTEM_PROMPT.format(primitives=[])
+
+    assert "exclude entities below a sample-size threshold" in prompt
+    assert 'df.groupby("seller_id")["order_id"].nunique()' in prompt
+    assert "Do NOT treat a pre-existing" in prompt
+    assert "seller_order_count" in prompt
+    assert "do not describe NaN/None statistics" in prompt
 
 
 def test_graph_repeated_execute_failure_is_labeled_execution_failed() -> None:
