@@ -138,6 +138,76 @@ def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> N
     assert events_response.json()[0]["node_name"] == "supervisor"
 
 
+def test_related_events_returns_branch_family_siblings(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    root = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    first_branch = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "branched_from_run_id": root.run_id},
+    )
+    second_branch = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "branched_from_run_id": root.run_id},
+    )
+    unrelated = services.run_service.create_run(
+        thread_id="thread_other",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+
+    root_event = services.run_service.append_event(
+        root.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        metadata={"node_id": "root_sql"},
+    )
+    first_branch_event = services.run_service.append_event(
+        first_branch.run_id,
+        "agent.completed",
+        "EDA branch completed",
+        node_name="eda_agent",
+        metadata={"node_id": "branch_one_eda"},
+    )
+    second_branch_event = services.run_service.append_event(
+        second_branch.run_id,
+        "agent.started",
+        "Analysis branch started",
+        node_name="analysis_agent",
+        metadata={"node_id": "branch_two_analysis"},
+    )
+    unrelated_event = services.run_service.append_event(
+        unrelated.run_id,
+        "agent.completed",
+        "Unrelated completed",
+        node_name="sql_agent",
+        metadata={"node_id": "unrelated_sql"},
+    )
+
+    response = client.get(
+        f"/agent-runs/{second_branch.run_id}/related-events",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    event_ids = {event["event_id"] for event in response.json()}
+    assert root_event.event_id in event_ids
+    assert first_branch_event.event_id in event_ids
+    assert second_branch_event.event_id in event_ids
+    assert unrelated_event.event_id not in event_ids
+
+
 def test_get_completed_node_summary_returns_registered_summary(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)
