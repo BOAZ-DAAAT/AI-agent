@@ -108,6 +108,15 @@ def _default_analysis_rule_search(query: str, **kwargs: Any) -> list[Any]:
     return search_company_context(query, **kwargs)
 
 
+ANALYSIS_RULE_CONTEXT_LIMIT = 12
+ANALYSIS_RULE_CANDIDATE_LIMIT = 24
+ANALYSIS_RULE_RETRIEVAL_GROUPS = (
+    ("analysis_query_rule", 5),
+    ("analysis_foundation", 6),
+    ("analysis_integrity_caution", 1),
+)
+
+
 def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | None = None):
     rule_search = search or _default_analysis_rule_search
 
@@ -125,11 +134,7 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
             }
 
         try:
-            hits = rule_search(
-                query,
-                top_k=12,
-                metadata_filter={"doc_type": {"$in": ["analysis_query_rule", "analysis_foundation", "analysis_integrity_caution"]}},
-            )
+            hits = _retrieve_diverse_analysis_hits(rule_search, query)
         except Exception as exc:
             status = (
                 "disabled"
@@ -170,7 +175,7 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 extra={
                     "user_query": query,
                     "document": _rule_document_payload(hits[0]),
-                    "documents": [_rule_document_payload(hit) for hit in hits[:12]],
+                    "documents": [_rule_document_payload(hit) for hit in hits],
                 },
             )
         except Exception as exc:
@@ -203,7 +208,8 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 ],
             }
 
-        context = _analysis_rule_context(hits[:12], extraction)
+        context = _analysis_rule_context(hits, extraction)
+        retrieved_documents = _retrieved_document_summaries(hits)
         return {
             **base_updates,
             "analysis_rule_context": context,
@@ -212,8 +218,10 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 "document_id": context.get("document_id", ""),
                 "query_type": context.get("query_type", ""),
                 "related_query_types": list(context.get("related_query_types", [])),
-                "hit_count": len(hits[:12]),
+                "hit_count": len(hits),
+                "unique_document_count": len(retrieved_documents),
                 "score": float(_hit_value(hits[0], "score", 0.0) or 0.0),
+                "retrieved_documents": retrieved_documents,
                 "reason": extraction.reason,
             },
             "run_events": [
@@ -222,11 +230,66 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                     "type": "analysis_rule_retrieval",
                     "status": "success",
                     "document_id": context.get("document_id", ""),
+                    "retrieved_documents": retrieved_documents,
                 },
             ],
         }
 
     return retrieve_analysis_rules_node
+
+
+def _retrieve_diverse_analysis_hits(search: Any, query: str) -> list[Any]:
+    """Reserve final planning context for both intent rules and schema-grounded foundations."""
+    selected: list[Any] = []
+    seen_document_ids: set[str] = set()
+    candidates: list[Any] = []
+
+    for doc_type, quota in ANALYSIS_RULE_RETRIEVAL_GROUPS:
+        group_hits = search(
+            query,
+            top_k=ANALYSIS_RULE_CANDIDATE_LIMIT,
+            metadata_filter={"doc_type": doc_type},
+        )
+        candidates.extend(group_hits)
+        for hit in _best_hit_per_document(group_hits):
+            document_id = str(_hit_value(hit, "document_id", "")).strip()
+            if document_id in seen_document_ids:
+                continue
+            selected.append(hit)
+            seen_document_ids.add(document_id)
+            if sum(1 for item in selected if _hit_metadata(item).get("doc_type") == doc_type) >= quota:
+                break
+
+    for hit in _best_hit_per_document(candidates):
+        if len(selected) >= ANALYSIS_RULE_CONTEXT_LIMIT:
+            break
+        document_id = str(_hit_value(hit, "document_id", "")).strip()
+        if document_id in seen_document_ids:
+            continue
+        selected.append(hit)
+        seen_document_ids.add(document_id)
+
+    return selected[:ANALYSIS_RULE_CONTEXT_LIMIT]
+
+
+def _best_hit_per_document(hits: list[Any]) -> list[Any]:
+    best_hits: dict[str, Any] = {}
+    for hit in hits:
+        document_id = str(_hit_value(hit, "document_id", "")).strip()
+        key = document_id or str(_hit_value(hit, "record_id", ""))
+        current = best_hits.get(key)
+        if current is None or _planning_hit_rank(hit) > _planning_hit_rank(current):
+            best_hits[key] = hit
+    return sorted(best_hits.values(), key=_planning_hit_rank, reverse=True)
+
+
+def _planning_hit_rank(hit: Any) -> tuple[float, int]:
+    record_type = str(_hit_metadata(hit).get("record_type") or "")
+    record_type_priority = {"rule_atom": 2, "section_chunk": 1, "example": 0}.get(record_type, 1)
+    score = float(_hit_value(hit, "score", 0.0) or 0.0)
+    # Example records can be linguistically close but are weaker planning context.
+    example_penalty = 0.05 if record_type == "example" else 0.0
+    return (score - example_penalty, record_type_priority)
 
 
 def _analysis_rule_context(
@@ -295,6 +358,30 @@ def _rule_document_payload(hit: Any) -> dict[str, Any]:
         "metadata": _hit_value(hit, "metadata", {}),
         "content": _hit_value(hit, "text", ""),
     }
+
+
+def _retrieved_document_summaries(hits: list[Any]) -> list[dict[str, Any]]:
+    """Keep retrieval traceable without retaining full retrieved document text in state."""
+    summaries: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        metadata = _hit_metadata(hit)
+        document_id = str(_hit_value(hit, "document_id", ""))
+        key = document_id or str(_hit_value(hit, "record_id", ""))
+        summary = summaries.setdefault(
+            key,
+            {
+                "document_id": document_id,
+                "doc_type": str(metadata.get("doc_type") or ""),
+                "score": round(float(_hit_value(hit, "score", 0.0) or 0.0), 6),
+                "sections": [],
+                "record_count": 0,
+            },
+        )
+        section = str(metadata.get("section") or "")
+        if section and section not in summary["sections"]:
+            summary["sections"].append(section)
+        summary["record_count"] += 1
+    return list(summaries.values())
 
 
 def _hit_value(hit: Any, key: str, default: Any) -> Any:
@@ -770,6 +857,59 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                             "node": "execute_subagent",
                             "message": message,
                             "reason_code": "agent_contract_mismatch",
+                            "retryable": False,
+                        },
+                    },
+                ),
+            }
+
+        except Exception as exc:  # noqa: BLE001
+            reason_code = "agent_execution_error"
+            message = f"{agent_name} execution failed in execute_subagent: {type(exc).__name__}: {exc}"
+            failed_state, failed_node, failed_event_type = fail_active_node(
+                working_state,
+                agent_name=agent_name,
+                reason=message,
+                reason_code=reason_code,
+            )
+            emit_node_lifecycle_event(
+                getattr(subagent_adapter, "backend_adapter", None),
+                failed_state,
+                failed_event_type,
+                failed_node,
+                message,
+                action=action,
+                metadata={
+                    "reason_code": reason_code,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            failed_agents = list(failed_state.get("failed_agents", []))
+            if agent_name not in failed_agents:
+                failed_agents.append(agent_name)
+            return {
+                **failed_state,
+                **_terminal_failure_updates(
+                    failed_state,
+                    "execute_subagent",
+                    message,
+                    extra_updates={
+                        "pending_result": None,
+                        "last_agent_result": {},
+                        "failed_agents": failed_agents,
+                        "completed_agents": list(failed_state.get("completed_agents", [])),
+                        "accepted_evidence": {
+                            agent: list(items)
+                            for agent, items in failed_state.get(
+                                "accepted_evidence",
+                                {},
+                            ).items()
+                        },
+                        "error_state": {
+                            "node": "execute_subagent",
+                            "message": message,
+                            "reason_code": reason_code,
+                            "exception_type": type(exc).__name__,
                             "retryable": False,
                         },
                     },

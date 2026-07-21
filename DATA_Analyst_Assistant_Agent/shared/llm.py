@@ -13,6 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_LLM_MODEL = "~openai/gpt-5"
+DEFAULT_LLM_TIMEOUT_SECONDS = 90.0
 
 
 def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_LLM_MODEL) -> str:
@@ -55,6 +56,7 @@ def get_chat_model(
         "model": model or get_model_name(model_env, default_model),
         "temperature": temperature,
         "api_key": api_key,
+        "request_timeout": float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
         **kwargs,
     }
     if base_url:
