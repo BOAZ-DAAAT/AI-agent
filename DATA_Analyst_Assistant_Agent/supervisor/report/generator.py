@@ -73,7 +73,11 @@ def _find_cached(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactRef 
 
 
 def _generate_with_llm(evidence: PathEvidence) -> ReportResult | None:
-    llm = get_chat_model(model=os.getenv("REPORT_MODEL") or None, model_env="LLM_MODEL")
+    llm = get_chat_model(
+        model=os.getenv("REPORT_MODEL") or None,
+        model_env="LLM_MODEL",
+        max_tokens=int(os.getenv("REPORT_MAX_TOKENS", "8192")),
+    )
     facts_by_stage = {stage.stage: stage.facts for stage in evidence.stages}
     numbers = collect_numbers(facts_by_stage)
     corpus = json.dumps(facts_by_stage, ensure_ascii=False, default=str)

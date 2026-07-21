@@ -33,3 +33,37 @@ def test_get_chat_model_sets_default_request_timeout(monkeypatch) -> None:
 
     assert isinstance(model, FakeChatOpenAI)
     assert captured["request_timeout"] == 12.5
+
+
+def test_get_chat_model_caps_default_max_tokens(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_module, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+
+    model = get_chat_model(model="openai/gpt-test")
+
+    assert isinstance(model, FakeChatOpenAI)
+    assert captured["max_tokens"] == 4096
+
+
+def test_get_chat_model_respects_explicit_max_tokens(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_module, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+
+    model = get_chat_model(model="openai/gpt-test", max_tokens=512)
+
+    assert isinstance(model, FakeChatOpenAI)
+    assert captured["max_tokens"] == 512

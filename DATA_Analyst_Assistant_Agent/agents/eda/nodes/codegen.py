@@ -33,6 +33,15 @@ from DATA_Analyst_Assistant_Agent.chart.contract import ChartRequest
 _MAX_RESULT_CELLS = 200  # 결과가 이보다 크면 잘라 실음(연산 후 방어 — 하드 리소스 보장은 아님)
 
 
+def _summarize_llm_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "max_tokens" in text or "more credits" in text or "402" in text:
+        return "llm_token_budget_exceeded"
+    if "timeout" in text or "timed out" in text:
+        return "llm_timeout"
+    return f"llm_error:{type(exc).__name__}"
+
+
 def _judge_prompt(question: str, columns: list) -> str:
     return (
         "너는 EDA 보조자다. 아래 질문이 주어진 데이터프레임(df)의 컬럼만으로 "
@@ -308,7 +317,7 @@ def codegen_node(state: EDAState) -> dict:
         raw = get_llm().invoke(_judge_prompt(q, columns)).content
         judged = safe_json_parse(raw, {"computable": False, "reason": "판단 파싱 실패"})
     except Exception as exc:  # noqa: BLE001
-        return _out_of_domain(q, f"judge_error: {exc}")
+        return _out_of_domain(q, f"judge_error: {_summarize_llm_error(exc)}")
     if not judged.get("computable"):
         return _out_of_domain(q, str(judged.get("reason", "not_computable")))
 
