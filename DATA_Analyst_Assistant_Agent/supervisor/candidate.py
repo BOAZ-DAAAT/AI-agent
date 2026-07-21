@@ -98,9 +98,10 @@ def _enrich_step_summary_with_node_finding(
         ref = generate_node_summary(step_summary.artifact_ids, runtime)
         payload = json.loads(backend_adapter.read_artifact_text(ref.artifact_id))
         key_finding = str(payload.get("key_finding") or "").strip()
-        if not key_finding:
-            return step_summary
-        return step_summary.model_copy(update={"summary": key_finding})
+        updates: dict[str, Any] = {"summary_artifact_id": ref.artifact_id}
+        if key_finding:
+            updates["summary"] = key_finding
+        return step_summary.model_copy(update=updates)
     except Exception:  # noqa: BLE001 - 서머리는 부가 정보, 실패해도 완료 흐름은 계속
         return step_summary
 
@@ -131,7 +132,7 @@ def validate_candidate(
             code="approval_contract_mismatch",
             source="supervisor",
             severity="error",
-            disposition="blocking",
+            disposition="error",
             message="status=approval_required이지만 approval.required=false입니다.",
         )
     ]
@@ -207,7 +208,7 @@ def validate_candidate(
                         code="semantic_model_failed",
                         source="supervisor",
                         severity="error",
-                        disposition="blocking",
+                        disposition="error",
                         message=reason,
                     )
                 ],
@@ -248,7 +249,7 @@ def validate_candidate(
                 code="semantic_validation_failed",
                 source="supervisor",
                 severity="error",
-                disposition="blocking",
+                disposition="error",
                 message=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
                 details={"missing_evidence": list(semantic_decision.missing_evidence)},
             )
@@ -383,7 +384,7 @@ def commit_candidate(
         finding.message
         for check in record.checks
         for finding in check.findings
-        if finding.disposition == "limitation" and finding.message
+        if finding.disposition in {"warning", "limitation"} and finding.message
     ]
     if limitation_messages:
         working["limitations"] = _append_unique(

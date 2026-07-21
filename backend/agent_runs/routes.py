@@ -18,6 +18,7 @@ from data_agent_backend.models.runs import RunStatus
 
 from .event_stream import EVENT_STREAM_POLL_INTERVAL_SECONDS, stream_run_events
 from .schemas import (
+    AgentNodeSummaryResponse,
     AgentRunBranchRequest,
     AgentRunBranchResponse,
     AgentRunCreateRequest,
@@ -27,6 +28,8 @@ from .schemas import (
 )
 from .service import (
     BranchPlanError,
+    NodeSummaryNotFoundError,
+    get_node_summary,
     launch_agent_run,
     new_thread_id,
     prepare_branch_plan,
@@ -36,6 +39,40 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+@router.get(
+    "/{run_id}/nodes/{node_id}/summary",
+    response_model=AgentNodeSummaryResponse,
+)
+def read_agent_node_summary(
+    run_id: str,
+    node_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentNodeSummaryResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    try:
+        result = get_node_summary(services=services, run_id=run_id, node_id=node_id)
+    except NodeSummaryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return AgentNodeSummaryResponse(
+        run_id=run_id,
+        node_id=result.node_id,
+        agent_name=result.agent_name,
+        summary_artifact_id=result.summary_artifact_id,
+        summary=result.summary,
+    )
 
 
 @router.post("", response_model=AgentRunResponse, status_code=202)

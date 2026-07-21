@@ -225,6 +225,7 @@ class AgentState(TypedDict):
     retry_hint: Dict[str, Any]
     validation_summary: Dict[str, Any]
     retry_count: int
+    max_retries: int
     feedback: str
     error: str
     generation_source: str

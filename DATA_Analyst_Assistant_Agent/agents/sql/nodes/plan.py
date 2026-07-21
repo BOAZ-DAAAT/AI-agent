@@ -76,10 +76,13 @@ def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[
     if route_kind not in {"simple", "comprehensive"}:
         raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
 
+    target_metrics = _list_of_str(parsed.get("target_metrics"))
+    if route_kind == "comprehensive" and not target_metrics:
+        target_metrics = ["mart_metric"]
     normalized = {
         "route_kind": route_kind,
         "question_type": str(parsed.get("question_type") or "").strip(),
-        "target_metrics": _list_of_str(parsed.get("target_metrics")),
+        "target_metrics": target_metrics,
         "analysis_entities": _list_of_str(parsed.get("analysis_entities")),
         "dimensions": _list_of_str(parsed.get("dimensions")),
         "filters": _list_of_str(parsed.get("filters")),

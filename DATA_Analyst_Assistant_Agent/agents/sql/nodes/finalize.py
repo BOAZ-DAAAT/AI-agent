@@ -1,5 +1,3 @@
-"""finalize_answer 노드: 검증 통과 후 최종 답변 생성."""
-
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
@@ -11,6 +9,7 @@ def _format_statement_results(state: AgentState) -> str:
     statement_results = list(state.get("statement_results") or [])
     if not statement_results:
         return format_result_rows(state.get("sql_result"), max_rows=5)
+
     chunks: list[str] = []
     for item in statement_results[:5]:
         chunks.append(
@@ -20,13 +19,20 @@ def _format_statement_results(state: AgentState) -> str:
     return "\n".join(chunks)
 
 
+def _failure_reason(state: AgentState) -> str:
+    retry_messages = ((state.get("retry_hint") or {}).get("details") or {}).get("messages") or []
+    if retry_messages:
+        return str(retry_messages[0])
+    return str(state.get("error") or state["validation"].get("reason") or "")
+
+
 def finalize_answer(state: AgentState):
     if state["validation"].get("result") != "valid":
         return {
             "final_answer": (
-                "검증 실패\n"
-                f"사유: {state['validation'].get('reason')}\n"
-                f"마지막 SQL: {state['sql_draft'].get('sql')}"
+                "validation failed\n"
+                f"reason: {_failure_reason(state)}\n"
+                f"last SQL: {state['sql_draft'].get('sql')}"
             )
         }
 
@@ -35,17 +41,17 @@ def finalize_answer(state: AgentState):
     if route_kind == "comprehensive":
         return {
             "final_answer": (
-                "comprehensive 경로로 datamart 생성 SQL을 작성하고 실행했습니다.\n"
-                f"대상 테이블: {state.get('sql_draft', {}).get('target_table') or '미지정'}\n"
-                f"실행 결과 미리보기: {_format_statement_results(state)}\n"
-                f"최종 SQL:\n{sql_text}"
+                "comprehensive route created and executed a datamart SQL.\n"
+                f"target table: {state.get('sql_draft', {}).get('target_table') or 'unspecified'}\n"
+                f"result preview: {_format_statement_results(state)}\n"
+                f"final SQL:\n{sql_text}"
             )
         }
     return {
         "final_answer": (
-            "simple 경로로 조회 SQL을 작성하고 실행했습니다.\n"
-            f"행 수: {state.get('row_count', 0)}\n"
-            f"실행 결과 미리보기: {_format_statement_results(state)}\n"
-            f"최종 SQL:\n{sql_text}"
+            "simple route created and executed a query SQL.\n"
+            f"rows: {state.get('row_count', 0)}\n"
+            f"result preview: {_format_statement_results(state)}\n"
+            f"final SQL:\n{sql_text}"
         )
     }

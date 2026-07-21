@@ -126,7 +126,7 @@ def test_top_level_group_by_still_flagged_when_policy_preserves_grain() -> None:
 # ── required_aggregations 계약이 comprehensive(datamart_creation)에도 적용된다 (RFM류 파생값 누락) ──
 
 
-def test_missing_required_aggregation_is_warning_for_comprehensive_route() -> None:
+def test_missing_required_aggregation_is_diagnostic_for_comprehensive_route() -> None:
     plan = {
         "route_kind": "comprehensive",
         "required_aggregations": ["SUM", "COUNT", "MAX"],
@@ -139,12 +139,15 @@ def test_missing_required_aggregation_is_warning_for_comprehensive_route() -> No
 
     findings = validate_sql_intent(plan, sql_draft)
 
-    intent_findings = [f for f in findings if f["category"] == "intent_mismatch"]
-    assert intent_findings
-    assert {f["severity"] for f in intent_findings} == {"warning"}
+    hint_findings = [f for f in findings if f["category"] == "semantic_hint_not_detected"]
+    assert hint_findings
+    assert {f["severity"] for f in hint_findings} == {"info"}
+    assert {f["disposition"] for f in hint_findings} == {"diagnostic"}
+    assert {f["retryable"] for f in hint_findings} == {False}
     summary = summarize_validation(findings)
     assert summary["result"] == "valid"
     assert summary["feedback"] == ""
+    assert summary["retry_hint"]["reason_code"] == "none"
 
 
 def test_present_required_aggregations_pass_for_comprehensive_route() -> None:
@@ -221,7 +224,7 @@ def test_required_aggregation_expressions_are_matched_by_function_semantics() ->
     assert not any(f["category"] == "intent_mismatch" for f in findings)
 
 
-def test_count_distinct_contract_warns_for_plain_count_only() -> None:
+def test_count_distinct_contract_records_diagnostic_for_plain_count_only() -> None:
     plan = {
         "route_kind": "comprehensive",
         "required_aggregations": ["COUNT_DISTINCT"],
@@ -237,5 +240,41 @@ def test_count_distinct_contract_warns_for_plain_count_only() -> None:
 
     findings = validate_sql_intent(plan, sql_draft)
 
-    assert any(f["category"] == "intent_mismatch" and f["severity"] == "warning" for f in findings)
+    assert any(
+        f["category"] == "semantic_hint_not_detected"
+        and f["severity"] == "info"
+        and f["disposition"] == "diagnostic"
+        for f in findings
+    )
     assert summarize_validation(findings)["result"] == "valid"
+
+
+def test_case_when_required_feature_is_detected_in_nested_mart_sql() -> None:
+    plan = {
+        "route_kind": "comprehensive",
+        "required_aggregations": ["SUM", "COUNT_DISTINCT", "CASE WHEN"],
+    }
+    sql_draft = {
+        "sql": (
+            "CREATE TABLE analytics.mart_customer_purchase_segment AS "
+            "SELECT customer_unique_id, total_purchase_amount, purchase_frequency, purchase_segment "
+            "FROM ("
+            "  SELECT c.customer_unique_id, "
+            "  SUM(o.order_item_total) AS total_purchase_amount, "
+            "  COUNT(DISTINCT o.order_id) AS purchase_frequency, "
+            "  CASE "
+            "    WHEN SUM(o.order_item_total) >= 1000 AND COUNT(DISTINCT o.order_id) >= 10 THEN 'high_high' "
+            "    WHEN SUM(o.order_item_total) >= 1000 THEN 'high_low' "
+            "    WHEN COUNT(DISTINCT o.order_id) >= 10 THEN 'low_high' "
+            "    ELSE 'low_low' "
+            "  END AS purchase_segment "
+            "  FROM customers c JOIN orders o ON o.customer_id = c.customer_id "
+            "  GROUP BY c.customer_unique_id"
+            ") AS mart_src"
+        ),
+        "source_tables": [],
+    }
+
+    findings = validate_sql_intent(plan, sql_draft)
+
+    assert not any(f["category"] == "intent_mismatch" for f in findings)

@@ -324,7 +324,7 @@ def test_validate_retryable_failure_fails_after_retry_limit() -> None:
     assert decision.next_action == "fail"
 
 
-def test_blocking_finding_takes_priority_over_approval() -> None:
+def test_error_finding_takes_priority_over_approval() -> None:
     state = _state()
     result = AgentCompactResult(
         agent="sql_agent",
@@ -335,7 +335,7 @@ def test_blocking_finding_takes_priority_over_approval() -> None:
                 code="invalid_schema",
                 source="local_check",
                 severity="error",
-                disposition="blocking",
+                disposition="error",
                 message="스키마가 잘못되었습니다.",
             )
         ],
@@ -348,7 +348,7 @@ def test_blocking_finding_takes_priority_over_approval() -> None:
     assert decision.next_action == "fail"
 
 
-def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
+def test_retryable_error_routes_to_retry_instead_of_success() -> None:
     state = _state()
     result = AgentCompactResult(
         agent="sql_agent",
@@ -358,8 +358,8 @@ def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
             ValidationFinding(
                 code="invalid_join_plan",
                 source="sql_langgraph",
-                severity="warning",
-                disposition="retry_required",
+                severity="error",
+                disposition="error",
                 message="조인 계획을 다시 생성해야 합니다.",
                 retryable=True,
             )
@@ -372,7 +372,7 @@ def test_retry_required_warning_routes_to_retry_instead_of_success() -> None:
     assert decision.next_action == "call_sql_agent"
 
 
-def test_explicit_failure_takes_priority_over_blocking_finding_and_approval() -> None:
+def test_explicit_failure_takes_priority_over_error_finding_and_approval() -> None:
     state = _state()
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -380,11 +380,11 @@ def test_explicit_failure_takes_priority_over_blocking_finding_and_approval() ->
         summary="분석 실패",
         findings=[
             ValidationFinding(
-                code="blocking_output",
+                code="error_output",
                 source="analysis_agent",
                 severity="error",
-                disposition="blocking",
-                message="blocking finding",
+                disposition="error",
+                message="error finding",
             )
         ],
         retry_hint=RetryHint(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from contextlib import contextmanager
@@ -20,9 +21,78 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, S
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
+from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
 
 
 _SESSION_ENV_LOCK = threading.Lock()
+
+
+class NodeSummaryNotFoundError(Exception):
+    """완료 노드 또는 해당 노드의 상세 서머리를 찾지 못했을 때."""
+
+
+@dataclass(frozen=True)
+class NodeSummaryLookup:
+    node_id: str
+    agent_name: str
+    summary_artifact_id: str
+    summary: NodeSummaryResult
+
+
+def get_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    completed_event = next(
+        (
+            event
+            for event in reversed(services.run_service.list_events(run_id))
+            if event.event_type == "agent.completed"
+            and event.metadata.get("node_id") == node_id
+        ),
+        None,
+    )
+    if completed_event is None:
+        raise NodeSummaryNotFoundError("완료된 노드를 찾을 수 없습니다.")
+
+    summary_metadata = completed_event.metadata.get("summary")
+    summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
+    summary_artifact_id = summary_metadata.get("summary_artifact_id")
+    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
+        source_artifact_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
+        source_ids = {item for item in source_artifact_ids if isinstance(item, str)}
+        for artifact in reversed(services.artifact_registry.list_artifacts(run_id=run_id, type="file")):
+            metadata = artifact.metadata
+            if metadata.get("kind") != "node_summary":
+                continue
+            if set(metadata.get("source_artifact_ids") or []) == source_ids and source_ids:
+                summary_artifact_id = artifact.artifact_id
+                break
+
+    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리가 아직 생성되지 않았습니다.")
+
+    try:
+        artifact = services.artifact_registry.get_artifact(summary_artifact_id)
+    except Exception as exc:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리 artifact를 찾을 수 없습니다.") from exc
+    if artifact.run_id != run_id or artifact.metadata.get("kind") != "node_summary":
+        raise NodeSummaryNotFoundError("실행에 속한 노드 서머리가 아닙니다.")
+
+    try:
+        payload = json.loads(services.artifact_store.read_text(summary_artifact_id))
+        summary = NodeSummaryResult.model_validate(payload)
+    except Exception as exc:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리 형식이 올바르지 않습니다.") from exc
+
+    return NodeSummaryLookup(
+        node_id=node_id,
+        agent_name=completed_event.node_name or str(summary_metadata.get("agent") or ""),
+        summary_artifact_id=summary_artifact_id,
+        summary=summary,
+    )
 
 
 def new_thread_id() -> str:

@@ -8,6 +8,10 @@ from sqlglot import exp
 
 
 AGGREGATION_ALIASES = {
+    "CASE": "CASE_WHEN",
+    "CASE_WHEN": "CASE_WHEN",
+    "CASEWHEN": "CASE_WHEN",
+    "CASE WHEN": "CASE_WHEN",
     "COUNT_DISTINCT": "COUNT_DISTINCT",
     "COUNTDISTINCT": "COUNT_DISTINCT",
     "DISTINCT_COUNT": "COUNT_DISTINCT",
@@ -185,6 +189,9 @@ def _aggregation_features(statement: exp.Expression, *, include_nested_queries: 
     windows = statement.find_all(exp.Window) if include_nested_queries else _iter_top_level_windows(statement)
     if any(isinstance(window.this, exp.RowNumber) for window in windows):
         features.add("DEDUPLICATE")
+    cases = statement.find_all(exp.Case) if include_nested_queries else _iter_top_level_cases(statement)
+    if any(cases):
+        features.add("CASE_WHEN")
     return {feature for feature in features if feature}
 
 
@@ -214,6 +221,19 @@ def _iter_top_level_windows(statement: exp.Expression) -> list[exp.Window]:
         if not _has_parent_in(window, nested_queries):
             windows.append(window)
     return windows
+
+
+def _iter_top_level_cases(statement: exp.Expression) -> list[exp.Case]:
+    nested_queries = {
+        id(query)
+        for query in statement.find_all(exp.Query)
+        if query is not statement
+    }
+    cases: list[exp.Case] = []
+    for case in statement.find_all(exp.Case):
+        if not _has_parent_in(case, nested_queries):
+            cases.append(case)
+    return cases
 
 
 def _has_parent_in(node: exp.Expression, parent_ids: set[int]) -> bool:

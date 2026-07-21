@@ -100,6 +100,7 @@ class StepSummary(BaseModel):
     action: str
     summary: str
     artifact_ids: list[str] = Field(default_factory=list)
+    summary_artifact_id: str | None = None
     next_action: str = ""
 
 
@@ -1035,7 +1036,7 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         str(finding.get("message") or "")
         for result in state.get("agent_results", [])
         for finding in result.get("findings", [])
-        if finding.get("disposition") == "limitation" and finding.get("message")
+        if finding.get("disposition") in {"warning", "limitation"} and finding.get("message")
     )
 
     return OrchestrationState(
