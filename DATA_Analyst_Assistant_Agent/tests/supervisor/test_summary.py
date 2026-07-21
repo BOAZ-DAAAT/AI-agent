@@ -242,7 +242,9 @@ def test_generate_sql_summary_uses_sql_detail(adapter, runtime, monkeypatch):
 
     assert payload["detail"]["kind"] == "sql"
     assert payload["detail"]["source_tables"] == ["orders", "order_payments"]
-    assert payload["detail"]["sql_snippet"] == "CREATE TABLE analytics.dm AS SELECT customer_unique_id FROM orders"
+    assert payload["detail"]["sql_snippet"] == ""
+    assert payload["detail"]["handoff"] == ""
+    assert payload["code_used"] == "CREATE TABLE analytics.dm AS SELECT customer_unique_id FROM orders"
     assert payload["fallback_used"] is False
     summary_record = adapter.get_artifact(ref.artifact_id)
     markdown_id = summary_record.metadata.get("markdown_artifact_id")
@@ -251,11 +253,11 @@ def test_generate_sql_summary_uses_sql_detail(adapter, runtime, monkeypatch):
     assert markdown_record.metadata["kind"] == "node_summary_markdown"
     markdown = adapter.read_artifact_text(markdown_id)
     assert markdown.startswith("# 고객 RFM 마트")
-    assert "실제 실행 SQL 보기" in markdown
+    assert "실제 실행 SQL 보기" not in markdown
 
 
 def test_sql_evidence_merges_plan_and_result_and_includes_preview(adapter, runtime):
-    """실사례 요청: SQL 요약에 실제 마트 5행 미리보기를 담고 싶어서 sql_plan(SQL 텍스트)과
+    """실사례 요청: SQL 요약에 실제 마트 10행 미리보기를 담고 싶어서 sql_plan(SQL 텍스트)과
     sql_result(CSV)를 합쳐 읽게 했다 — 한쪽만 보면 코드나 미리보기 중 하나가 항상 빠진다."""
     run = adapter.create_run(thread_id="thread_sql_merge")
     plan_id = _register(
@@ -265,7 +267,11 @@ def test_sql_evidence_merges_plan_and_result_and_includes_preview(adapter, runti
     )
     result_id = adapter.register_artifact(
         run.run_id, ArtifactType.sql_result,
-        content_text="customer_unique_id,monetary_total\nc1,120.5\nc2,80.0\n",
+        content_text=(
+            "customer_unique_id,monetary_total\n"
+            "c1,120.5\nc2,80.0\nc3,3\nc4,4\nc5,5\nc6,6\n"
+            "c7,7\nc8,8\nc9,9\nc10,10\nc11,11\n"
+        ),
         filename="result.csv", created_by_tool="test.summary", metadata={"kind": "sql_result"},
     ).artifact_id
 
@@ -273,11 +279,10 @@ def test_sql_evidence_merges_plan_and_result_and_includes_preview(adapter, runti
 
     assert evidence.code_used == "SELECT customer_unique_id, monetary_total FROM dm"
     assert evidence.facts["target_table"] == "analytics.dm"
-    assert evidence.facts["row_count"] == 2
-    assert evidence.facts["preview"] == [
-        {"customer_unique_id": "c1", "monetary_total": 120.5},
-        {"customer_unique_id": "c2", "monetary_total": 80.0},
-    ]
+    assert evidence.facts["row_count"] == 11
+    assert len(evidence.facts["preview"]) == 10
+    assert evidence.facts["preview"][0] == {"customer_unique_id": "c1", "monetary_total": 120.5}
+    assert evidence.facts["preview"][-1] == {"customer_unique_id": "c10", "monetary_total": 10.0}
 
 
 def test_generate_sql_summary_includes_mart_preview(adapter, runtime, monkeypatch):
@@ -302,7 +307,8 @@ def test_generate_sql_summary_includes_mart_preview(adapter, runtime, monkeypatc
         {"customer_unique_id": "c1", "monetary_total": 120.5},
         {"customer_unique_id": "c2", "monetary_total": 80.0},
     ]
-    assert payload["detail"]["sql_snippet"] == "SELECT customer_unique_id, monetary_total FROM dm"
+    assert payload["detail"]["sql_snippet"] == ""
+    assert payload["code_used"] == "SELECT customer_unique_id, monetary_total FROM dm"
 
 
 def test_generate_eda_summary_carries_primary_hypothesis_through_untouched_by_llm(adapter, runtime, monkeypatch):
@@ -412,6 +418,119 @@ def test_generate_summary_falls_back_per_kind_when_llm_fails(adapter, runtime, m
 
     assert payload["fallback_used"] is True
     assert payload["detail"]["kind"] == "eda"
+
+
+def test_analysis_summary_accepts_numbers_from_visual_evidence(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_analysis_chart_numbers")
+    chart_ref = adapter.register_artifact(
+        run.run_id, ArtifactType.chart, content_bytes=b"chart", filename="scatter.png",
+        created_by_tool="test.summary", metadata={"kind": "analysis_chart"},
+    )
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {
+            "title": "배송과 리뷰 관계", "executive_summary": "관계를 검정했습니다.",
+            "key_findings": [], "limitations": [], "method_notes": [],
+            "method_decision": {"selected_method": "Spearman", "rationale": "순위 관계 검정"},
+            "hypothesis_tests": [{"null_hypothesis": "관계 없음", "decision": "rejected"}],
+            "evidence_tables": [], "interpretation": [],
+            "visual_evidence": [{
+                "chart_artifact_id": chart_ref.artifact_id,
+                "status": "read_success",
+                "multimodal_summary": "상관계수는 -0.367이며 관측은 0~50일에 집중됩니다.",
+            }],
+        },
+        kind="analysis_result", filename="analysis_result.json",
+    )
+    response = json.dumps({
+        "title": "배송과 리뷰 관계 검정",
+        "subtitle": "순위 상관 검정",
+        "background": "배송과 리뷰의 관계를 확인합니다.",
+        "hypothesis_tests": [{"heading": "관계 검정", "body": "음의 관계가 지지되었습니다."}],
+        "key_statistics": [],
+        "interpretation": "배송이 길수록 리뷰가 낮아지는 방향입니다.",
+        "limitations": [],
+        "handoff": "관찰 연구의 경계를 유지합니다.",
+        "conclusion": "음의 관계를 확인했습니다.",
+        "key_finding": "배송과 리뷰는 음의 관계입니다.",
+    }, ensure_ascii=False)
+    fake_llm = _FakeLLM([response])
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
+
+    ref = generate_node_summary([artifact_id], runtime)
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+
+    assert payload["fallback_used"] is False
+    assert payload["detail"]["supporting_charts"][0]["body"].startswith("상관계수는 -0.367")
+    assert len(fake_llm.calls) == 1
+
+
+def test_analysis_summary_preserves_inconclusive_decision_boundary(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_analysis_inconclusive")
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {
+            "title": "월별 추세", "executive_summary": "감소 방향을 검정했습니다.",
+            "key_findings": [], "limitations": [], "method_notes": [],
+            "method_decision": {"selected_method": "선형회귀", "rationale": "월별 추세 확인"},
+            "hypothesis_tests": [{
+                "hypothesis": "월별 평균 배송 소요일은 시간 경과에 따라 감소한다.",
+                "test_name": "월별 선형추세",
+                "null_hypothesis": "기울기는 0이다.",
+                "alternative_hypothesis": "기울기는 음수다.",
+                "statistic": -0.4814,
+                "p_value": 0.099,
+                "decision": "inconclusive",
+                "n": 23,
+            }],
+            "evidence_tables": [], "interpretation": [], "visual_evidence": [],
+        },
+        kind="analysis_result", filename="analysis_result.json",
+    )
+    response = json.dumps({
+        "title": "월별 배송 개선",
+        "subtitle": "배송이 개선되었습니다",
+        "background": "월별 방향을 확인합니다.",
+        "hypothesis_tests": [{
+            "heading": "월별 배송 개선",
+            "rationale": "시간에 따른 변화를 봅니다.",
+            "body": "배송 개선이 통계적으로 확인되었습니다.",
+        }],
+        "key_statistics": [],
+        "interpretation": "배송은 지속적으로 개선되었습니다.",
+        "limitations": [],
+        "handoff": "개선 결과를 활용합니다.",
+        "conclusion": "배송 개선 추세가 확인되었습니다.",
+        "key_finding": "배송이 개선되었습니다.",
+    }, ensure_ascii=False)
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: _FakeLLM([response]))
+
+    ref = generate_node_summary([artifact_id], runtime)
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+
+    test_result = payload["detail"]["hypothesis_tests"][0]
+    assert "원본 판정은 'inconclusive'입니다" in test_result["body"]
+    assert "**p-value=0.099**" in test_result["body"]
+    assert "통계적으로 확정하기 어렵습니다" in payload["detail"]["interpretation"]
+    assert "통계적으로 확정되지 않았습니다" in payload["key_finding"]
+
+
+def test_generate_node_summary_force_regenerate_bypasses_cache(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_force_regenerate")
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {"generated_sql": "SELECT 1", "target_table": "t", "original_question": "q",
+         "target_metric": "m", "grain": "g", "business_grain": "bg", "reasoning": "r"},
+        kind="sql_plan", filename="sql_plan.json",
+    )
+    fake_llm = _FakeLLM([_SQL_RESPONSE, _SQL_RESPONSE])
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
+
+    first = generate_node_summary([artifact_id], runtime)
+    regenerated = generate_node_summary([artifact_id], runtime, force_regenerate=True)
+
+    assert first.artifact_id != regenerated.artifact_id
+    assert len(fake_llm.calls) == 2
 
 
 def test_generate_node_summary_uses_cache_on_second_call(adapter, runtime, monkeypatch):

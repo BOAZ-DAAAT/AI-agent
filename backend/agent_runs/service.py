@@ -22,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, S
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
+from DATA_Analyst_Assistant_Agent.supervisor.summary.generator import generate_node_summary
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
 
 
@@ -132,12 +133,7 @@ class NodeSummaryLookup:
     summary: NodeSummaryResult
 
 
-def get_node_summary(
-    *,
-    services: BackendServices,
-    run_id: str,
-    node_id: str,
-) -> NodeSummaryLookup:
+def _completed_node_event(*, services: BackendServices, run_id: str, node_id: str):
     completed_event = next(
         (
             event
@@ -149,20 +145,44 @@ def get_node_summary(
     )
     if completed_event is None:
         raise NodeSummaryNotFoundError("완료된 노드를 찾을 수 없습니다.")
+    return completed_event
+
+
+def _summary_source_ids(completed_event, summary_metadata: dict[str, Any]) -> list[str]:
+    raw_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
+    return [item for item in raw_ids if isinstance(item, str) and item]
+
+
+def _latest_summary_artifact_id(
+    *, services: BackendServices, run_id: str, source_ids: list[str]
+) -> str | None:
+    wanted = set(source_ids)
+    if not wanted:
+        return None
+    latest_id: str | None = None
+    for artifact in services.artifact_registry.list_artifacts(run_id=run_id, type="file"):
+        metadata = artifact.metadata
+        if metadata.get("kind") != "node_summary":
+            continue
+        if set(metadata.get("source_artifact_ids") or []) == wanted:
+            latest_id = artifact.artifact_id
+    return latest_id
+
+
+def get_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    completed_event = _completed_node_event(services=services, run_id=run_id, node_id=node_id)
 
     summary_metadata = completed_event.metadata.get("summary")
     summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
-    summary_artifact_id = summary_metadata.get("summary_artifact_id")
-    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
-        source_artifact_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
-        source_ids = {item for item in source_artifact_ids if isinstance(item, str)}
-        for artifact in reversed(services.artifact_registry.list_artifacts(run_id=run_id, type="file")):
-            metadata = artifact.metadata
-            if metadata.get("kind") != "node_summary":
-                continue
-            if set(metadata.get("source_artifact_ids") or []) == source_ids and source_ids:
-                summary_artifact_id = artifact.artifact_id
-                break
+    source_ids = _summary_source_ids(completed_event, summary_metadata)
+    summary_artifact_id = _latest_summary_artifact_id(
+        services=services, run_id=run_id, source_ids=source_ids
+    ) or summary_metadata.get("summary_artifact_id")
 
     if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
         raise NodeSummaryNotFoundError("노드의 상세 서머리가 아직 생성되지 않았습니다.")
@@ -186,6 +206,25 @@ def get_node_summary(
         summary_artifact_id=summary_artifact_id,
         summary=summary,
     )
+
+
+def regenerate_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    """완료된 노드의 원본 artifact를 유지하고 summary artifact만 새로 만든다."""
+    completed_event = _completed_node_event(services=services, run_id=run_id, node_id=node_id)
+    summary_metadata = completed_event.metadata.get("summary")
+    summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
+    source_ids = _summary_source_ids(completed_event, summary_metadata)
+    if not source_ids:
+        raise NodeSummaryNotFoundError("서머리를 재생성할 원본 artifact가 없습니다.")
+
+    runtime = AgentRuntime(adapter=BackendAdapter(services=services))
+    generate_node_summary(source_ids, runtime, force_regenerate=True)
+    return get_node_summary(services=services, run_id=run_id, node_id=node_id)
 
 
 def new_thread_id() -> str:

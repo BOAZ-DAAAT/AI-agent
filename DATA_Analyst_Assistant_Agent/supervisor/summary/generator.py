@@ -40,7 +40,11 @@ from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
 )
 
 _TOOL_NAME = "supervisor.summary.generator"
-_SUMMARY_VERSION = 9                                   # v9: 설명형 서사 + 서비스 Markdown 아티팩트
+_SUMMARY_VERSION = 17                                  # v17: 분석 검정 서술 존댓말/핵심 수치 강조 강화
+                                                        # (v13: SQL 핵심 어구 강조 문법 반영)
+                                                        # (v12: SQL 화면 구조/10행 데이터마트 미리보기 반영)
+                                                        # (v11: SQL 요약 톤/중복 SQL 노출 정리)
+                                                        # (v10: 차트 근거 숫자 검증 + 강제 재생성 지원)
                                                         # (v7: read_node_evidence가 artifact_ids[0]만 보던 버그 수정)
                                                         # (v6: chart_artifact_ids가 숫자검증에 잘못 포함되던 버그 수정)
                                                         # (v5: 노드 종류별 의미적 구조(discriminated union)로 전면 개편)
@@ -96,6 +100,7 @@ def generate_node_summary(
     runtime: AgentRuntime,
     *,
     branch_instruction: str | None = None,
+    force_regenerate: bool = False,
 ) -> ArtifactRef:
     """branch_instruction: 분기(재분석) 시 이 단계에 추가로 반영된 지시사항.
 
@@ -106,9 +111,10 @@ def generate_node_summary(
     if not artifact_ids:
         raise ValueError("generate_node_summary는 artifact_ids가 최소 1개 필요합니다.")
 
-    cached = _find_cached(artifact_ids, runtime)
-    if cached is not None:
-        return cached
+    if not force_regenerate:
+        cached = _find_cached(artifact_ids, runtime)
+        if cached is not None:
+            return cached
 
     evidence = read_node_evidence(artifact_ids, runtime)
     if branch_instruction and branch_instruction.strip():
@@ -148,8 +154,12 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
         return None
 
     llm = get_chat_model(model=os.getenv("SUMMARY_MODEL") or None, model_env="LLM_MODEL")
-    numbers = collect_numbers(evidence.facts)
-    corpus = json.dumps(evidence.facts, ensure_ascii=False, default=str)
+    verification_evidence = {
+        "facts": evidence.facts,
+        "chart_captions": [chart.caption for chart in evidence.charts if chart.caption],
+    }
+    numbers = collect_numbers(verification_evidence)
+    corpus = json.dumps(verification_evidence, ensure_ascii=False, default=str)
     known_chart_ids = {c.artifact_id for c in evidence.charts}
     build_prompt = _PROMPT_BUILDERS[detail_kind]
     parse_result = _RESULT_PARSERS[detail_kind]
@@ -182,7 +192,7 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
             feedback = "[누락] title/subtitle/background/conclusion/key_finding은 비울 수 없고, 핵심 리스트는 최소 1개 이상이어야 한다."
             continue
 
-        ok, missing = verify_texts(_collect_texts(result), numbers, corpus)
+        ok, missing = verify_texts(_collect_generated_texts(result), numbers, corpus)
         if not ok:
             feedback = f"[검증 실패] 다음 숫자가 근거에 없다: {missing} — 근거에 있는 숫자만 써라. 새 숫자가 필요하면 쓰지 말고 서술만 하라."
             continue
@@ -217,6 +227,30 @@ def _collect_texts(value: Any) -> list[str]:
         for v in value:
             texts.extend(_collect_texts(v))
     return texts
+
+
+def _collect_generated_texts(result: NodeSummaryResult) -> list[str]:
+    """LLM이 작성한 서술만 숫자 검증한다.
+
+    원본 근거에서 결정론적으로 복사한 표, 코드, 방법 결정, 차트 설명을 다시 검증하면
+    검증 corpus와 복사 필드의 경계가 어긋날 때 정상 숫자를 환각으로 오판할 수 있다.
+    """
+    candidate = result.model_copy(deep=True)
+    candidate.code_used = ""
+    detail = candidate.detail
+    if isinstance(detail, SQLSummaryDetail):
+        detail.mart_preview = []
+        detail.sql_snippet = ""
+    elif isinstance(detail, EDASummaryDetail):
+        detail.primary_hypothesis = {}
+    elif isinstance(detail, AnalysisSummaryDetail):
+        detail.method_decision = {}
+        detail.evidence_tables = []
+        detail.supporting_charts = []
+    elif isinstance(detail, InsightSummaryDetail):
+        detail.evidence_sources = []
+        detail.supporting_charts = []
+    return _collect_texts(candidate)
 
 
 # ─────────────────────────────
@@ -264,6 +298,72 @@ def _extract_str_list(raw: Any) -> list[str]:
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
+def _ensure_one_bold_phrase(text: str) -> str:
+    """UI 강조가 완전히 빠진 경우 핵심 목적 어구 하나만 보정한다."""
+    if not text or "**" in text:
+        return text
+    patterns = [
+        r"([^.,\n]{2,30}?)(을|를) 위해",
+        r"([^.,\n]{2,30}?)(이|가) 가능",
+        r"([^.,\n]{2,30}?)(을|를) 가능",
+        r"([^.,\n]{2,30}?)(으로|로) 구성",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        phrase = match.group(1).strip()
+        if phrase:
+            return text[:match.start(1)] + f"**{phrase}**" + text[match.end(1):]
+    first_sentence = re.split(r"[.!?。]\s*|\n", text, maxsplit=1)[0]
+    phrase = first_sentence[: min(len(first_sentence), 18)].strip()
+    return text.replace(phrase, f"**{phrase}**", 1) if phrase else text
+
+
+def _ensure_eda_finding_emphasis(text: str) -> str:
+    """EDA 발견 본문에는 핵심 수치나 관계 신호가 한 번은 눈에 들어오게 한다."""
+    if not text or "**" in text:
+        return text
+    patterns = [
+        r"피어슨 상관 -?\d+(?:\.\d+)?, 스피어만 상관 -?\d+(?:\.\d+)?",
+        r"\d+(?:\.\d+)?일에서 \d+(?:\.\d+)?일",
+        r"\d{1,3}(?:,\d{3})*개 그룹",
+        r"음의 관계",
+        r"월별 편차",
+        r"배송 속도 개선",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return text[:match.start()] + f"**{match.group(0)}**" + text[match.end():]
+    return _ensure_one_bold_phrase(text)
+
+
+def _ensure_analysis_emphasis(text: str) -> str:
+    """분석 결과에는 핵심 검정 수치나 판정 경계를 한 번은 강조한다."""
+    if not text or "**" in text:
+        return text
+    patterns = [
+        r"p-value[= ]-?\d+(?:\.\d+)?(?:e[+-]?\d+)?",
+        r"피어슨 상관 -?\d+(?:\.\d+)?",
+        r"스피어만 상관 -?\d+(?:\.\d+)?",
+        r"통계적으로 유의",
+        r"통계적으로 확정하기 어렵습니다",
+        r"음의 관계",
+        r"유의미한 차이",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return text[:match.start()] + f"**{match.group(0)}**" + text[match.end():]
+    return _ensure_one_bold_phrase(text)
+
+
+def _quoted_korean_sentence(label: str, value: Any) -> str:
+    text = str(value).strip().rstrip(".")
+    return f"{label}은 '{text}'입니다." if text else ""
+
+
 # ─────────────────────────────
 # SQL — 정합성 확인 → 파생변수 생성 → 마트 설계
 # ─────────────────────────────
@@ -272,13 +372,16 @@ def _build_sql_prompt(evidence: NodeEvidence, feedback: str) -> str:
     return f"""
 너는 SQL/마트 설계 결과를 설명하는 데이터 분석가다. 작업 순서를 일기처럼 나열하지 말고,
 데이터 조건이 왜 특정 grain·조인·집계 선택으로 이어졌는지와 그 결과 어떤 분석이 가능해졌는지
-하나의 흐름으로 서술하라. 새로운 계산·추측이나 근거에 없는 이름·숫자는 만들지 마라.
+짧은 보고서 문장으로 서술하라. 새로운 계산·추측이나 근거에 없는 이름·숫자는 만들지 마라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 {feedback_section}
 [문체] "에이전트가 ~했습니다"를 반복하지 마라. 데이터와 분석 논리를 주어로 삼고, 앞 문장의
-판단이 다음 문장의 방법 선택 이유가 되게 작성하라.
+판단이 다음 문장의 방법 선택 이유가 되게 작성하라. 모든 문장은 보고서 톤의 존댓말
+"~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은 평서체는 쓰지 마라.
+강조가 필요한 핵심 판단, 분석 목적, 산출물 의미에만 Markdown bold 문법 **...**을 사용하라.
+문장 전체나 모든 문장에 bold를 넣지 말고, 한 문단에 짧은 어구 1개만 강조하라.
 
 이 단계는 SQL 에이전트의 결과다 — 고유 역할은 (1) 데이터 정합성·결측 확인, (2) 파생 컬럼
 생성, (3) 최종 데이터마트 설계다. 아래 필드로 이 세 가지를 명확히 구분해서 채워라(근거에
@@ -287,17 +390,17 @@ def _build_sql_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 마트를 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
-- background: 왜 이 마트가 필요했는지(비즈니스 목적)만. 최대 2문단.
-- design_rationale: 데이터 특성 때문에 이 grain·조인·집계 방식을 선택한 이유. 1~2문단.
+- background: 사용자 질문이 요구한 분석 판단과 이 마트가 필요한 이유를 함께 설명한다. 1문단, 최대 2문장.
+- design_rationale: 데이터 특성 때문에 이 grain·조인·집계 방식을 선택한 이유. 1문단, 최대 3문장. 핵심 선택 이유 1개를 **...**로 강조한다.
 - source_tables: 이 SQL이 사용한 원천 테이블명 리스트(근거에 등장한 것만)
-- integrity_checks: 결과 해석에 영향을 주는 핵심 정합성 처리만 최대 3개
+- integrity_checks: 결과 해석에 영향을 주는 핵심 정합성 처리만 최대 2개
 - derived_columns: 파생/계산된 컬럼 각각을 설명하는 섹션 리스트. 각 섹션:
-  {{"heading":"컬럼명", "body":"정의·계산식·의도(1문단 이상)"}}
+  {{"heading":"컬럼명", "body":"정의·계산식·의도. 최대 2문장."}}
 - mart_grain: 최종 마트의 행 단위(grain)를 한 문장으로
 - mart_columns: 최종 마트에 포함된 컬럼명 리스트
-- conclusion: 이 단계에서 얻은 결론(무엇이 만들어졌는지). 1문단.
+- conclusion: 어떤 최종 데이터마트가 어떤 후속 분석을 가능하게 했는지 구체적으로 쓴다. 1문단, 최대 2문장. 핵심 산출물 의미 1개를 **...**로 강조한다.
 - interpretation_scope: 이 마트를 해석할 때 주의할 범위. 최대 2개.
-- handoff: 다음 EDA 단계에서 이 마트로 무엇을 탐색할 수 있는지 한 문장.
+- handoff: 빈 문자열로 둔다.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 이름·숫자만 인용하라.
@@ -315,22 +418,24 @@ def _to_sql_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
     mart_columns = _extract_str_list(parsed.get("mart_columns"))
     if not (source_tables or integrity_checks or derived_columns or mart_columns):
         return None
+    design_rationale = _ensure_one_bold_phrase(str(parsed.get("design_rationale") or "").strip())
+    conclusion = _ensure_one_bold_phrase(base["conclusion"])
     detail = SQLSummaryDetail(
-        design_rationale=str(parsed.get("design_rationale") or "").strip(),
+        design_rationale=design_rationale,
         source_tables=source_tables,
         integrity_checks=integrity_checks[:3],
         derived_columns=derived_columns,
         mart_grain=str(parsed.get("mart_grain") or "").strip(),
         mart_columns=mart_columns,
         mart_preview=list(evidence.facts.get("preview") or []),   # 근거 그대로(LLM이 안 씀)
-        sql_snippet=evidence.code_used,
+        sql_snippet="",
         interpretation_scope=_extract_str_list(parsed.get("interpretation_scope"))[:2],
-        handoff=str(parsed.get("handoff") or "").strip(),
+        handoff="",
     )
     return NodeSummaryResult(
         title=base["title"], subtitle=base["subtitle"], background=base["background"],
         code_used=evidence.code_used, detail=detail,
-        conclusion=base["conclusion"], key_finding=base["key_finding"],
+        conclusion=conclusion, key_finding=base["key_finding"],
         source_kind=evidence.source_kind, fallback_used=False,
     )
 
@@ -350,7 +455,10 @@ def _build_eda_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [사용 가능한 차트] {charts_text}
 {feedback_section}
 [문체] "EDA 에이전트가 ~했습니다"를 반복하지 마라. 데이터와 분석 내용을 주어로 삼아
-선택 이유 → 실제 근거 → 관찰 결과가 자연스럽게 이어지게 작성하라.
+선택 이유 → 실제 근거 → 관찰 결과가 자연스럽게 이어지게 작성하라. 모든 문장은 보고서 톤의
+존댓말 "~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은 평서체는 쓰지 마라.
+강조가 필요한 핵심 판단, 데이터 조건, 발견 의미에만 Markdown bold 문법 **...**을 사용하라.
+문장 전체나 모든 문장에 bold를 넣지 말고, 한 문단에 짧은 어구 1개만 강조하라.
 
 이 단계는 EDA 에이전트의 결과다 — 고유 역할은 (1) 컬럼 프로파일링·품질 확인, (2) 통계 탐색,
 (3) 근거가 되는 차트 생성, (4) 가설 형성이다.
@@ -358,18 +466,23 @@ def _build_eda_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 단계를 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
-- background: 왜 이 단계가 필요했는지(목적/배경)만. 최대 2문단.
-- data_profile: 컬럼 타입·카디널리티·결측 등 데이터 구조 요약(1~2문단)
+- background: 왜 이 단계가 필요했는지(목적/배경)만. 1문단, 최대 2문장.
+- data_profile: 컬럼 타입·카디널리티·결측 등 데이터 구조 요약. 1문단, 최대 3문장. 한눈에
+  들어오도록 핵심 데이터 조건 1개를 **...**로 강조한다.
 - quality_issues: 발견된 품질 이슈(문장 리스트)
 - statistical_findings: 분포/상관/그룹비교 발견을 다루는 섹션 리스트(핵심 파트, 최소 1개
   이상). 각 섹션: {{"heading":"소제목", "rationale":"이 방법/차트가 필요한 이유",
   "body":"차트나 통계에서 관찰된 내용과 의미(구체 수치 인용)",
   "source_label":"분포 차트 등(선택)", "chart_artifact_ids":["[사용 가능한 차트]에 있는
-  artifact_id만"]}}. 차트 목록의 캡션을 보고 관련 있는 섹션에 반드시 연결하라.
-- hypotheses: 제안된 가설을 한 문장씩 요약한 리스트(근거의 가설 텍스트 기반)
+  artifact_id 1개만"]}}. 차트 목록의 캡션을 보고 가장 대표적인 차트 1개만 연결하라.
+  차트가 직접 뒷받침하지 않는 발견은 chart_artifact_ids를 빈 리스트로 둔다.
+  body에는 핵심 수치나 관계 신호 1개를 **...**로 강조한다.
+- hypotheses: 제안된 가설을 한 문장씩 요약한 리스트(근거의 가설 텍스트 기반). 각 문장은
+  무엇을 검증할지와 왜 그 가설이 필요한지가 함께 드러나야 한다.
 - interpretation_scope: 이 탐색 결과를 해석할 때 지켜야 할 범위. 최대 2개.
-- handoff: Analysis 단계에서 무엇을 어떤 조건으로 검증해야 하는지 한 문장.
-- conclusion: 이 단계에서 얻은 결론. 1문단.
+- handoff: 빈 문자열로 둔다.
+- conclusion: 이 단계에서 얻은 결론. 1문단, 최대 2문장. 다음 분석에서 바로 검증해야 할
+  구체적 방향 1개를 **...**로 강조한다.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 숫자만 인용하라. [사용 가능한 차트] 목록에 없는 artifact_id는 만들지 마라.
@@ -384,19 +497,28 @@ def _to_eda_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
     statistical_findings = _extract_sections(parsed.get("statistical_findings"), known_chart_ids)
     if not statistical_findings:
         return None
+    statistical_findings = [
+        section.model_copy(update={
+            "body": _ensure_eda_finding_emphasis(section.body),
+            "chart_artifact_ids": section.chart_artifact_ids[:1],
+        })
+        for section in statistical_findings
+    ]
+    data_profile = _ensure_one_bold_phrase(str(parsed.get("data_profile") or "").strip())
+    conclusion = _ensure_one_bold_phrase(base["conclusion"])
     detail = EDASummaryDetail(
-        data_profile=str(parsed.get("data_profile") or "").strip(),
+        data_profile=data_profile,
         quality_issues=_extract_str_list(parsed.get("quality_issues")),
         statistical_findings=statistical_findings,
         hypotheses=_extract_str_list(parsed.get("hypotheses")),
         primary_hypothesis=evidence.facts.get("primary_hypothesis") or {},   # 근거 그대로(LLM이 안 씀)
         interpretation_scope=_extract_str_list(parsed.get("interpretation_scope"))[:2],
-        handoff=str(parsed.get("handoff") or "").strip(),
+        handoff="",
     )
     return NodeSummaryResult(
-        title=base["title"], subtitle=base["subtitle"], background=base["background"],
+        title=base["title"], subtitle=base["subtitle"], background=_ensure_one_bold_phrase(base["background"]),
         code_used=evidence.code_used, detail=detail,
-        conclusion=base["conclusion"], key_finding=base["key_finding"],
+        conclusion=conclusion, key_finding=base["key_finding"],
         source_kind=evidence.source_kind, fallback_used=False,
     )
 
@@ -415,7 +537,10 @@ def _build_analysis_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [근거 내용] {facts_text}
 {feedback_section}
 [문체] "분석 에이전트가 ~했습니다"를 반복하지 마라. 방법론의 성질과 데이터 조건을 주어로
-삼고, 방법 선택 → 검정 근거 → 결과 해석이 이어지게 작성하라.
+삼고, 방법 선택 → 검정 근거 → 결과 해석이 이어지게 작성하라. 모든 문장은 보고서 톤의
+존댓말 "~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은 평서체는 쓰지 마라.
+강조가 필요한 핵심 검정 수치, 판정, 해석 경계에만 Markdown bold 문법 **...**을 사용하라.
+문장 전체나 모든 문장에 bold를 넣지 말고, 한 문단에 짧은 어구 1개만 강조하라.
 
 이 단계는 분석 에이전트의 결과다 — 고유 역할은 (1) 통계 방법론 선택, (2) 가설 검정이다.
 방법론 선택 근거(method_decision)는 이미 구조화된 근거로 별도 제공되니 새로 쓰지 마라 —
@@ -424,20 +549,103 @@ def _build_analysis_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 분석을 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
-- background: 왜 이 분석이 필요했는지(목적/배경)만. 최대 2문단.
+- background: 왜 이 분석이 필요했는지(목적/배경)만. 1문단, 최대 2문장.
 - hypothesis_tests: 가설 검정 각각을 설명하는 섹션 리스트(핵심 파트, 최소 1개 이상). 각
+  검정의 decision을 그대로 보존하라. decision이 inconclusive이면 관찰된 방향과 통계적
+  확정을 구분하고, conclusion/key_finding에도 "경향은 관찰됐지만 통계적으로 확정하기
+  어렵다"는 경계를 반드시 유지하라.
   섹션: {{"heading":"가설 요약", "rationale":"이 검정이 필요한 이유",
   "body":"H0/H1/판정(지지됨·지지안됨)과 근거(p-value 등)"}}
 - key_statistics: 핵심 수치 근거를 다루는 섹션 리스트(선택, 없으면 빈 리스트)
-- interpretation: 여러 검정과 실제 근거표를 함께 읽었을 때의 분석적 의미. 1~2문단.
+- interpretation: 여러 검정과 실제 근거표를 함께 읽었을 때의 분석적 의미. 1문단, 최대 3문장.
 - limitations: 이 분석의 한계(문장 리스트)
 - handoff: Insight 단계에서 채택할 결론과 반드시 유지할 해석 경계를 한 문장으로.
-- conclusion: 이 단계에서 얻은 결론. 1문단.
+- conclusion: 이 단계에서 얻은 결론. 1문단, 최대 2문장. 핵심 판정 또는 해석 경계 1개를
+  **...**로 강조한다.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 숫자만 인용하라.
 
 JSON만 출력하라."""
+
+
+def _ground_analysis_test_sections(
+    generated: list[FindingSection], raw_tests: Any
+) -> list[FindingSection]:
+    """가설 판정과 수치는 LLM 표현 대신 Analysis 원본 계약에서 결정론적으로 옮긴다."""
+    if not isinstance(raw_tests, list):
+        return generated
+    grounded: list[FindingSection] = []
+    for index, raw in enumerate(raw_tests):
+        if not isinstance(raw, dict):
+            continue
+        generated_section = generated[index] if index < len(generated) else None
+        heading = str(
+            raw.get("hypothesis")
+            or raw.get("alternative_hypothesis")
+            or (generated_section.heading if generated_section else "")
+            or f"가설 검정 {index + 1}"
+        ).strip()
+        parts: list[str] = []
+        if raw.get("null_hypothesis"):
+            parts.append(_quoted_korean_sentence("귀무가설", raw["null_hypothesis"]))
+        if raw.get("alternative_hypothesis"):
+            parts.append(_quoted_korean_sentence("대립가설", raw["alternative_hypothesis"]))
+        if raw.get("decision"):
+            parts.append(_quoted_korean_sentence("원본 판정", raw["decision"]))
+        evidence_parts: list[str] = []
+        for field_name, label in (
+            ("test_name", "검정"),
+            ("statistic", "통계량"),
+            ("p_value", "p-value"),
+            ("effect_size", "효과크기"),
+            ("n", "표본수"),
+        ):
+            value = raw.get(field_name)
+            if value is not None and value != "":
+                evidence_parts.append(f"{label}={value}")
+        if evidence_parts:
+            parts.append("근거는 " + ", ".join(evidence_parts) + "입니다.")
+        caveats = raw.get("caveats") or []
+        if isinstance(caveats, str):
+            caveats = [caveats]
+        if caveats:
+            caveat_text = " ".join(str(item) for item in caveats if item).strip()
+            if caveat_text:
+                parts.append(_quoted_korean_sentence("주의사항", caveat_text))
+        body = _ensure_analysis_emphasis(" ".join(parts) or (generated_section.body if generated_section else ""))
+        grounded.append(FindingSection(
+            heading=heading,
+            rationale=generated_section.rationale if generated_section else "",
+            body=body,
+            source_label=generated_section.source_label if generated_section else None,
+            chart_artifact_ids=generated_section.chart_artifact_ids if generated_section else [],
+        ))
+    return grounded or generated
+
+
+def _analysis_decision_boundaries(raw_tests: Any) -> list[str]:
+    if not isinstance(raw_tests, list):
+        return []
+    boundaries: list[str] = []
+    for raw in raw_tests:
+        if not isinstance(raw, dict) or str(raw.get("decision") or "").lower() != "inconclusive":
+            continue
+        hypothesis = str(raw.get("hypothesis") or raw.get("alternative_hypothesis") or "해당 가설")
+        p_value = raw.get("p_value")
+        suffix = f" (p-value={p_value})" if p_value is not None else ""
+        boundaries.append(
+            f"가설 '{hypothesis}'은 관찰된 방향성이 있더라도 원본 판정이 inconclusive이므로 "
+            f"통계적으로 확정하기 어렵습니다{suffix}."
+        )
+    return boundaries
+
+
+def _emphasize_sections(sections: list[FindingSection]) -> list[FindingSection]:
+    return [
+        section.model_copy(update={"body": _ensure_analysis_emphasis(section.body)})
+        for section in sections
+    ]
 
 
 def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_ids: set[str]) -> NodeSummaryResult | None:
@@ -447,23 +655,35 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
     hypothesis_tests = _extract_sections(parsed.get("hypothesis_tests"), known_chart_ids)
     if not hypothesis_tests:
         return None
+    raw_tests = evidence.facts.get("hypothesis_tests") or []
+    hypothesis_tests = _ground_analysis_test_sections(hypothesis_tests, raw_tests)
+    decision_boundaries = _analysis_decision_boundaries(raw_tests)
+    interpretation_parts = [
+        _ensure_analysis_emphasis(str(parsed.get("interpretation") or "").strip()),
+        *(_ensure_analysis_emphasis(boundary) for boundary in decision_boundaries),
+    ]
     detail = AnalysisSummaryDetail(
         method_decision=evidence.facts.get("method_decision") or {},   # 근거 그대로(LLM이 안 씀)
         hypothesis_tests=hypothesis_tests,
-        key_statistics=_extract_sections(parsed.get("key_statistics"), known_chart_ids),
+        key_statistics=_emphasize_sections(_extract_sections(parsed.get("key_statistics"), known_chart_ids)),
         evidence_tables=[
             EvidenceTable.model_validate(table)
             for table in (evidence.facts.get("evidence_tables") or [])
         ],
         supporting_charts=_charts_to_sections(evidence),
-        interpretation=str(parsed.get("interpretation") or "").strip(),
-        limitations=_extract_str_list(parsed.get("limitations")),
+        interpretation="\n\n".join(part for part in interpretation_parts if part),
+        limitations=[*_extract_str_list(parsed.get("limitations")), *decision_boundaries],
         handoff=str(parsed.get("handoff") or "").strip(),
     )
+    conclusion = _ensure_analysis_emphasis(base["conclusion"])
+    key_finding = base["key_finding"]
+    if decision_boundaries:
+        conclusion = "\n\n".join([conclusion, *(_ensure_analysis_emphasis(boundary) for boundary in decision_boundaries)])
+        key_finding = f"{key_finding} 다만 일부 추세는 통계적으로 확정되지 않았습니다."
     return NodeSummaryResult(
-        title=base["title"], subtitle=base["subtitle"], background=base["background"],
+        title=base["title"], subtitle=base["subtitle"], background=_ensure_analysis_emphasis(base["background"]),
         code_used=evidence.code_used, detail=detail,
-        conclusion=base["conclusion"], key_finding=base["key_finding"],
+        conclusion=conclusion, key_finding=key_finding,
         source_kind=evidence.source_kind, fallback_used=False,
     )
 
@@ -483,7 +703,9 @@ def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [사용 가능한 차트] {charts_text}
 {feedback_section}
 [문체] "인사이트 에이전트가 ~했습니다"를 반복하지 마라. 근거와 분석 내용을 주어로 삼고,
-근거 연결 → 의미 → 활용 방향 → 해석 범위가 자연스럽게 이어지게 작성하라.
+근거 연결 → 의미 → 활용 방향 → 해석 범위가 자연스럽게 이어지게 작성하라. 모든 문장은
+보고서 톤의 존댓말 "~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은
+평서체는 쓰지 마라.
 
 이 단계는 인사이트 에이전트의 결과다 — 고유 역할은 상류 근거(SQL/EDA/분석)를 종합해 사용자
 질문에 직접 답하는 것이다. 근거 출처(evidence_sources)는 이미 구조화된 근거로 별도 제공되니
@@ -492,13 +714,13 @@ def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 답변을 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
-- background: 사용자가 무엇을 물었는지(질문 배경)만. 최대 2문단.
-- evidence_synthesis: 어떤 상류 근거들이 서로 일치하거나 보완되어 결론을 지지하는지.
-- answer: 사용자 질문에 대한 직접적인 답변(핵심, 1~2문단)
+- background: 사용자가 무엇을 물었는지(질문 배경)만. 1문단, 최대 2문장.
+- evidence_synthesis: 어떤 상류 근거들이 서로 일치하거나 보완되어 결론을 지지하는지. 1문단, 최대 3문장.
+- answer: 사용자 질문에 대한 직접적인 답변. 1문단, 최대 3문장.
 - key_insights: 핵심 통찰 리스트
 - action_plan: 실행 제안 리스트
 - limitations: 한계 리스트
-- conclusion: 이 단계에서 얻은 결론. 1문단.
+- conclusion: 이 단계에서 얻은 결론. 1문단, 최대 2문장.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 숫자만 인용하라.
@@ -566,7 +788,7 @@ def _fallback_result(evidence: NodeEvidence) -> NodeSummaryResult:
         detail: Any = SQLSummaryDetail(
             derived_columns=generic_sections,
             mart_preview=list(evidence.facts.get("preview") or []),
-            sql_snippet=evidence.code_used,
+            sql_snippet="",
         )
     elif detail_kind == "eda":
         detail = EDASummaryDetail(
@@ -684,6 +906,7 @@ def _register(artifact_ids: list[str], result: NodeSummaryResult, runtime: Agent
             "source_artifact_ids": sorted(artifact_ids),
             "summary_version": _SUMMARY_VERSION,
             "markdown_artifact_id": markdown_artifact_id,
+            "fallback_used": result.fallback_used,
         },
         preview={
             "title": result.title,

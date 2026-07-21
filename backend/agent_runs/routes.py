@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import mimetypes
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -9,7 +11,7 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from backend.auth.deps import get_current_user
 from backend.session.service import get_owned_session
@@ -103,6 +105,42 @@ def read_agent_node_summary(
         agent_name=result.agent_name,
         summary_artifact_id=result.summary_artifact_id,
         summary=result.summary,
+    )
+
+
+@router.get("/{run_id}/artifacts/{artifact_id}/content")
+def read_agent_run_artifact_content(
+    run_id: str,
+    artifact_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> Response:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+        artifact = services.artifact_registry.get_artifact(artifact_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    if artifact.run_id != run_id:
+        raise HTTPException(status_code=404, detail="실행에 연결된 artifact가 아닙니다.")
+
+    try:
+        path = services.artifact_store.get_path(artifact_id)
+        content = path.read_bytes()
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=300"},
     )
 
 
