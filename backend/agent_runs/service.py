@@ -12,8 +12,9 @@ from sqlalchemy import inspect
 
 from backend.config import StorageMySQL
 from backend.session.schemas import SessionResponse
-from data_agent_backend.models.runs import RunRecord, RunStatus
+from data_agent_backend.models.runs import TERMINAL_RUN_STATUSES, RunRecord, RunStatus
 from data_agent_backend.services.factory import BackendServices
+from data_agent_backend.storage.filesystem import ensure_child_path
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
@@ -29,6 +30,98 @@ _SESSION_ENV_LOCK = threading.Lock()
 
 class NodeSummaryNotFoundError(Exception):
     """완료 노드 또는 해당 노드의 상세 서머리를 찾지 못했을 때."""
+
+
+class RunDeletionConflictError(Exception):
+    """아직 실행 중인 run 삭제를 요청했을 때."""
+
+
+@dataclass(frozen=True)
+class RunDeletionResult:
+    run_id: str
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
+def delete_terminal_run_data(
+    *,
+    services: BackendServices,
+    run_id: str,
+) -> RunDeletionResult:
+    run = services.run_service.get_run(run_id)
+    if run.status not in TERMINAL_RUN_STATUSES:
+        raise RunDeletionConflictError("완료되거나 실패한 실행만 삭제할 수 있습니다.")
+
+    artifacts = services.artifact_registry.list_artifacts(run_id=run_id)
+    artifact_ids = [artifact.artifact_id for artifact in artifacts]
+    event_count_row = services.run_service.sqlite.query_one(
+        "SELECT COUNT(*) AS count FROM run_events WHERE run_id = ?",
+        (run_id,),
+    )
+    event_count = int(event_count_row["count"]) if event_count_row else 0
+
+    with services.run_service.sqlite.connect() as conn:
+        approval_rows = conn.execute(
+            "SELECT approval_id FROM approval_requests WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+        approval_ids = [row["approval_id"] for row in approval_rows]
+
+        if approval_ids:
+            placeholders = ",".join("?" for _ in approval_ids)
+            conn.execute(
+                f"DELETE FROM approval_events WHERE approval_id IN ({placeholders})",
+                approval_ids,
+            )
+        if artifact_ids:
+            placeholders = ",".join("?" for _ in artifact_ids)
+            conn.execute(
+                f"DELETE FROM exports WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM claim_evidence WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM artifact_lineage WHERE parent_id IN ({placeholders}) "
+                f"OR child_id IN ({placeholders})",
+                [*artifact_ids, *artifact_ids],
+            )
+            conn.execute(
+                f"DELETE FROM artifact_previews WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM artifacts WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+
+        conn.execute("DELETE FROM approval_requests WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+
+    for artifact_id in artifact_ids:
+        services.artifact_store.delete(artifact_id)
+
+    if run.thread_id:
+        remaining_thread_run = services.run_service.sqlite.query_one(
+            "SELECT 1 FROM runs WHERE thread_id = ? LIMIT 1",
+            (run.thread_id,),
+        )
+        if remaining_thread_run is None:
+            for suffix in ("", "-wal", "-shm"):
+                checkpoint_path = ensure_child_path(
+                    services.config.base_data_dir,
+                    services.config.base_data_dir / f"{run.thread_id}.sqlite{suffix}",
+                )
+                checkpoint_path.unlink(missing_ok=True)
+
+    return RunDeletionResult(
+        run_id=run_id,
+        deleted_event_count=event_count,
+        deleted_artifact_count=len(artifact_ids),
+    )
 
 
 @dataclass(frozen=True)
