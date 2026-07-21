@@ -184,6 +184,42 @@ def test_generate_report_success(adapter, runtime, monkeypatch):
     assert len(fake_llm.calls) == 1
 
 
+def test_generate_report_uses_report_max_tokens(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_report_max_tokens")
+    ids = _seed_full_path(adapter, run.run_id)
+    fake_llm = _FakeLLM([_VALID_RESPONSE])
+    captured: dict[str, object] = {}
+
+    def fake_get_chat_model(**kwargs):
+        captured.update(kwargs)
+        return fake_llm
+
+    monkeypatch.setattr(generator_module, "get_chat_model", fake_get_chat_model)
+    monkeypatch.delenv("REPORT_MAX_TOKENS", raising=False)
+
+    generate_report(list(ids.values()), runtime)
+
+    assert captured["max_tokens"] == 8192
+
+
+def test_generate_report_respects_report_max_tokens_env(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_report_max_tokens_env")
+    ids = _seed_full_path(adapter, run.run_id)
+    fake_llm = _FakeLLM([_VALID_RESPONSE])
+    captured: dict[str, object] = {}
+
+    def fake_get_chat_model(**kwargs):
+        captured.update(kwargs)
+        return fake_llm
+
+    monkeypatch.setattr(generator_module, "get_chat_model", fake_get_chat_model)
+    monkeypatch.setenv("REPORT_MAX_TOKENS", "12000")
+
+    generate_report(list(ids.values()), runtime)
+
+    assert captured["max_tokens"] == 12000
+
+
 def test_generate_report_uses_cache_on_second_call(adapter, runtime, monkeypatch):
     run = adapter.create_run(thread_id="thread_report_cache")
     ids = _seed_full_path(adapter, run.run_id)

@@ -1660,6 +1660,29 @@ def test_codegen_judge_failure_does_not_retry(monkeypatch):
     assert "errors" not in out                              # 시도 자체가 없어 errors 없음
 
 
+def test_codegen_judge_error_redacts_provider_message(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
+
+    class BoomLLM:
+        def invoke(self, _prompt):
+            raise RuntimeError(
+                "Error code: 402 - This request requires more credits, or fewer max_tokens. "
+                "https://openrouter.ai/workspaces/default/keys/secret"
+            )
+
+    monkeypatch.setattr(C, "get_llm", lambda model_env="LLM_MODEL": BoomLLM())
+    reset_context()
+    set_context(EdaContext(df=pd.DataFrame({"order_price": [1.0]})))
+    try:
+        update = C.codegen_node({"user_question": "X"})
+    finally:
+        reset_context()
+
+    assert update["codegen"]["reason"] == "judge_error: llm_token_budget_exceeded"
+    assert "openrouter.ai" not in update["final_summary"].lower()
+    assert "secret" not in update["final_summary"].lower()
+
+
 def test_codegen_success_emits_chart_request(monkeypatch, tmp_path):
     # codegen 성공(차트 있음) → PNG와 별개로 chart_request 계약도 ctx에 발행된다.
     import DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen as C
@@ -1711,6 +1734,21 @@ def test_planner_node_can_select_codegen(monkeypatch):
     finally:
         reset_context()
     assert out["next_analysis"] == "codegen"
+
+
+def test_planner_node_rejects_zero_attempt_done_when_feasible(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
+    monkeypatch.setattr(P, "get_llm",
+                        lambda *a, **k: _FakeLLM('{"next": "done", "reason": "enough"}'))
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    try:
+        out = P.planner_node({"user_question": "category average", "controller_log": [], "round": 0})
+    finally:
+        reset_context()
+    assert out["next_analysis"] == "distribution"
+    assert "planner_done_unreliable" in out["controller_log"][-1]["reason"]
 
 
 def test_planner_node_rejects_hallucinated_choice(monkeypatch):

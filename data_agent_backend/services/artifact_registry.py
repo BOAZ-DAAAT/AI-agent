@@ -144,7 +144,7 @@ class ArtifactRegistry:
             params.append(project_id)
         if type:
             clauses.append("type = ?")
-            params.append(str(type))
+            params.append(type.value if isinstance(type, ArtifactType) else str(type))
         sql = "SELECT artifact_id FROM artifacts"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
