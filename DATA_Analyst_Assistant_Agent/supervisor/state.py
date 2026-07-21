@@ -1037,6 +1037,16 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             filters=[str(item) for item in (plan_payload.get("filters") or []) if str(item).strip()],
             requires_mart_review=bool(plan_payload.get("requires_mart_review", False)),
             query_rules=dict(plan_payload.get("query_rules") or {}),
+            required_derivations=[
+                dict(item)
+                for item in (plan_payload.get("required_derivations") or [])
+                if isinstance(item, dict)
+            ],
+            analysis_heuristics=[
+                dict(item)
+                for item in (plan_payload.get("analysis_heuristics") or [])
+                if isinstance(item, dict)
+            ],
             route_kind=route_kind,
             generated_sql=generated_sql,
             source_sql=source_sql,

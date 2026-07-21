@@ -92,6 +92,10 @@ class EDAAgent:
             "data_level": eda_result.get("data_level", {}),
             "cautions": eda_result.get("cautions", []),
             "analysis_constraints": eda_result.get("analysis_constraints", []),
+            "analysis_data_contract": eda_result.get(
+                "analysis_data_contract",
+                (state.plan.analysis_data_contract if state.plan else {}),
+            ),
             "statistical_metadata": eda_result.get("statistical_metadata", {}),
             "key_charts": key_chart_entries,
             "error_log": eda_result.get("error_log", []),
@@ -150,6 +154,7 @@ class EDAAgent:
         # GE 정합성 스코핑용 원천 테이블 + grain 교차검증용 선언 grain(있으면 줍고 없으면 폴백).
         plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
         plan_business_grain = (plan.business_grain if plan and plan.business_grain else "") or ""
+        analysis_data_contract = dict(plan.analysis_data_contract) if plan and plan.analysis_data_contract else {}
         # 수퍼바이저가 직전 시도를 부실 판정했으면(semantic/hard 실패), EDA 자체 재시도 루프
         # (validator.py → validation_feedback)가 읽는 자리에 초기값으로 심어 재사용한다.
         retry_context = plan.retry_context if plan and plan.retry_context else {}
@@ -174,6 +179,7 @@ class EDAAgent:
                     "plan_dimension": plan_dimension,
                     "plan_source_tables": plan_source_tables,
                     "plan_business_grain": plan_business_grain,
+                    "analysis_data_contract": analysis_data_contract,
                     "validation_feedback": initial_validation_feedback,
                     "error_log": [],
                 }

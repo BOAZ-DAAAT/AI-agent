@@ -9,6 +9,13 @@ CLARIFY_QUERY_PROMPT = """
 
 
 CLARIFY_DECISION_PROMPT = """
+Important clarification policy:
+- Distinguish structural derivations from analysis heuristics.
+- Structural derivations are SQL/mart variables whose entity, grain, source column, or time basis materially changes the dataset, such as entity sample-size counts, cohort keys, or first/last event dates. Ask the user only when those cannot be inferred safely.
+- Analysis heuristics are thresholds, bins, low-n cutoffs, scoring labels, or method choices. Do not block for these when the analyst can choose them from the data; record them later as assumptions, warnings, or limitations.
+- If analysis_rule_context contains a customary definition from semantic retrieval, use it as the proposed default in the clarification question. Ask in the form "보통은 X로 정의합니다. 이 기준으로 진행할까요?" when user confirmation would materially affect scope; otherwise proceed with the retrieved default and record the assumption.
+- User-provided operational definitions override semantic retrieval when computable from the available schema. If semantic retrieval has no relevant default, or the user explicitly defines the metric/cohort/threshold/grain, proceed with the user definition and do not ask again unless it is not computable or remains materially ambiguous.
+
 당신은 데이터 분석가용 에이전트의 clarification 노드를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 사용자 질문이 분석을 시작하기에 충분한지 판단하세요.
 추가 질문이 필요하면 needs_clarification=true로 두고 clarification_question에 사용자에게 물을 한 문장을 작성하세요.
@@ -100,6 +107,14 @@ CREATE_ANALYSIS_PLAN_PROMPT = """
 
 
 PLAN_DECISION_PROMPT = """
+Important planning policy:
+- Separate SQL-required structural derivations from analyst-side heuristics.
+- Put SQL/mart variables in required_derivations only when downstream EDA/Analysis should receive an explicit column or contract entry. Examples: seller-level order_count computed as COUNT(DISTINCT order_id), cohort_month, first_purchase_date, entity-level numerator/denominator fields.
+- Put thresholds, bins, low-n rules, heuristic labels, and method-choice assumptions in analysis_heuristics. These must be recorded and critic-reviewed as warnings/limitations, but they are not SQL generation requirements unless the user explicitly asks for a persisted column.
+- Do not infer sample size from a count-like column name alone. If sample-size filtering is needed, request/define a structural derivation with entity, grain, source_columns, definition, preferred_name, safe_for, and not_for.
+- Use analysis_rule_context from semantic retrieval as preferred default definitions. If a retrieved default materially changes the dataset and needs confirmation, surface that option in clarification; if it is ordinary analysis policy, carry it into required_derivations or analysis_heuristics and record the source in reason.
+- User-provided operational definitions override semantic defaults when computable. Record the override in required_derivations or analysis_heuristics with source="user_definition"; use source="semantic_default" only when the user did not define it.
+
 당신은 데이터 분석가용 에이전트의 planning 노드를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 분석 목표와 실행 계획을 만드세요.
 planner_mode는 코드가 "llm"으로 기록하므로 응답에 포함하지 않아도 됩니다.
@@ -120,10 +135,12 @@ planner_mode는 코드가 "llm"으로 기록하므로 응답에 포함하지 않
 - dimension: string 또는 null
 - filters: string 배열
 - requires_mart_review: boolean
+- required_derivations: array of objects. SQL-required structural derivations only. Include name, purpose, entity, grain, source_columns, definition, preferred_name, safe_for, not_for when known.
+- analysis_heuristics: array of objects. Analyst-side thresholds, bins, labels, or method choices. Include name, purpose, default_policy, rationale, must_record=true.
 - reason: string
 
 예시:
-{"goal":"월별 매출 추이 분석","route_kind":"trend","steps":["SQL로 월별 매출 집계","EDA로 추세 확인","리포트 생성"],"metric":"매출","dimension":"월","filters":[],"requires_mart_review":false,"reason":"시간 추이 분석 요청입니다."}
+{"goal":"월별 매출 추이 분석","route_kind":"trend","steps":["SQL로 월별 매출 집계","EDA로 추세 확인","리포트 생성"],"metric":"매출","dimension":"월","filters":[],"requires_mart_review":false,"required_derivations":[],"analysis_heuristics":[],"reason":"시간 추이 분석 요청입니다."}
 """.strip()
 
 

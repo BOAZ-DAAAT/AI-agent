@@ -678,6 +678,8 @@ def make_create_analysis_plan_node(model: Any | None):
             "filters": list(decision.filters),
             "requires_mart_review": decision.requires_mart_review,
             "query_rules": dict(state.get("analysis_rule_context") or {}),
+            "required_derivations": list(decision.required_derivations),
+            "analysis_heuristics": list(decision.analysis_heuristics),
         }
         if state.get("datasource_id") is not None:
             plan["datasource_id"] = state.get("datasource_id")

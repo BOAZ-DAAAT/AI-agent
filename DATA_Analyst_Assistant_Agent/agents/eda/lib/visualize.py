@@ -2,6 +2,7 @@ import os
 import glob
 import json
 import re
+from datetime import date, datetime
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -198,6 +199,38 @@ def _pretty_label(label: str) -> str:
 def _ellipsize(value, max_len: int = 18) -> str:
     text = str(value)
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _safe_datetime_series(series: pd.Series) -> pd.Series:
+    """Parse datetime-like values scalar-by-scalar.
+
+    Vectorized ``pd.to_datetime(series)`` can hard-crash on this Windows/Pandas
+    runtime for object columns that contain date-like strings or date objects.
+    """
+    parsed_values = []
+    for value in series:
+        if value is None:
+            parsed_values.append(None)
+            continue
+        if isinstance(value, pd.Timestamp):
+            parsed_values.append(value.to_pydatetime())
+            continue
+        if isinstance(value, datetime):
+            parsed_values.append(value)
+            continue
+        if isinstance(value, date):
+            parsed_values.append(datetime.combine(value, datetime.min.time()))
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in {"nat", "nan", "none"}:
+            parsed_values.append(None)
+            continue
+        try:
+            parsed = pd.to_datetime(text, errors="coerce")
+            parsed_values.append(None if pd.isna(parsed) else parsed.to_pydatetime())
+        except Exception:  # noqa: BLE001
+            parsed_values.append(None)
+    return pd.Series(parsed_values, index=series.index, dtype="object")
 
 
 def _flag_group_label(flag_col: str, value) -> str:
@@ -1074,25 +1107,34 @@ def plot_timeseries(df: pd.DataFrame, measure_cols: list = None, time_cols: list
     if not time_cols or len(numeric_cols) == 0:
         return {"chart_paths": [], "stats": {}}
 
-    time_col  = time_cols[0]
-    df_sorted = df.sort_values(time_col)
+    time_col = time_cols[0]
+    parsed_time = _safe_datetime_series(df[time_col])
+    if not any(value is not None for value in parsed_time):
+        return {"chart_paths": [], "stats": {}, "skipped": f"{time_col} 시간 파싱 불가"}
 
     for metric in numeric_cols:
-        s = df_sorted[metric].dropna()
+        rows = [
+            (parsed_time.iloc[pos], value)
+            for pos, value in enumerate(df[metric].tolist())
+            if parsed_time.iloc[pos] is not None and pd.notna(value)
+        ]
+        rows = sorted(rows, key=lambda item: item[0])
+        if len(rows) < 2:
+            continue
+        x_values = [item[0] for item in rows]
+        y_values = [float(item[1]) for item in rows]
         stats[metric] = {
-            "start": str(df_sorted[time_col].min()),
-            "end":   str(df_sorted[time_col].max()),
-            "first_value": round(float(df_sorted[metric].iloc[0]), 4),
-            "last_value":  round(float(df_sorted[metric].iloc[-1]), 4),
+            "start": str(x_values[0]),
+            "end":   str(x_values[-1]),
+            "first_value": round(y_values[0], 4),
+            "last_value":  round(y_values[-1], 4),
             "overall_change_pct": round(
-                (float(df_sorted[metric].iloc[-1]) - float(df_sorted[metric].iloc[0]))
-                / (abs(float(df_sorted[metric].iloc[0])) + 1e-9) * 100, 2
+                (y_values[-1] - y_values[0]) / (abs(y_values[0]) + 1e-9) * 100, 2
             ),
         }
         fig, ax = plt.subplots(figsize=(11, 4))
-        ax.fill_between(df_sorted[time_col], df_sorted[metric],
-                        alpha=0.15, color=PALETTE_MAIN)
-        ax.plot(df_sorted[time_col], df_sorted[metric],
+        ax.fill_between(x_values, y_values, alpha=0.15, color=PALETTE_MAIN)
+        ax.plot(x_values, y_values,
                 color=PALETTE_MAIN, linewidth=1.6, marker="o", markersize=3)
         _apply_style(ax, f"Timeseries: {metric}", xlabel=time_col, ylabel=metric)
         plt.xticks(rotation=40)
@@ -1118,9 +1160,14 @@ def plot_seasonality(df: pd.DataFrame, measure_cols: list = None, time_cols: lis
 
     time_col = time_cols[0]
     df = df.copy()
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    df["_month"]   = df[time_col].dt.month
-    df["_weekday"] = df[time_col].dt.day_name()
+    parsed_time = _safe_datetime_series(df[time_col])
+    valid_mask = parsed_time.map(lambda value: value is not None)
+    df = df.loc[valid_mask].copy()
+    parsed_time = parsed_time.loc[valid_mask]
+    if df.empty:
+        return {"chart_paths": [], "stats": {}, "skipped": f"{time_col} 시간 파싱 불가"}
+    df["_month"] = [value.month for value in parsed_time]
+    df["_weekday"] = [value.strftime("%A") for value in parsed_time]
 
     for period_col, label in [("_month", "month"), ("_weekday", "weekday")]:
         for metric in numeric_cols:
@@ -1373,7 +1420,8 @@ def plot_multiline_timeseries(df: pd.DataFrame, time_col: str = None, key_col: s
         return {"chart_paths": [], "stats": {}, "skipped": "시간/범주/수치 컬럼 부족"}
 
     d = df.copy()
-    period = pd.to_datetime(d[time_col], errors="coerce").dt.to_period("M").astype(str)
+    parsed_time = _safe_datetime_series(d[time_col])
+    period = parsed_time.map(lambda value: value.strftime("%Y-%m") if value is not None else None)
     if period.notna().sum() == 0:
         return {"chart_paths": [], "stats": {}, "skipped": f"{time_col} 시간 파싱 불가"}
     d["_period"] = period

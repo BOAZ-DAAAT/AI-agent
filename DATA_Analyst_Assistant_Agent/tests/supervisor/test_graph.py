@@ -1068,6 +1068,29 @@ def test_plan_node_records_llm_planner_mode() -> None:
     assert result["llm_decisions"][0]["node"] == "create_analysis_plan"
 
 
+def test_plan_node_records_required_derivations_and_heuristics_separately() -> None:
+    decision = _plan_decision(route_kind="comprehensive")
+    decision["required_derivations"] = [{
+        "name": "seller_sample_order_count",
+        "entity": "seller_id",
+        "grain": "seller_id",
+        "source_columns": ["orders.order_id"],
+        "definition": "COUNT(DISTINCT order_id) per seller_id",
+        "preferred_name": "seller_sample_order_count",
+    }]
+    decision["analysis_heuristics"] = [{
+        "name": "low_n_threshold",
+        "default_policy": "n < 30 is a limitation, not a SQL filter unless requested",
+        "must_record": True,
+    }]
+    node = make_create_analysis_plan_node(SequencedDecisionModel([decision]))
+
+    result = node(_state())
+
+    assert result["analysis_plan"]["required_derivations"][0]["preferred_name"] == "seller_sample_order_count"
+    assert result["analysis_plan"]["analysis_heuristics"][0]["name"] == "low_n_threshold"
+
+
 def test_execute_subagent_runs_only_the_registered_action() -> None:
     adapter = FakeSubAgentAdapter()
     decisions = [

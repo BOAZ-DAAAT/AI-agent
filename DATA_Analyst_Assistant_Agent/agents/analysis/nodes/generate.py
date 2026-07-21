@@ -117,6 +117,14 @@ Rules:
   count-like mart column such as `seller_order_count` as the entity sample size
   unless the analysis_data_contract explicitly defines it as that exact
   entity-level total.
+- Prefer analysis_data_contract.sample_size_rules over column-name guessing.
+  If sample_size_rules has no implemented preferred_column, compute from its
+  source_columns when available or record a limitation instead of substituting
+  another count-like column by name.
+- Treat analysis_data_contract.analysis_heuristics as analyst-side method
+  assumptions. You may apply defensible thresholds/bins/labels, but record the
+  selected value, rationale, and sensitivity/limitation in method_decision,
+  method_notes, or limitations.
 - If an entity filter leaves too few rows/groups for a statistic, set the
   related decision to `inconclusive`, state that the test is not estimable, and
   do not describe NaN/None statistics as a positive/negative relationship.

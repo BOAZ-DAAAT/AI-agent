@@ -8,10 +8,14 @@ question is analyzed daily instead of being forced to a monthly resample.
 
 from __future__ import annotations
 
+import json
+import math
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.prompts.domains import (
     KNOWN_DOMAINS,
@@ -22,6 +26,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisIntent,
     TimeGrain,
 )
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.datetime import safe_datetime_series
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 
@@ -71,7 +76,7 @@ def resolve_time_grain(
 
     if not time_column or time_column not in dataframe.columns:
         return None, None
-    parsed = pd.to_datetime(dataframe[time_column], errors="coerce").dropna()
+    parsed = safe_datetime_series(dataframe[time_column]).dropna()
     if parsed.empty:
         return None, None
     span_days = int((parsed.max() - parsed.min()).days)
@@ -93,7 +98,7 @@ def classify_intent(
     structured_model = chat_model.with_structured_output(AnalysisIntent)
     human = (
         f"Domain labels:\n{domain_catalog_text()}\n\n"
-        f"Analysis context:\n{context.model_dump_json(indent=2)}"
+        f"Analysis context:\n{_safe_context_json(context)}"
     )
     result = structured_model.invoke([
         SystemMessage(content=CLASSIFY_SYSTEM_PROMPT),
@@ -112,3 +117,38 @@ def classify_intent(
     if not time_column:
         intent.is_time_based = False
     return intent
+
+
+def _safe_context_json(context: AnalysisContext) -> str:
+    return json.dumps(_json_safe(context), ensure_ascii=False, indent=2)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(value, (datetime, date)):
+        try:
+            return value.isoformat()
+        except Exception:  # noqa: BLE001
+            return str(value)
+    if isinstance(value, BaseModel):
+        return _json_safe(value.__dict__)
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except Exception:  # noqa: BLE001
+            pass
+    return str(value)

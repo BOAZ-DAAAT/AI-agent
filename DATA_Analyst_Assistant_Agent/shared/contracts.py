@@ -159,6 +159,8 @@ class AnalysisPlan(BaseModel):
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
     query_rules: dict[str, Any] = Field(default_factory=dict)
+    required_derivations: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_heuristics: list[dict[str, Any]] = Field(default_factory=list)
     route_kind: Literal["simple", "eda", "trend", "mart", "comprehensive"] = "simple"
     generated_sql: str = ""
     source_sql: str = ""

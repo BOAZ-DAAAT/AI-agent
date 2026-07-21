@@ -396,6 +396,7 @@ def insight_node(state: EDAState) -> dict:
     data_level: Dict[str, Any] = {}
     cautions: list = []
     analysis_constraints: list = []
+    analysis_data_contract = state.get("analysis_data_contract") or {}
     if df is not None:
         from DATA_Analyst_Assistant_Agent.agents.eda.lib.missing import detect_missing
         from DATA_Analyst_Assistant_Agent.agents.eda.lib.outlier import detect_outliers_iqr
@@ -466,6 +467,15 @@ def insight_node(state: EDAState) -> dict:
                 ),
                 "recommended_action": ["verify_grain_before_group_analysis"],
             }]
+        if analysis_data_contract.get("unimplemented_derivations"):
+            cautions = cautions + [{
+                "code": "SQL_DERIVATION_CONTRACT_INCOMPLETE",
+                "source": "analysis_data_contract",
+                "severity": "medium",
+                "message_ko": "SQL이 요청받은 구조적 파생변수 중 일부를 구현하지 못했습니다. 해당 변수에 의존하는 해석은 제한으로 보고해야 합니다.",
+                "recommended_action": ["treat_as_interpretation_limit", "avoid_name_based_substitution"],
+                "details": analysis_data_contract.get("unimplemented_derivations"),
+            }]
         # 상류 원천 테이블의 GE 정합성 이슈(스코핑+fail_only+100줄 캡, #123 함수 재사용). 없으면 "".
         integrity_text = load_scoped_integrity_text(state.get("plan_source_tables") or [])
         if integrity_text:
@@ -488,6 +498,7 @@ def insight_node(state: EDAState) -> dict:
             "sample_reliability": sample_reliability,
             "cautions":           cautions,
             "analysis_constraints": analysis_constraints,
+            "analysis_data_contract": analysis_data_contract,
             "distribution":       dist_stats,
             "group_comparison":   group_comparison,
             "correlation_pairs":  corr_pairs,
@@ -568,6 +579,7 @@ def insight_node(state: EDAState) -> dict:
         "data_level": data_level,
         "cautions": cautions,
         "analysis_constraints": analysis_constraints,
+        "analysis_data_contract": analysis_data_contract,
         "chart_requests": chart_requests,
         "error_log": append_errors(state, err),
     }

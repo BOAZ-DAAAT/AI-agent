@@ -9,6 +9,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.frame import frame_f
 import os
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.bayesian import posterior_mean
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.datetime import safe_datetime_series
 
 @tool
 def run_bayesian_mmm(
@@ -39,7 +40,7 @@ def run_bayesian_mmm(
     if not channel_columns:
         raise ValueError("MMM requires at least one media channel column.")
     work = df[required].copy()
-    work[date_column] = pd.to_datetime(work[date_column], errors="coerce")
+    work[date_column] = safe_datetime_series(work[date_column])
     for column in [outcome_column, *channel_columns, *controls]:
         work[column] = pd.to_numeric(work[column], errors="coerce")
     work = work.dropna().sort_values(date_column)

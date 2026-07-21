@@ -134,9 +134,25 @@ def load_mart_node(state: EDAState) -> dict:
         }
 
     mart_design = state.get("mart_design", {}) or {}
+    contract = state.get("analysis_data_contract", {}) or {}
     key_columns    = mart_design.get("key_columns", [])
     dimension_cols = mart_design.get("dimension_columns", [])
     measure_cols   = mart_design.get("measure_columns") or None
+    if contract:
+        key_columns = key_columns or list(contract.get("grain_columns") or contract.get("entity_keys") or [])
+        derived_columns = [
+            item for item in (contract.get("derived_columns") or []) if isinstance(item, dict)
+        ]
+        dimension_cols = dimension_cols or [
+            str(item.get("output_column"))
+            for item in derived_columns
+            if item.get("role") in {"dimension", "attribute"} and item.get("output_column")
+        ]
+        measure_cols = measure_cols or [
+            str(item.get("output_column"))
+            for item in derived_columns
+            if item.get("role") == "measure" and item.get("output_column")
+        ] or None
 
     # measure_cols 미지정 시 수치형 컬럼으로 추론
     if not measure_cols:

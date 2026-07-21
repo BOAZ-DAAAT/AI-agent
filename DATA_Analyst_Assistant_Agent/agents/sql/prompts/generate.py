@@ -53,6 +53,7 @@ MySQL 재사용 데이터마트 SQL을 작성한다.
 - final_grain을 보존하고 grain_columns가 행을 식별하게 한다.
 - 최종 컬럼은 column_plan.output_column의 순서·alias·계산 계약과 정확히 일치시킨다.
 - column_plan에 선언된 분석 필수 파생변수는 비율이어도 calculation_rule의 분자·분모·연산 순서와 0/NULL 처리 규칙대로 SQL에서 생성한다.
+- Supervisor가 required_derivations로 지시한 구조적 파생변수는 mart_design.column_plan의 alias와 정의를 그대로 구현한다. 분석 heuristic(threshold, bin, low-n cutoff, label)은 column_plan에 명시된 경우가 아니면 SQL 컬럼으로 새로 만들지 않는다.
 - metric_support.required_mart_columns를 보존하며 임의 컬럼·집계·필터를 추가하지 않는다.
 - source_column_refs는 실제 source table.column, derived_columns는 계산 alias, output_columns는 최종 컬럼만 기록한다.
 - DROP, ALTER, TRUNCATE와 column_plan에 없는 최종 표시용 비율·순위·판정 지표를 생성하지 않는다.

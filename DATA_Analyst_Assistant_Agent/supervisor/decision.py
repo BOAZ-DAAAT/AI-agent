@@ -66,6 +66,8 @@ class AnalysisPlanDecision(BaseModel):
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
+    required_derivations: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_heuristics: list[dict[str, Any]] = Field(default_factory=list)
     reason: str = ""
 
 
