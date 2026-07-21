@@ -969,6 +969,59 @@ def test_resume_approval_with_changed_hash_invalidates_and_revalidates(monkeypat
     assert updates["run_events"][-1]["type"] == "approval.invalidated"
 
 
+def test_resume_approval_false_rejects_pending_candidate(monkeypatch) -> None:
+    adapter = FakeBackendAdapter()
+    checkpoint = {
+        "current_run_id": "run_resumed_001",
+        "pending_result": {
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "hash_sql"},
+            "state_updates": {},
+            "result": {
+                "agent": "sql_agent",
+                "status": "approval_required",
+                "summary": "SQL 승인 필요",
+                "artifact_ids": ["artifact_sql"],
+            },
+        },
+        "pending_approval": {
+            "agent": "sql_agent",
+            "candidate_id": "candidate_001",
+            "validation_id": "validation_001",
+            "content_hashes": {"artifact_sql": "hash_sql"},
+        },
+        "terminal_state": "needs_user_approval",
+        "state_schema_version": 2,
+        "accepted_evidence": {},
+        "result_history": [],
+        "rejected_results": [],
+        "quarantined_artifacts": [],
+        "semantic_retry_counts": {},
+        "run_events": [],
+    }
+    graph = ApprovalResumeGraph(
+        checkpoint,
+        {
+            "current_run_id": "run_resumed_001",
+            "terminal_state": "failed_with_recoverable_context",
+            "final_answer": "사용자가 승인 요청을 거절했습니다.",
+        },
+    )
+    agent = SupervisorAgent(adapter, checkpoint_path=":memory:")
+    monkeypatch.setattr(agent, "_build_runtime_graph", lambda checkpointer: graph)
+
+    agent.resume("thread_sales_001", {"approved": False, "reason": "SQL을 실행하지 않겠습니다."})
+
+    _, updates, as_node = graph.state_updates[0]
+    assert as_node == "commit_candidate"
+    assert updates["pending_result"] is None
+    assert updates["pending_approval"] is None
+    assert updates["terminal_state"] == "failed_with_recoverable_context"
+    assert updates["rejected_results"][-1]["reason"] == "SQL을 실행하지 않겠습니다."
+    assert updates["run_events"][-1]["type"] == "approval.rejected"
+
+
 def test_resume_approval_without_pending_approval_raises_when_checkpoint_is_readable(monkeypatch) -> None:
     adapter = FakeBackendAdapter()
     checkpoint_state = {

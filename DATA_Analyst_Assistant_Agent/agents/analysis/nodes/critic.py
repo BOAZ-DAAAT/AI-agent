@@ -49,6 +49,17 @@ short observation windows, weak or missing effect sizes, missing validation sets
 missing true labels, or observational/non-causal data. Those should appear in
 limitations or method_notes, and the verdict should usually be pass.
 
+When the input was produced by an upstream SQL/datamart step, evaluate the
+analysis against the declared analysis_data_contract. Do not require the
+analysis code to reconstruct upstream transformations when the contract
+specifies the grain, derivation, aggregation, and interpretation constraints.
+Fail only when the analysis violates that contract or makes claims unsupported
+by it. If the contract is incomplete, request upstream contract repair instead
+of inventing assumptions.
+
+Write every user-facing critique feedback, method_issue, and suggested fix in
+Korean.
+
 Fail (verdict="fail") if any of these hold:
 - The statistical method is wrong for the data (e.g. a t-test on paired/temporal
   data, correlation reported as causation, classification metrics on a regression).
@@ -97,14 +108,23 @@ def critique_analysis_code(
         f"- method_notes: {result.get('method_notes')}\n"
         f"- review_request: {result.get('review_request')}\n"
     )
+    if context is not None and context.analysis_data_contract:
+        human += (
+            "\n상위 SQL/데이터마트 분석 입력 계약:\n"
+            f"{context.analysis_data_contract}\n"
+            f"데이터마트 컬럼 원본/파생 근거: {context.mart_columns}\n"
+            f"계약상 주의할 점: {context.contract_issues}\n"
+        )
     # 상류 SQL 원천 테이블의 알려진 정합성 이슈(#130) — 이를 감안 안 한 결론을 잡아내는 검토 근거.
     if context is not None and context.known_data_quality_issues:
         joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)
         human += (
-            "\nKnown data quality issues (from SQL integrity check):\n"
+            "\nSQL 정합성 점검에서 전달된 데이터 품질 이슈:\n"
             f"{joined}\n"
-            "Fail if the analysis draws conclusions these issues would undermine "
-            "without acknowledging them.\n"
+            "이 이슈는 자동 실패 사유가 아니라 입력 계약의 근거로 다룹니다. "
+            "현재 분석 grain에서 통계가 명확히 왜곡되고 결과가 이를 보정하거나 "
+            "한계로 명시하지 않은 경우에만 fail을 반환합니다. 선언된 grain 또는 "
+            "복합 키와 양립하면 실패 대신 한계로 기록합니다.\n"
         )
     verdict = structured_model.invoke([
         SystemMessage(content=CRITIC_SYSTEM_PROMPT),
@@ -157,6 +177,9 @@ def deterministic_precheck(
             "Time-based analysis only partially covered requested signals: "
             + ", ".join(coverage.missing_requirements),
         )
+
+    for contract_issue in context.contract_issues:
+        _append_method_note(result, f"입력 데이터 계약 주의: {contract_issue}")
 
     if not issues:
         return None

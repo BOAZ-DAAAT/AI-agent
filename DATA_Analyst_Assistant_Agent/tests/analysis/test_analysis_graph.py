@@ -10,7 +10,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     CodeCritique,
     GeneratedAnalysisCode,
 )
-from DATA_Analyst_Assistant_Agent.shared.contracts import OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
 
 
 def _validation_error_for(text: str) -> ValidationError:
@@ -155,6 +155,36 @@ def test_graph_repeated_generation_parse_failure_is_labeled_generation_failed() 
     execution_check = next(c for c in checks if c.name == "analysis_code_executed")
     assert not execution_check.passed
     assert "[generate]" in execution_check.detail
+
+
+def test_graph_blocks_sql_datamart_with_incomplete_analysis_contract() -> None:
+    state = _state()
+    state.plan = AnalysisPlan(
+        goal="seller monthly delivery trend",
+        target_table="analytics.seller_month_delivery",
+        generated_sql="SELECT seller_id, month, avg_delivery_days FROM mart",
+        analysis_data_contract={
+            "target_table": "analytics.seller_month_delivery",
+            "row_grain": "",
+            "generated_sql": "SELECT seller_id, month, avg_delivery_days FROM mart",
+            "derived_columns": [{"output_column": "month", "source_columns": ["order_purchase_timestamp"]}],
+        },
+    )
+    classify = _FakeModel([AssertionError("classify should not be called")])
+
+    result, checks, terminal = run_analysis_workflow(
+        state,
+        pd.DataFrame({"seller_id": ["s1"], "month": ["2024-01-01"], "avg_delivery_days": [3.0]}),
+        [],
+        planner_model=classify,
+        code_generator_model=_FakeModel([]),
+        critic_model=_FakeModel([]),
+    )
+
+    parsed = AnalysisResult.model_validate(result)
+    assert terminal == "analysis_contract_invalid"
+    assert parsed.status == "failed"
+    assert any("row_grain" in limitation for limitation in parsed.limitations)
 
 
 def test_graph_repeated_execute_failure_is_labeled_execution_failed() -> None:

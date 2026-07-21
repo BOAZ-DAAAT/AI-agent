@@ -410,6 +410,46 @@ def test_explicit_failure_takes_priority_over_error_finding_and_approval() -> No
     }
 
 
+def test_analysis_contract_invalid_routes_to_sql_contract_repair() -> None:
+    state = _state()
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="failed",
+        summary="분석 입력 계약이 불충분합니다.",
+        retry_hint=RetryHint(
+            retryable=True,
+            suggested_action="repair_analysis_data_contract",
+            reason_code="analysis_contract_invalid",
+            details={"failure_reason": "SQL 데이터마트의 row_grain이 명확하지 않습니다"},
+        ),
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "retry"
+    assert decision.next_action == "call_sql_agent"
+    assert decision.failure_streak is not None
+    assert decision.failure_streak["suggested_action"] == "repair_analysis_data_contract"
+
+
+def test_sql_contract_repair_success_routes_back_to_analysis() -> None:
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="분석 입력 계약 보강 완료",
+        retry_hint=RetryHint(
+            retryable=False,
+            suggested_action="call_analysis_agent",
+            reason_code="analysis_data_contract_repaired",
+        ),
+    )
+
+    decision = validate_subagent_result(_state(), result)
+
+    assert decision.valid is True
+    assert decision.next_action == "call_analysis_agent"
+
+
 def test_failure_reason_uses_error_then_summary_then_unknown_fallback() -> None:
     state = _state()
     results = [

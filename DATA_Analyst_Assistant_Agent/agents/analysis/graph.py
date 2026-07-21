@@ -73,10 +73,32 @@ def classify_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             selection_response=state.get("selection_response"),
             review_request=state.get("review_request"),
         )
+        contract_blockers = _analysis_contract_blockers(context)
+        if contract_blockers:
+            return {
+                "analysis_context": context,
+                "error": "분석 입력 계약이 불충분합니다: " + "; ".join(contract_blockers),
+                "terminal_reason": "analysis_contract_invalid",
+            }
         intent = classify_intent(context, state["dataframe"], model=state.get("classify_model"))
         return {"analysis_context": context, "intent": intent, "error": "", "terminal_reason": ""}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc), "terminal_reason": "classify_failed"}
+
+
+def _analysis_contract_blockers(context: AnalysisContext) -> list[str]:
+    contract = context.analysis_data_contract or {}
+    if not contract:
+        return []
+    has_sql_datamart = bool(contract.get("target_table") or contract.get("generated_sql"))
+    if not has_sql_datamart:
+        return []
+    blockers: list[str] = []
+    if not str(contract.get("row_grain") or "").strip():
+        blockers.append("SQL 데이터마트의 row_grain이 명확하지 않습니다")
+    if not contract.get("derived_columns") and not context.mart_columns:
+        blockers.append("SQL 데이터마트 컬럼의 원본/파생 관계가 명확하지 않습니다")
+    return blockers
 
 
 def analyze_node(state: AnalysisWorkflowState) -> dict[str, Any]:

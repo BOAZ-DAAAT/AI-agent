@@ -13,7 +13,7 @@ def finalize_analysis(state: dict[str, Any]) -> dict[str, Any]:
     if result is not None:
         return {"result": result, "local_checks": checks, "terminal_reason": terminal_reason}
 
-    error = state.get("error") or "Analysis workflow did not produce a result."
+    error = state.get("error") or "분석 워크플로가 결과를 생성하지 못했습니다."
     orchestration = state["orchestration_state"]
     plan = AnalysisExecutionPlan(
         objective=orchestration.goal or orchestration.user_query,
@@ -26,14 +26,15 @@ def finalize_analysis(state: dict[str, Any]) -> dict[str, Any]:
         run_id=orchestration.run_id,
         goal=orchestration.goal or orchestration.user_query,
         plan=plan,
-        method_summary="Analysis did not complete; no statistical tools were executed.",
-        key_findings=["Analysis workflow ended before producing executable evidence."],
+        method_summary="분석이 완료되지 않아 통계 도구가 실행되지 않았습니다.",
+        key_findings=["실행 가능한 근거가 생성되기 전에 분석 워크플로가 종료되었습니다."],
         limitations=[error],
         source_artifacts={
             "sql": orchestration.artifact_ids.get("sql_agent", []),
             "eda": orchestration.artifact_ids.get("eda_agent", []),
         },
         human_review=HumanReview(required=True, reason=error),
+        status="failed",
     ).model_dump(mode="json")
     return {
         "result": failed,

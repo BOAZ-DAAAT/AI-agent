@@ -854,6 +854,9 @@ def test_clarification_interrupt_returns_payload_and_skips_subagents() -> None:
         "question": "어떤 기간과 단위로 매출을 분석할까요?",
         "node": "collect_clarification",
         "expected_resume": {"answer": "string"},
+        "input_mode": "free_text",
+        "options": [],
+        "allow_free_text": True,
     }
     assert adapter.calls == []
 

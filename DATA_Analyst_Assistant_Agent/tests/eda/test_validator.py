@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from DATA_Analyst_Assistant_Agent.agents.eda.agent import run_eda_self_check
+from DATA_Analyst_Assistant_Agent.agents.eda.agent import (
+    run_eda_self_check,
+    run_eda_validation_findings,
+)
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes import validator as validator_mod
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.validator import (
     MAX_VALIDATION_RETRIES,
@@ -240,7 +243,7 @@ def test_run_eda_self_check_flags_validator_failure() -> None:
     validation_check = next(c for c in checks if c.name == "eda_self_validation")
 
     assert validation_check.passed is False
-    assert validation_check.severity == "error"
+    assert validation_check.severity == "warning"
     assert validation_check.detail == "실패 사유"
 
 
@@ -250,3 +253,38 @@ def test_run_eda_self_check_passes_without_validator_failure() -> None:
 
     assert validation_check.passed is True
     assert validation_check.severity == "info"
+
+
+def test_run_eda_self_check_flags_retryable_validator_failure_as_error() -> None:
+    cautions = [{
+        "code": "EDA_SELF_VALIDATION_FAILED",
+        "source": "eda_validator",
+        "message_ko": "retryable failure",
+        "details": {"failure_code": "insight_fallback", "retryable": True},
+    }]
+
+    checks = run_eda_self_check(["artifact-1"], {"columns": ["a"]}, cautions)
+    validation_check = next(c for c in checks if c.name == "eda_self_validation")
+
+    assert validation_check.passed is False
+    assert validation_check.severity == "error"
+
+
+def test_run_eda_validation_findings_separates_retryable_error_from_limitation() -> None:
+    findings = run_eda_validation_findings([
+        {
+            "code": "EDA_SELF_VALIDATION_FAILED",
+            "source": "eda_validator",
+            "message_ko": "manual review only",
+            "details": {"failure_code": "missing_statistical_metadata", "retryable": False},
+        },
+        {
+            "code": "EDA_SELF_VALIDATION_FAILED",
+            "source": "eda_validator",
+            "message_ko": "rerun can help",
+            "details": {"failure_code": "insight_fallback", "retryable": True},
+        },
+    ])
+
+    assert [finding.disposition for finding in findings] == ["limitation", "error"]
+    assert [finding.retryable for finding in findings] == [False, True]

@@ -314,6 +314,12 @@ def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: Backe
     assert envelope.retry_hint.reason_code == "method_review_failed"
     assert envelope.error == "wrong method"
     assert "wrong method" in envelope.summary
+    assert any(
+        finding.code == "method_review_failed"
+        and finding.disposition == "error"
+        and finding.retryable is True
+        for finding in envelope.validation.findings
+    )
     assert envelope.retry_hint.details == {
         "terminal_reason": "method_review_failed",
         "failure_reason": "wrong method",
@@ -366,6 +372,11 @@ def test_agent_review_required_registers_public_and_debug_artifacts(adapter: Bac
     artifact = adapter.get_artifact(public_id)
     assert artifact.preview["review_request"]["recommended_option_id"] == "top_only"
     assert not parsed.key_findings[0].startswith("SQL result contains")
+    assert any(
+        finding.code == "analysis_review_request"
+        and finding.disposition == "semantic_evidence"
+        for finding in envelope.validation.findings
+    )
 
 
 def test_agent_non_actionable_review_note_stays_success(adapter: BackendAdapter) -> None:
@@ -406,3 +417,9 @@ def test_agent_non_actionable_review_note_stays_success(adapter: BackendAdapter)
     assert parsed.review_request is None
     assert parsed.method_notes == ["sample size is small"]
     assert debug_payload["method_notes"] == ["sample size is small"]
+    assert any(
+        finding.code == "analysis_method_note"
+        and finding.disposition == "limitation"
+        and finding.message == "sample size is small"
+        for finding in envelope.validation.findings
+    )

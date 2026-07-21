@@ -161,6 +161,9 @@ class SupervisorState(TypedDict, total=False):
     clarified_query: str
     needs_clarification: bool
     clarification_question: str
+    clarification_input_mode: str
+    clarification_options: list[dict[str, Any]]
+    clarification_allow_free_text: bool
     analysis_rule_context: dict[str, Any] | None
     analysis_rule_retrieval: dict[str, Any]
     analysis_plan: dict[str, Any]
@@ -989,10 +992,20 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
         )
     analysis_failure = (state.get("failure_streaks") or {}).get("analysis_agent")
     if isinstance(analysis_failure, dict):
-        _retry_context["last_failure"] = {
+        last_failure = {
             "reason_code": str(analysis_failure.get("reason_code") or "none"),
             "failure_reason": str(analysis_failure.get("failure_reason") or ""),
         }
+        suggested_action = str(analysis_failure.get("suggested_action") or "")
+        if suggested_action:
+            last_failure["suggested_action"] = suggested_action
+        _retry_context["last_failure"] = last_failure
+        if (
+            _retry_context["last_failure"]["reason_code"] == "analysis_contract_invalid"
+            and _retry_context["last_failure"].get("suggested_action") == "repair_analysis_data_contract"
+        ):
+            _retry_context["suggested_action"] = "repair_analysis_data_contract"
+            _retry_context["mode"] = "contract_only"
     _agent_feedback: dict[str, dict[str, Any]] = {}
     for record in state.get("validation_history", []):
         agent = str(record.get("agent") or "")
@@ -1030,6 +1043,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             target_table=plan_payload.get("target_table") or None,
             source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
             business_grain=plan_payload.get("business_grain") or None,
+            mart_design=dict(plan_payload.get("mart_design") or {}),
+            analysis_data_contract=dict(plan_payload.get("analysis_data_contract") or {}),
         )
     limitations = [str(item) for item in state.get("limitations", []) if item]
     limitations.extend(

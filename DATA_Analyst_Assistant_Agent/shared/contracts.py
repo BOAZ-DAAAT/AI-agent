@@ -171,6 +171,8 @@ class AnalysisPlan(BaseModel):
     # SQL 에이전트가 선언한 엔티티 grain(예: "one row per customer_unique_id"). EDA가 자체
     # grain 추정치와 교차검증하는 데 쓴다. analysis의 time_grain(일/주/월)과는 다른 개념. None이면 스킵.
     business_grain: str | None = None
+    mart_design: dict[str, Any] = Field(default_factory=dict)
+    analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrchestrationState(BaseModel):
@@ -221,6 +223,9 @@ class SupervisorInterruptPayload(BaseModel):
     expected_resume: dict[str, str] = Field(default_factory=lambda: {"answer": "string"})
     approval_id: str | None = None
     review_request: dict[str, Any] | None = None
+    input_mode: Literal["free_text", "choice_with_free_text", "approval"] = "free_text"
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    allow_free_text: bool = True
 
     @model_validator(mode="after")
     def validate_type_specific_fields(self) -> "SupervisorInterruptPayload":
@@ -229,6 +234,8 @@ class SupervisorInterruptPayload(BaseModel):
                 raise ValueError("clarification interrupt에는 analysis review 필드를 포함할 수 없습니다.")
             if self.expected_resume != {"answer": "string"}:
                 raise ValueError("clarification interrupt의 expected_resume이 올바르지 않습니다.")
+            if self.input_mode == "choice_with_free_text" and not self.options:
+                raise ValueError("choice clarification interrupt requires options.")
             return self
         if not (self.approval_id or "").strip() or not isinstance(self.review_request, dict):
             raise ValueError("analysis_review interrupt에는 approval_id와 review_request가 필요합니다.")

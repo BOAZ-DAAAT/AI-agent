@@ -52,6 +52,9 @@ class ClarificationDecision(BaseModel):
     needs_clarification: bool
     clarified_query: str = ""
     clarification_question: str = ""
+    input_mode: Literal["free_text", "choice_with_free_text"] = "free_text"
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    allow_free_text: bool = True
     reason: str = ""
 
 
