@@ -238,8 +238,8 @@ class StructuredFindingAgent:
                     ValidationFinding(
                         code="invalid_join_plan",
                         source="sql_langgraph",
-                        severity="warning",
-                        disposition="retry_required",
+                        severity="error",
+                        disposition="error",
                         message="조인 계획을 다시 생성해야 합니다.",
                         retryable=True,
                         suggested_action="fix_sql",
@@ -270,7 +270,7 @@ def test_subagent_adapter_preserves_structured_findings_retry_hint_and_approval(
 
     assert result.status == "success"
     assert result.findings[0].code == "invalid_join_plan"
-    assert result.findings[0].disposition == "retry_required"
+    assert result.findings[0].disposition == "error"
     assert result.retry_hint.reason_code == "invalid_join_plan"
     assert result.retry_hint.details == {"join": "orders-customers"}
     assert result.approval.required is True
@@ -334,6 +334,8 @@ def test_subagent_adapter_returns_plan_metadata_state_updates() -> None:
         "target_table": None,
         "source_tables": [],
         "business_grain": None,
+        "mart_design": {},
+        "analysis_data_contract": {},
     }
 
 

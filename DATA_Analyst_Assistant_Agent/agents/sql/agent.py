@@ -19,12 +19,118 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_artifact import build_validation_summary_payload
 
 
+def _looks_temporal_column(name: str) -> bool:
+    normalized = name.casefold()
+    return any(token in normalized for token in ("date", "time", "month", "year", "timestamp"))
+
+
 class SQLAgent:
     name = "sql_agent"
 
     def run(self, state: OrchestrationState, runtime: AgentRuntime) -> AgentEnvelope:
+        if self._is_contract_repair_mode(state):
+            return self._repair_analysis_data_contract_only(state, runtime)
         result = self._run_main_sql_agent(state)
         return self._envelope_from_main_result(state, runtime, result)
+
+    @staticmethod
+    def _is_contract_repair_mode(state: OrchestrationState) -> bool:
+        retry_context = state.plan.retry_context if state.plan else state.retry_context
+        if not isinstance(retry_context, dict):
+            return False
+        last_failure = retry_context.get("last_failure") or {}
+        return (
+            retry_context.get("mode") == "contract_only"
+            and retry_context.get("suggested_action") == "repair_analysis_data_contract"
+            and isinstance(last_failure, dict)
+            and last_failure.get("reason_code") == "analysis_contract_invalid"
+        )
+
+    def _repair_analysis_data_contract_only(
+        self,
+        state: OrchestrationState,
+        runtime: AgentRuntime,
+    ) -> AgentEnvelope:
+        context = runtime.context(state, node_name=self.name, tool_name="sql_agent.contract_repair")
+        if state.plan is None:
+            return AgentEnvelope(
+                status=AgentStatus.failed,
+                agent_name=self.name,
+                summary="분석 입력 계약을 보강할 SQL 계획이 없습니다.",
+                validation=ValidationBlock(local_checks=[
+                    LocalCheck(
+                        name="analysis_data_contract_repaired",
+                        passed=False,
+                        severity="error",
+                        detail="analysis_plan is missing.",
+                    )
+                ]),
+                retry_hint={
+                    "retryable": False,
+                    "suggested_action": "stop_and_surface_error",
+                    "reason_code": "missing_analysis_plan",
+                    "details": {},
+                },
+                error="analysis_plan is missing.",
+            )
+
+        generated_sql = state.plan.generated_sql or state.plan.source_sql or state.generated_sql
+        sql_draft = {
+            "sql": generated_sql,
+            "target_table": state.plan.target_table,
+            "source_tables": state.plan.source_tables,
+            "business_grain": state.plan.business_grain,
+        }
+        contract = self._repair_contract_from_existing_plan(state.plan, sql_draft, generated_sql)
+        state.plan.analysis_data_contract = contract
+        state.generated_sql = generated_sql
+        state.planner_mode = state.plan.planner_mode
+        state.error_state = {}
+
+        ref = runtime.adapter.register_artifact(
+            state.run_id,
+            "file",
+            content_text=json.dumps(
+                {
+                    "analysis_data_contract": contract,
+                    "generated_sql_preserved": generated_sql,
+                    "target_table": state.plan.target_table,
+                    "mode": "contract_only",
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            filename=f"analysis_data_contract_repair_{state.run_id}.json",
+            created_by_tool="sql_agent.contract_repair",
+            context=context,
+            metadata={"kind": "analysis_data_contract", "mode": "contract_only"},
+            preview={
+                "row_grain": contract.get("row_grain"),
+                "target_table": contract.get("target_table"),
+                "derived_column_count": len(contract.get("derived_columns") or []),
+            },
+        )
+        return AgentEnvelope(
+            status=AgentStatus.success,
+            agent_name=self.name,
+            summary="기존 SQL/데이터마트를 재생성하지 않고 분석 입력 계약만 보강했습니다.",
+            artifact_refs=[ref],
+            validation=ValidationBlock(local_checks=[
+                LocalCheck(
+                    name="analysis_data_contract_repaired",
+                    passed=bool(str(contract.get("row_grain") or "").strip()),
+                    severity="error" if not str(contract.get("row_grain") or "").strip() else "info",
+                    detail="analysis_data_contract row_grain repaired.",
+                )
+            ]),
+            retry_hint={
+                "retryable": False,
+                "suggested_action": "call_analysis_agent",
+                "reason_code": "analysis_data_contract_repaired",
+                "details": {"mode": "contract_only"},
+            },
+        )
 
     def _run_main_sql_agent(self, state: OrchestrationState) -> dict[str, Any]:
         from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
@@ -136,6 +242,12 @@ class SQLAgent:
             state.plan.target_table = target_table or None
             state.plan.source_tables = source_tables
             state.plan.business_grain = business_grain
+            state.plan.mart_design = result.get("mart_design") or {}
+            state.plan.analysis_data_contract = self._analysis_data_contract(
+                result.get("mart_design") or {},
+                sql_draft,
+                generated_sql,
+            )
 
         plan_payload = {
             "plan": result.get("plan") or {},
@@ -320,14 +432,15 @@ class SQLAgent:
     def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
         severity = str(item.get("severity") or "info")
         retryable = bool(item.get("retryable", False))
-        if retryable and severity == "error":
-            disposition = "retry_required"
+        explicit_disposition = str(item.get("disposition") or "").strip()
+        if explicit_disposition:
+            disposition = explicit_disposition
         elif severity == "error":
-            disposition = "blocking"
+            disposition = "error"
         elif severity == "warning":
-            disposition = "limitation"
+            disposition = "warning"
         else:
-            disposition = "advisory"
+            disposition = "diagnostic"
         return ValidationFinding(
             code=str(item.get("code") or item.get("category") or "sql_validation"),
             source=str(item.get("source") or "sql_langgraph"),
@@ -338,6 +451,163 @@ class SQLAgent:
             suggested_action=str(item.get("suggested_action") or ""),
             details=dict(item.get("details") or {}),
         )
+
+    @staticmethod
+    def _analysis_data_contract(
+        mart_design: dict[str, Any],
+        sql_draft: dict[str, Any],
+        generated_sql: str,
+    ) -> dict[str, Any]:
+        column_plan = list(mart_design.get("column_plan") or [])
+        grain_columns = list(mart_design.get("grain_columns") or [])
+        derived_columns = [
+            {
+                "output_column": item.get("output_column"),
+                "role": item.get("role"),
+                "source_columns": list(item.get("source_columns") or []),
+                "calculation_type": item.get("calculation_type"),
+                "calculation_rule": item.get("calculation_rule"),
+                "aggregation_method": item.get("aggregation_method"),
+            }
+            for item in column_plan
+            if isinstance(item, dict)
+        ]
+        aggregation_rules = [
+            item
+            for item in derived_columns
+            if str(item.get("aggregation_method") or "none").lower() != "none"
+        ]
+        return {
+            "target_table": sql_draft.get("target_table") or mart_design.get("mart_name"),
+            "row_grain": mart_design.get("grain") or sql_draft.get("business_grain") or "",
+            "grain_columns": grain_columns,
+            "entity_keys": [
+                column for column in grain_columns if not _looks_temporal_column(column)
+            ],
+            "time_basis": [
+                item
+                for item in derived_columns
+                if _looks_temporal_column(str(item.get("output_column") or ""))
+                or any(_looks_temporal_column(str(source)) for source in item.get("source_columns") or [])
+            ],
+            "derived_columns": derived_columns,
+            "aggregation_rules": aggregation_rules,
+            "deduplication_keys": list(mart_design.get("deduplication_keys") or []),
+            "source_tables": list(mart_design.get("source_tables") or sql_draft.get("source_tables") or []),
+            "source_grains": dict(mart_design.get("source_grains") or {}),
+            "safe_interpretations": [
+                "선언된 row_grain 기준에서만 데이터마트를 해석합니다.",
+                "집계 수준의 연관성을 개별 주문 수준 인과로 해석하지 않습니다.",
+                "계약과 표본이 충분히 뒷받침하지 않으면 추세 검정은 기술적 해석으로 제한합니다.",
+            ],
+            "generated_sql": generated_sql,
+        }
+
+    @classmethod
+    def _repair_contract_from_existing_plan(
+        cls,
+        plan: Any,
+        sql_draft: dict[str, Any],
+        generated_sql: str,
+    ) -> dict[str, Any]:
+        existing = dict(getattr(plan, "analysis_data_contract", None) or {})
+        mart_design = dict(getattr(plan, "mart_design", None) or {})
+        contract = cls._analysis_data_contract(mart_design, sql_draft, generated_sql)
+        inferred_columns = cls._infer_column_lineage_from_sql(generated_sql)
+        if inferred_columns and not contract.get("derived_columns"):
+            contract["derived_columns"] = inferred_columns
+        elif inferred_columns:
+            known = {
+                str(item.get("output_column") or "")
+                for item in contract.get("derived_columns") or []
+                if isinstance(item, dict)
+            }
+            contract["derived_columns"] = [
+                *(contract.get("derived_columns") or []),
+                *[item for item in inferred_columns if item["output_column"] not in known],
+            ]
+
+        group_columns = cls._infer_group_columns_from_sql(generated_sql)
+        for key, value in existing.items():
+            if value not in (None, "", [], {}):
+                contract[key] = value
+        if not str(contract.get("row_grain") or "").strip():
+            contract["row_grain"] = getattr(plan, "business_grain", None) or ", ".join(group_columns)
+        if not contract.get("grain_columns"):
+            contract["grain_columns"] = group_columns
+        if not contract.get("entity_keys"):
+            contract["entity_keys"] = [
+                column for column in contract.get("grain_columns", []) if not _looks_temporal_column(column)
+            ]
+        if not contract.get("deduplication_keys"):
+            contract["deduplication_keys"] = list(contract.get("grain_columns") or [])
+        if not contract.get("time_basis"):
+            contract["time_basis"] = [
+                item
+                for item in contract.get("derived_columns", [])
+                if isinstance(item, dict)
+                and (
+                    _looks_temporal_column(str(item.get("output_column") or ""))
+                    or any(_looks_temporal_column(str(source)) for source in item.get("source_columns") or [])
+                )
+            ]
+        contract["target_table"] = contract.get("target_table") or getattr(plan, "target_table", None)
+        contract["source_tables"] = contract.get("source_tables") or list(getattr(plan, "source_tables", []) or [])
+        contract["generated_sql"] = generated_sql
+        return contract
+
+    @staticmethod
+    def _infer_column_lineage_from_sql(sql: str) -> list[dict[str, Any]]:
+        if not str(sql or "").strip():
+            return []
+        try:
+            import sqlglot
+            from sqlglot import exp
+
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+            select = tree.find(exp.Select) if tree is not None else None
+            if select is None:
+                return []
+            items: list[dict[str, Any]] = []
+            for expression in select.expressions:
+                alias = expression.alias_or_name
+                if not alias:
+                    continue
+                source_columns = sorted({
+                    column.sql(dialect="mysql")
+                    for column in expression.find_all(exp.Column)
+                })
+                agg = next(expression.find_all(exp.AggFunc), None)
+                items.append(
+                    {
+                        "output_column": alias,
+                        "source_columns": source_columns or [alias],
+                        "calculation_type": (
+                            "aggregate"
+                            if agg is not None
+                            else "derived" if expression.find(exp.Func) or expression.find(exp.Case) else "passthrough"
+                        ),
+                        "calculation_rule": expression.sql(dialect="mysql"),
+                        "aggregation_method": agg.key.upper() if agg is not None else "none",
+                    }
+                )
+            return items
+        except Exception:
+            return []
+
+    @staticmethod
+    def _infer_group_columns_from_sql(sql: str) -> list[str]:
+        try:
+            import sqlglot
+            from sqlglot import exp
+
+            tree = sqlglot.parse_one(sql, error_level="ignore")
+            group = tree.find(exp.Group) if tree is not None else None
+            if group is None:
+                return []
+            return [item.sql(dialect="mysql").split(".")[-1] for item in group.expressions]
+        except Exception:
+            return []
 
     @staticmethod
     def _main_sql_result_to_csv(rows: Any) -> tuple[str, list[str], int]:

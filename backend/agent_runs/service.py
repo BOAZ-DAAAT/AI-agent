@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any, Iterator
 from uuid import uuid4
 
 from sqlalchemy import inspect
 
 from backend.config import StorageMySQL
 from backend.session.schemas import SessionResponse
-from data_agent_backend.models.runs import RunRecord, RunStatus
+from data_agent_backend.models.runs import TERMINAL_RUN_STATUSES, RunRecord, RunStatus
 from data_agent_backend.services.factory import BackendServices
+from data_agent_backend.storage.filesystem import ensure_child_path
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
@@ -20,9 +22,170 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, S
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
+from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
 
 
 _SESSION_ENV_LOCK = threading.Lock()
+
+
+class NodeSummaryNotFoundError(Exception):
+    """완료 노드 또는 해당 노드의 상세 서머리를 찾지 못했을 때."""
+
+
+class RunDeletionConflictError(Exception):
+    """아직 실행 중인 run 삭제를 요청했을 때."""
+
+
+@dataclass(frozen=True)
+class RunDeletionResult:
+    run_id: str
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
+def delete_terminal_run_data(
+    *,
+    services: BackendServices,
+    run_id: str,
+) -> RunDeletionResult:
+    run = services.run_service.get_run(run_id)
+    if run.status not in TERMINAL_RUN_STATUSES:
+        raise RunDeletionConflictError("완료되거나 실패한 실행만 삭제할 수 있습니다.")
+
+    artifacts = services.artifact_registry.list_artifacts(run_id=run_id)
+    artifact_ids = [artifact.artifact_id for artifact in artifacts]
+    event_count_row = services.run_service.sqlite.query_one(
+        "SELECT COUNT(*) AS count FROM run_events WHERE run_id = ?",
+        (run_id,),
+    )
+    event_count = int(event_count_row["count"]) if event_count_row else 0
+
+    with services.run_service.sqlite.connect() as conn:
+        approval_rows = conn.execute(
+            "SELECT approval_id FROM approval_requests WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+        approval_ids = [row["approval_id"] for row in approval_rows]
+
+        if approval_ids:
+            placeholders = ",".join("?" for _ in approval_ids)
+            conn.execute(
+                f"DELETE FROM approval_events WHERE approval_id IN ({placeholders})",
+                approval_ids,
+            )
+        if artifact_ids:
+            placeholders = ",".join("?" for _ in artifact_ids)
+            conn.execute(
+                f"DELETE FROM exports WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM claim_evidence WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM artifact_lineage WHERE parent_id IN ({placeholders}) "
+                f"OR child_id IN ({placeholders})",
+                [*artifact_ids, *artifact_ids],
+            )
+            conn.execute(
+                f"DELETE FROM artifact_previews WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+            conn.execute(
+                f"DELETE FROM artifacts WHERE artifact_id IN ({placeholders})",
+                artifact_ids,
+            )
+
+        conn.execute("DELETE FROM approval_requests WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+
+    for artifact_id in artifact_ids:
+        services.artifact_store.delete(artifact_id)
+
+    if run.thread_id:
+        remaining_thread_run = services.run_service.sqlite.query_one(
+            "SELECT 1 FROM runs WHERE thread_id = ? LIMIT 1",
+            (run.thread_id,),
+        )
+        if remaining_thread_run is None:
+            for suffix in ("", "-wal", "-shm"):
+                checkpoint_path = ensure_child_path(
+                    services.config.base_data_dir,
+                    services.config.base_data_dir / f"{run.thread_id}.sqlite{suffix}",
+                )
+                checkpoint_path.unlink(missing_ok=True)
+
+    return RunDeletionResult(
+        run_id=run_id,
+        deleted_event_count=event_count,
+        deleted_artifact_count=len(artifact_ids),
+    )
+
+
+@dataclass(frozen=True)
+class NodeSummaryLookup:
+    node_id: str
+    agent_name: str
+    summary_artifact_id: str
+    summary: NodeSummaryResult
+
+
+def get_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    completed_event = next(
+        (
+            event
+            for event in reversed(services.run_service.list_events(run_id))
+            if event.event_type == "agent.completed"
+            and event.metadata.get("node_id") == node_id
+        ),
+        None,
+    )
+    if completed_event is None:
+        raise NodeSummaryNotFoundError("완료된 노드를 찾을 수 없습니다.")
+
+    summary_metadata = completed_event.metadata.get("summary")
+    summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
+    summary_artifact_id = summary_metadata.get("summary_artifact_id")
+    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
+        source_artifact_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
+        source_ids = {item for item in source_artifact_ids if isinstance(item, str)}
+        for artifact in reversed(services.artifact_registry.list_artifacts(run_id=run_id, type="file")):
+            metadata = artifact.metadata
+            if metadata.get("kind") != "node_summary":
+                continue
+            if set(metadata.get("source_artifact_ids") or []) == source_ids and source_ids:
+                summary_artifact_id = artifact.artifact_id
+                break
+
+    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리가 아직 생성되지 않았습니다.")
+
+    try:
+        artifact = services.artifact_registry.get_artifact(summary_artifact_id)
+    except Exception as exc:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리 artifact를 찾을 수 없습니다.") from exc
+    if artifact.run_id != run_id or artifact.metadata.get("kind") != "node_summary":
+        raise NodeSummaryNotFoundError("실행에 속한 노드 서머리가 아닙니다.")
+
+    try:
+        payload = json.loads(services.artifact_store.read_text(summary_artifact_id))
+        summary = NodeSummaryResult.model_validate(payload)
+    except Exception as exc:
+        raise NodeSummaryNotFoundError("노드의 상세 서머리 형식이 올바르지 않습니다.") from exc
+
+    return NodeSummaryLookup(
+        node_id=node_id,
+        agent_name=completed_event.node_name or str(summary_metadata.get("agent") or ""),
+        summary_artifact_id=summary_artifact_id,
+        summary=summary,
+    )
 
 
 def new_thread_id() -> str:
@@ -163,24 +326,32 @@ def launch_agent_run(
         raise
 
 
+_RESUME_MESSAGES = {
+    "clarification": "Clarification answer received. Resuming agent workflow.",
+    "analysis_review": "Analysis review decision received. Resuming agent workflow.",
+    "approval": "Approval received. Resuming agent workflow.",
+}
+
+
 def resume_agent_run(
     *,
     services: BackendServices,
     session: SessionResponse,
-    answer: str,
+    resume_payload: dict[str, Any],
     run_id: str,
     thread_id: str,
 ) -> None:
     run = services.run_service.get_run(run_id)
     interrupt_node = run.metadata.get("node")
     node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
+    resumed_from = str(run.metadata.get("resumed_from") or "clarification")
     services.run_service.append_event(
         run_id,
         "human_input.resumed",
-        "Clarification answer received. Resuming agent workflow.",
+        _RESUME_MESSAGES.get(resumed_from, _RESUME_MESSAGES["clarification"]),
         node_name=node_name,
         metadata={
-            "interrupt_type": "clarification",
+            "interrupt_type": resumed_from,
             "thread_id": thread_id,
             "node": node_name,
         },
@@ -191,7 +362,7 @@ def resume_agent_run(
         adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
         supervisor = SupervisorAgent(adapter, checkpoint_path=adapter.base_data_dir / f"{thread_id}.sqlite")
         with bind_session_database(session):
-            result = supervisor.resume(thread_id, {"answer": answer})
+            result = supervisor.resume(thread_id, resume_payload)
         if isinstance(result, SupervisorRunResult) and result.kind == "state":
             _append_terminal_event(services, run_id, result)
     except Exception as exc:

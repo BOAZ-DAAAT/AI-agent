@@ -18,6 +18,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     ApprovalRequirement,
     OrchestrationState,
     RetryHint,
+    ValidationFinding,
     ValidationBlock,
 )
 
@@ -122,21 +123,34 @@ class AnalysisAgent:
         )
         review = public_result["human_review"]
         workflow_failed = terminal_reason != "validated_result"
+        retry_action = (
+            "repair_analysis_data_contract"
+            if terminal_reason == "analysis_contract_invalid"
+            else "retry_analysis"
+        )
         codegen_attempts = int(result.get("codegen_attempts") or 0)
         failure_reason = _analysis_failure_reason(result, terminal_reason)
         return AgentEnvelope(
             status=AgentStatus.failed if workflow_failed else AgentStatus.success,
             agent_name=self.name,
             summary=(
-                f"Analysis workflow did not pass validation: {failure_reason}"
+                f"분석 워크플로가 검증을 통과하지 못했습니다: {failure_reason}"
                 if workflow_failed
                 else "Analysis result generated from SQL result CSV and EDA profile artifacts."
             ),
             artifact_refs=[ref, debug_ref],
-            validation=ValidationBlock(local_checks=local_checks),
+            validation=ValidationBlock(
+                local_checks=local_checks,
+                findings=_analysis_validation_findings(
+                    public_result,
+                    terminal_reason,
+                    workflow_failed,
+                    suggested_action=retry_action,
+                ),
+            ),
             retry_hint=RetryHint(
                 retryable=workflow_failed,
-                suggested_action="retry_analysis" if workflow_failed else "continue",
+                suggested_action=retry_action if workflow_failed else "continue",
                 reason_code=terminal_reason if workflow_failed else "none",
                 details={
                     "terminal_reason": terminal_reason,
@@ -174,6 +188,81 @@ def _analysis_failure_reason(result: dict[str, Any], terminal_reason: str) -> st
     if limitations:
         return limitations[0]
     return terminal_reason
+
+
+def _analysis_validation_findings(
+    public_result: dict[str, Any],
+    terminal_reason: str,
+    workflow_failed: bool,
+    *,
+    suggested_action: str = "retry_analysis",
+) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    if workflow_failed:
+        findings.append(
+            ValidationFinding(
+                code=terminal_reason,
+                source="analysis_workflow",
+                severity="error",
+                disposition="error",
+                message="분석 워크플로가 검증된 결과를 생성하지 못했습니다.",
+                retryable=True,
+                suggested_action=suggested_action,
+                details={"status": public_result.get("status")},
+            )
+        )
+        return findings
+
+    review_request = public_result.get("review_request")
+    if isinstance(review_request, dict):
+        findings.append(
+            ValidationFinding(
+                code="analysis_review_request",
+                source="analysis_workflow",
+                severity="info",
+                disposition="semantic_evidence",
+                message=str(review_request.get("question") or "Analysis result includes a review request."),
+                retryable=False,
+                suggested_action="request_human_review",
+                details={
+                    "decision_type": review_request.get("decision_type"),
+                    "recommended_option_id": review_request.get("recommended_option_id"),
+                },
+            )
+        )
+
+    for index, note in enumerate(public_result.get("method_notes") or []):
+        text = str(note).strip()
+        if not text:
+            continue
+        findings.append(
+            ValidationFinding(
+                code="analysis_method_note",
+                source="analysis_critic",
+                severity="warning",
+                disposition="limitation",
+                message=text,
+                retryable=False,
+                details={"index": index},
+            )
+        )
+
+    for index, limitation in enumerate(public_result.get("limitations") or []):
+        text = str(limitation).strip()
+        if not text:
+            continue
+        findings.append(
+            ValidationFinding(
+                code="analysis_limitation",
+                source="analysis_result",
+                severity="warning",
+                disposition="limitation",
+                message=text,
+                retryable=False,
+                details={"index": index},
+            )
+        )
+    return findings
 
 
 def _emit_progress(

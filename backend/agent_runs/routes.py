@@ -18,15 +18,21 @@ from data_agent_backend.models.runs import RunStatus
 
 from .event_stream import EVENT_STREAM_POLL_INTERVAL_SECONDS, stream_run_events
 from .schemas import (
+    AgentNodeSummaryResponse,
     AgentRunBranchRequest,
     AgentRunBranchResponse,
     AgentRunCreateRequest,
+    AgentRunDeleteResponse,
     AgentRunResponse,
     AgentRunResumeRequest,
     AgentRunResumeResponse,
 )
 from .service import (
     BranchPlanError,
+    NodeSummaryNotFoundError,
+    RunDeletionConflictError,
+    delete_terminal_run_data,
+    get_node_summary,
     launch_agent_run,
     new_thread_id,
     prepare_branch_plan,
@@ -36,6 +42,68 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+@router.delete("/{run_id}", response_model=AgentRunDeleteResponse)
+def delete_agent_run(
+    run_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentRunDeleteResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    try:
+        result = delete_terminal_run_data(services=services, run_id=run_id)
+    except RunDeletionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return AgentRunDeleteResponse(
+        run_id=result.run_id,
+        deleted_event_count=result.deleted_event_count,
+        deleted_artifact_count=result.deleted_artifact_count,
+    )
+
+
+@router.get(
+    "/{run_id}/nodes/{node_id}/summary",
+    response_model=AgentNodeSummaryResponse,
+)
+def read_agent_node_summary(
+    run_id: str,
+    node_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentNodeSummaryResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    try:
+        result = get_node_summary(services=services, run_id=run_id, node_id=node_id)
+    except NodeSummaryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return AgentNodeSummaryResponse(
+        run_id=run_id,
+        node_id=result.node_id,
+        agent_name=result.agent_name,
+        summary_artifact_id=result.summary_artifact_id,
+        summary=result.summary,
+    )
 
 
 @router.post("", response_model=AgentRunResponse, status_code=202)
@@ -98,34 +166,56 @@ def resume_run(
         raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
     session = get_owned_session(session_id, username)
 
-    if run.status != RunStatus.waiting_input:
-        raise HTTPException(
-            status_code=409,
-            detail="설명 입력을 기다리는 실행만 재개할 수 있습니다.",
-        )
-    if run.metadata.get("interrupt_type") != "clarification":
-        raise HTTPException(status_code=409, detail="현재 대기 요청은 clarification 유형이 아닙니다.")
     if not run.thread_id:
         raise HTTPException(status_code=409, detail="실행에 연결된 thread 정보가 없습니다.")
 
-    try:
-        services.run_service.claim_waiting_input(
-            run_id,
-            metadata={"resumed_from": "clarification"},
+    if payload.type in ("clarification", "analysis_review"):
+        # 둘 다 LangGraph interrupt 기반 — waiting_input 상태 + interrupt_type 일치 확인.
+        if run.status != RunStatus.waiting_input:
+            raise HTTPException(status_code=409, detail="입력을 기다리는 실행만 재개할 수 있습니다.")
+        if run.metadata.get("interrupt_type") != payload.type:
+            raise HTTPException(status_code=409, detail=f"현재 대기 요청은 {payload.type} 유형이 아닙니다.")
+        try:
+            services.run_service.claim_waiting_input(run_id, metadata={"resumed_from": payload.type})
+        except BackendError as exc:
+            if exc.code == "RUN_NOT_WAITING_INPUT":
+                raise HTTPException(
+                    status_code=409,
+                    detail="이미 재개되었거나 더 이상 입력 대기 상태가 아닙니다.",
+                ) from exc
+            raise
+        resume_payload: dict[str, object] = (
+            {"answer": payload.answer}
+            if payload.type == "clarification"
+            else {
+                "approval_id": payload.approval_id,
+                "selected_option_id": payload.selected_option_id,
+                "free_text": payload.free_text,
+            }
         )
-    except BackendError as exc:
-        if exc.code == "RUN_NOT_WAITING_INPUT":
-            raise HTTPException(
-                status_code=409,
-                detail="이미 재개되었거나 더 이상 입력 대기 상태가 아닙니다.",
-            ) from exc
-        raise
+    else:
+        # approval: LangGraph interrupt가 아니라 terminal_state(needs_user_approval)에서
+        # 만들어지는 단순 승인 대기 — waiting_input이 아니라 waiting_approval 상태.
+        if run.status != RunStatus.waiting_approval:
+            raise HTTPException(status_code=409, detail="승인을 기다리는 실행만 재개할 수 있습니다.")
+        try:
+            services.run_service.claim_waiting_approval(run_id, metadata={"resumed_from": "approval"})
+        except BackendError as exc:
+            if exc.code == "RUN_NOT_WAITING_APPROVAL":
+                raise HTTPException(
+                    status_code=409,
+                    detail="이미 재개되었거나 더 이상 승인 대기 상태가 아닙니다.",
+                ) from exc
+            raise
+        resume_payload = {"approved": payload.approved}
+        if payload.reason:
+            resume_payload["reason"] = payload.reason
 
     background_tasks.add_task(
         resume_agent_run,
         services=services,
         session=session,
-        answer=payload.answer,
+        resume_payload=resume_payload,
         run_id=run_id,
         thread_id=run.thread_id,
     )

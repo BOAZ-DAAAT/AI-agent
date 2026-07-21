@@ -72,6 +72,9 @@ GENERATE_SYSTEM_PROMPT = """You write one small, auditable Python analysis scrip
 
 Rules:
 - Operate on the pandas DataFrame named `df` (already loaded). `pd` and `np` are available.
+- 사용자에게 노출되는 모든 결과 텍스트는 한국어로 작성한다: summary, findings,
+  limitations, interpretation, method_notes, review_request의 labels/questions/options,
+  evidence table titles.
 - You MAY import from: pandas, numpy, math, statistics, scipy, statsmodels,
   sklearn, lifelines, datetime, time, collections, itertools, functools, re, json.
   No other imports (no os/sys/file/network access).

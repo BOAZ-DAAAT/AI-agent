@@ -84,8 +84,8 @@ def verify_candidate_evidence(state: SupervisorState, backend_adapter: Any) -> E
             _validate_content(record, requirement, backend_adapter, findings)
 
     _validate_lineage(result, records, state, findings)
-    blocking = any(finding.disposition == "blocking" for finding in findings)
-    limitations = any(finding.disposition == "limitation" for finding in findings)
+    blocking = any(finding.disposition == "error" for finding in findings)
+    limitations = any(finding.disposition in {"warning", "limitation"} for finding in findings)
     return EvidenceVerification(
         valid=not blocking,
         decision="reject" if blocking else "accept_with_limitations" if limitations else "accept",
@@ -182,7 +182,7 @@ def _finding(code: str, message: str) -> ValidationFinding:
         code=code,
         source="evidence_verifier",
         severity="error",
-        disposition="blocking",
+        disposition="error",
         message=message,
     )
 

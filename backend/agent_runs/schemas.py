@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
 
 
 class AgentRunCreateRequest(BaseModel):
@@ -18,24 +20,69 @@ class AgentRunResponse(BaseModel):
     session_id: str
 
 
-class AgentRunResumeRequest(BaseModel):
-    type: Literal["clarification"]
-    answer: str
+ResumeType = Literal["clarification", "analysis_review", "approval"]
 
-    @field_validator("answer")
-    @classmethod
-    def validate_answer(cls, value: str) -> str:
-        answer = value.strip()
-        if not answer:
-            raise ValueError("답변을 입력해주세요.")
-        return answer
+
+class AgentNodeSummaryResponse(BaseModel):
+    run_id: str
+    node_id: str
+    agent_name: str
+    summary_artifact_id: str
+    summary: NodeSummaryResult
+
+
+class AgentRunDeleteResponse(BaseModel):
+    run_id: str
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
+class AgentRunResumeRequest(BaseModel):
+    """세 가지 재개 유형을 하나로 받는다 — type이 어느 필드가 필요한지 결정한다.
+
+    - clarification: answer
+    - analysis_review: approval_id + (selected_option_id 또는 free_text 중 하나)
+    - approval: approved(true/false 모두 허용) + reason(거부 시 선택)
+    """
+
+    type: ResumeType
+    answer: str | None = None
+    approval_id: str | None = None
+    selected_option_id: str | None = None
+    free_text: str | None = None
+    approved: bool | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_fields_for_type(self) -> "AgentRunResumeRequest":
+        if self.type == "clarification":
+            answer = (self.answer or "").strip()
+            if not answer:
+                raise ValueError("답변을 입력해주세요.")
+            self.answer = answer
+        elif self.type == "analysis_review":
+            approval_id = (self.approval_id or "").strip()
+            if not approval_id:
+                raise ValueError("approval_id가 필요합니다.")
+            self.approval_id = approval_id
+            selected_option_id = (self.selected_option_id or "").strip() or None
+            free_text = (self.free_text or "").strip() or None
+            self.selected_option_id = selected_option_id
+            self.free_text = free_text
+            if (selected_option_id is None) == (free_text is None):
+                raise ValueError("selected_option_id 또는 free_text 중 정확히 하나를 입력해주세요.")
+        elif self.type == "approval":
+            if not isinstance(self.approved, bool):
+                raise ValueError("approved는 boolean이어야 합니다.")
+            self.reason = (self.reason or "").strip() or None
+        return self
 
 
 class AgentRunResumeResponse(BaseModel):
     run_id: str
     thread_id: str
     status: Literal["running"]
-    resume_type: Literal["clarification"]
+    resume_type: ResumeType
 
 
 BranchStage = Literal["sql", "eda", "analysis", "insight"]

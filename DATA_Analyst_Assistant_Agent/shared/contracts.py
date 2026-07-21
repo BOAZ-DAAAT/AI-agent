@@ -36,18 +36,36 @@ class BusinessFlag(BaseModel):
     message: str
 
 
-FindingDisposition = Literal["advisory", "limitation", "retry_required", "blocking"]
+FindingDisposition = Literal["error", "warning", "diagnostic", "semantic_evidence", "limitation"]
 
 
 class ValidationFinding(BaseModel):
     code: str
     source: str
     severity: Literal["info", "warning", "error"] = "info"
-    disposition: FindingDisposition = "advisory"
+    disposition: FindingDisposition = "diagnostic"
     message: str
     retryable: bool = False
     suggested_action: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_disposition(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        disposition = str(normalized.get("disposition") or "").strip()
+        if disposition == "blocking":
+            normalized["disposition"] = "error"
+        elif disposition == "retry_required":
+            normalized["disposition"] = "error"
+            normalized["retryable"] = True
+        elif disposition == "advisory":
+            normalized["disposition"] = "diagnostic"
+        elif not disposition:
+            normalized["disposition"] = "diagnostic"
+        return normalized
 
 
 class ValidationBlock(BaseModel):
@@ -63,7 +81,7 @@ class ValidationBlock(BaseModel):
                 code=check.name,
                 source="local_check",
                 severity=check.severity,
-                disposition="blocking" if check.severity == "error" else "limitation",
+                disposition="error" if check.severity == "error" else "limitation",
                 message=check.detail or check.name,
                 retryable=check.severity == "error",
             )
@@ -75,7 +93,7 @@ class ValidationBlock(BaseModel):
                 code=flag.code,
                 source="business_flag",
                 severity=flag.severity,
-                disposition="blocking" if flag.severity == "error" else "limitation",
+                disposition="error" if flag.severity == "error" else "limitation",
                 message=flag.message,
             )
             for flag in self.business_flags
@@ -85,12 +103,12 @@ class ValidationBlock(BaseModel):
 
     @property
     def has_errors(self) -> bool:
-        return any(finding.disposition == "blocking" for finding in self.normalized_findings())
+        return any(finding.disposition == "error" for finding in self.normalized_findings())
 
     @property
     def has_warnings(self) -> bool:
         return any(
-            finding.disposition in {"limitation", "retry_required"}
+            finding.disposition in {"warning", "limitation"}
             for finding in self.normalized_findings()
         )
 
@@ -153,6 +171,8 @@ class AnalysisPlan(BaseModel):
     # SQL 에이전트가 선언한 엔티티 grain(예: "one row per customer_unique_id"). EDA가 자체
     # grain 추정치와 교차검증하는 데 쓴다. analysis의 time_grain(일/주/월)과는 다른 개념. None이면 스킵.
     business_grain: str | None = None
+    mart_design: dict[str, Any] = Field(default_factory=dict)
+    analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrchestrationState(BaseModel):
@@ -203,6 +223,9 @@ class SupervisorInterruptPayload(BaseModel):
     expected_resume: dict[str, str] = Field(default_factory=lambda: {"answer": "string"})
     approval_id: str | None = None
     review_request: dict[str, Any] | None = None
+    input_mode: Literal["free_text", "choice_with_free_text", "approval"] = "free_text"
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    allow_free_text: bool = True
 
     @model_validator(mode="after")
     def validate_type_specific_fields(self) -> "SupervisorInterruptPayload":
@@ -211,6 +234,8 @@ class SupervisorInterruptPayload(BaseModel):
                 raise ValueError("clarification interrupt에는 analysis review 필드를 포함할 수 없습니다.")
             if self.expected_resume != {"answer": "string"}:
                 raise ValueError("clarification interrupt의 expected_resume이 올바르지 않습니다.")
+            if self.input_mode == "choice_with_free_text" and not self.options:
+                raise ValueError("choice clarification interrupt requires options.")
             return self
         if not (self.approval_id or "").strip() or not isinstance(self.review_request, dict):
             raise ValueError("analysis_review interrupt에는 approval_id와 review_request가 필요합니다.")

@@ -26,6 +26,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     SupervisorState,
     empty_supervisor_state,
     normalize_supervisor_state,
+    reject_pending_result,
     to_orchestration_state,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.tools import SubAgentAdapter
@@ -130,8 +131,7 @@ class SupervisorAgent:
                     )
                     result = graph.invoke(Command(resume=normalized_payload), config)
                 else:
-                    if set(resume_payload) != {"approved"} or resume_payload.get("approved") is not True:
-                        raise ValueError("일반 승인 resume payload는 정확히 {'approved': True}여야 합니다.")
+                    approval_payload = self._validated_approval_resume(resume_payload)
                     pending_approval = checkpoint_values.get("pending_approval")
                     if not isinstance(pending_approval, dict):
                         raise ValueError(f"thread_id={thread_id!r}는 승인 대기 상태가 아닙니다.")
@@ -146,7 +146,7 @@ class SupervisorAgent:
                     result = self._resume_synthetic_approval(
                         graph,
                         config,
-                        {"approved": True},
+                        approval_payload,
                         checkpoint_values,
                     )
                     if result is None:
@@ -172,11 +172,25 @@ class SupervisorAgent:
     ) -> tuple[dict[str, Any], str]:
         if set(resume_payload) == {"answer"}:
             return {"answer": cls._validated_clarification_answer(resume_payload)}, "clarification"
-        if set(resume_payload) == {"approved"} and resume_payload.get("approved") is True:
-            return {"approved": True}, "approval"
+        if "approved" in resume_payload:
+            return cls._validated_approval_resume(resume_payload), "approval"
         raise ValueError(
             "resume payload는 {'answer': '...'}, {'approved': True}, 또는 활성 analysis review 형식이어야 합니다."
         )
+
+    @staticmethod
+    def _validated_approval_resume(resume_payload: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"approved", "reason"}
+        if not set(resume_payload).issubset(allowed) or "approved" not in resume_payload:
+            raise ValueError("approval resume payload must include approved:boolean.")
+        approved = resume_payload.get("approved")
+        if not isinstance(approved, bool):
+            raise ValueError("approval resume payload must include approved:boolean.")
+        normalized: dict[str, Any] = {"approved": approved}
+        reason = str(resume_payload.get("reason") or "").strip()
+        if reason:
+            normalized["reason"] = reason
+        return normalized
 
     def _validated_analysis_review_resume(
         self,
@@ -243,7 +257,7 @@ class SupervisorAgent:
         resume_payload: dict[str, Any],
         checkpoint_values: dict[str, Any] | None = None,
     ) -> Any | None:
-        if resume_payload.get("approved") is not True:
+        if "approved" not in resume_payload:
             return None
         if not hasattr(graph, "get_state") or not hasattr(graph, "update_state"):
             return None
@@ -257,6 +271,14 @@ class SupervisorAgent:
         pending_approval = values.get("pending_approval")
         if not isinstance(pending_approval, dict):
             return None
+
+        if resume_payload.get("approved") is False:
+            return self._reject_synthetic_approval(
+                graph,
+                config,
+                values,
+                str(resume_payload.get("reason") or "").strip(),
+            )
 
         pending_result = values.get("pending_result")
         if isinstance(pending_result, dict) and pending_approval.get("candidate_id"):
@@ -279,6 +301,33 @@ class SupervisorAgent:
             "final_answer": "",
         }
         returned_config = graph.update_state(config, updates, as_node="decide_next_action")
+        return graph.invoke(None, returned_config or config)
+
+    def _reject_synthetic_approval(
+        self,
+        graph: Any,
+        config: dict[str, Any],
+        values: dict[str, Any],
+        reason: str = "",
+    ) -> Any:
+        rejection_reason = reason or "사용자가 승인 요청을 거절했습니다."
+        normalized = reject_pending_result(
+            values,
+            rejection_reason,
+            {"approved": False, "reason": rejection_reason},
+            event_type="approval.rejected",
+        )
+        updates = {
+            **normalized,
+            "pending_approval": None,
+            "pending_validation": None,
+            "terminal_state": "failed_with_recoverable_context",
+            "next_action": "finalize",
+            "final_answer": (
+                "사용자가 승인 요청을 거절했습니다. 요청을 수정하거나 다른 기준으로 다시 실행할 수 있습니다."
+            ),
+        }
+        returned_config = graph.update_state(config, updates, as_node="commit_candidate")
         return graph.invoke(None, returned_config or config)
 
     def _resume_validated_candidate(

@@ -150,7 +150,13 @@ def branch_from(
         artifact_ids[agent_name] = stage_artifact_ids
         result.artifact_ids[agent_name] = stage_artifact_ids
 
-        summary_text = _safe_summarize(agent_name, stage_artifact_ids, runtime, new_instruction, envelope)
+        summary_text, summary_artifact_id = _safe_summarize(
+            agent_name,
+            stage_artifact_ids,
+            runtime,
+            new_instruction,
+            envelope,
+        )
 
         step_summary = StepSummary(
             step="execute_subagent",
@@ -158,6 +164,7 @@ def branch_from(
             action=f"call_{agent_name}",
             summary=summary_text,
             artifact_ids=stage_artifact_ids,
+            summary_artifact_id=summary_artifact_id,
             next_action="",
         )
         completed_node = CompletedNodeExecution(
@@ -199,12 +206,12 @@ def _safe_summarize(
     runtime: AgentRuntime,
     branch_instruction: str,
     envelope: AgentEnvelope,
-) -> str:
+) -> tuple[str, str | None]:
     """generate_node_summary로 key_finding을 뽑는다. 실패하면 에이전트 자체 요약으로 되돌아간다."""
     try:
         ref = generate_node_summary(artifact_ids, runtime, branch_instruction=branch_instruction)
         payload = json.loads(runtime.adapter.read_artifact_text(ref.artifact_id))
         key_finding = str(payload.get("key_finding") or "").strip()
-        return key_finding or envelope.summary
+        return key_finding or envelope.summary, ref.artifact_id
     except Exception:  # noqa: BLE001 - 서머리는 부가 정보, 실패해도 완료 흐름은 계속
-        return envelope.summary
+        return envelope.summary, None

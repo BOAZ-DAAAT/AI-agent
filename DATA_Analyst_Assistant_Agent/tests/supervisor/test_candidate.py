@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import build_step_summary, commit_candidate
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
@@ -53,6 +56,7 @@ def test_build_step_summary_is_deterministic_and_deduplicates_artifact_ids() -> 
         "action": "call_analysis_agent",
         "summary": "분석 완료",
         "artifact_ids": ["artifact_1", "artifact_2", "artifact_3"],
+        "summary_artifact_id": None,
         "next_action": "finalize",
     }
 
@@ -155,6 +159,35 @@ def test_commit_candidate_emits_backend_event_once() -> None:
         "evidence.promoted",
         "agent.completed",
     ]
+
+
+def test_commit_candidate_includes_summary_artifact_id_in_completed_event(monkeypatch) -> None:
+    class SummaryBackend(RecordingBackend):
+        def read_artifact_text(self, artifact_id: str) -> str:
+            assert artifact_id == "summary_1"
+            return json.dumps({"key_finding": "상세 요약이 생성되었습니다."})
+
+    monkeypatch.setattr(
+        "DATA_Analyst_Assistant_Agent.supervisor.summary.generator.generate_node_summary",
+        lambda artifact_ids, runtime: SimpleNamespace(artifact_id="summary_1"),
+    )
+    backend = SummaryBackend()
+    state = _validated_state(
+        AgentCompactResult(
+            agent="analysis_agent",
+            status="success",
+            summary="분석 완료",
+            artifact_ids=["analysis_1"],
+        ),
+        "accept",
+    )
+
+    commit_candidate(state, backend)
+
+    completed_event = next(event for event in backend.events if event[1] == "agent.completed")
+    event_metadata = completed_event[2]["metadata"]
+    assert event_metadata["summary"]["summary_artifact_id"] == "summary_1"
+    assert event_metadata["summary"]["summary"] == "상세 요약이 생성되었습니다."
 
 
 def _semantic_recovery_state(

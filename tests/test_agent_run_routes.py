@@ -9,6 +9,7 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from backend.main import create_app
 from data_agent_backend.config import BackendConfig
+from data_agent_backend.models.artifacts import ArtifactRegisterRequest, ArtifactType
 from data_agent_backend.services.factory import create_backend_services
 
 
@@ -18,6 +19,42 @@ def _services(tmp_path):
 
 def _user_header() -> dict[str, str]:
     return {"Authorization": "Bearer ignored"}
+
+
+def _node_summary_payload() -> dict:
+    return {
+        "title": "월별 매출 SQL 결과",
+        "subtitle": "주문 결제 데이터를 월 단위로 집계했습니다.",
+        "background": "월별 매출 추이를 확인하기 위한 데이터 마트를 구성했습니다.",
+        "code_used": "SELECT month, SUM(payment_value) FROM payments GROUP BY month",
+        "detail": {
+            "kind": "sql",
+            "source_tables": ["order_payments"],
+            "integrity_checks": ["결제 금액 결측치 확인"],
+            "derived_columns": [],
+            "mart_grain": "월",
+            "mart_columns": ["month", "revenue"],
+            "mart_preview": [],
+            "sql_snippet": "SELECT month, SUM(payment_value) FROM payments GROUP BY month",
+        },
+        "conclusion": "월별 매출 분석에 사용할 집계 결과가 준비되었습니다.",
+        "key_finding": "월별 매출 집계가 완료되었습니다.",
+        "source_kind": "sql_result",
+        "fallback_used": False,
+    }
+
+
+def _register_file_artifact(services, run_id: str, *, payload: dict, metadata: dict):
+    return services.artifact_registry.register_artifact(
+        ArtifactRegisterRequest(
+            run_id=run_id,
+            type=ArtifactType.file,
+            content_text=json.dumps(payload, ensure_ascii=False),
+            filename="artifact.json",
+            created_by_tool="test",
+            metadata=metadata,
+        )
+    )
 
 
 def _waiting_clarification_run(services, *, interrupt_type: str = "clarification"):
@@ -99,6 +136,195 @@ def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> N
     assert events_response.status_code == 200
     assert events_response.json()[0]["event_type"] == "run.started"
     assert events_response.json()[0]["node_name"] == "supervisor"
+
+
+def test_get_completed_node_summary_returns_registered_summary(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_summary", project_id="sess_001")
+    summary_artifact = _register_file_artifact(
+        services,
+        run.run_id,
+        payload=_node_summary_payload(),
+        metadata={"kind": "node_summary", "source_artifact_ids": ["art_source"]},
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        artifact_ids=["art_source"],
+        metadata={
+            "node_id": "node_001",
+            "summary": {
+                "agent": "sql_agent",
+                "artifact_ids": ["art_source"],
+                "summary_artifact_id": summary_artifact.artifact_id,
+            },
+        },
+    )
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/nodes/node_001/summary",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["node_id"] == "node_001"
+    assert body["agent_name"] == "sql_agent"
+    assert body["summary_artifact_id"] == summary_artifact.artifact_id
+    assert body["summary"]["detail"]["kind"] == "sql"
+    assert body["summary"]["key_finding"] == "월별 매출 집계가 완료되었습니다."
+
+
+def test_get_completed_node_summary_resolves_legacy_event_by_source_artifacts(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_legacy", project_id="sess_001")
+    source_artifact = _register_file_artifact(
+        services,
+        run.run_id,
+        payload={"rows": 12},
+        metadata={"kind": "sql_result"},
+    )
+    summary_artifact = _register_file_artifact(
+        services,
+        run.run_id,
+        payload=_node_summary_payload(),
+        metadata={
+            "kind": "node_summary",
+            "source_artifact_ids": [source_artifact.artifact_id],
+        },
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        artifact_ids=[source_artifact.artifact_id],
+        metadata={
+            "node_id": "node_legacy",
+            "summary": {
+                "agent": "sql_agent",
+                "artifact_ids": [source_artifact.artifact_id],
+            },
+        },
+    )
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/nodes/node_legacy/summary",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary_artifact_id"] == summary_artifact.artifact_id
+
+
+def test_delete_completed_agent_run_removes_events_artifacts_and_files(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_delete", project_id="sess_001")
+    checkpoint_path = services.config.base_data_dir / "thread_delete.sqlite"
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+    artifact = _register_file_artifact(
+        services,
+        run.run_id,
+        payload=_node_summary_payload(),
+        metadata={"kind": "node_summary", "source_artifact_ids": ["source_1"]},
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        artifact_ids=[artifact.artifact_id],
+        metadata={"node_id": "node_delete"},
+    )
+    services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.delete(f"/agent-runs/{run.run_id}", headers=_user_header())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": run.run_id,
+        "deleted_event_count": 1,
+        "deleted_artifact_count": 1,
+    }
+    assert services.artifact_store.exists(artifact.artifact_id) is False
+    assert checkpoint_path.exists() is False
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM run_events WHERE run_id = ?",
+        (run.run_id,),
+    ) is None
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM artifacts WHERE run_id = ?",
+        (run.run_id,),
+    ) is None
+    assert client.get(f"/agent-runs/{run.run_id}", headers=_user_header()).status_code == 404
+
+
+def test_delete_running_agent_run_is_rejected_without_deleting_data(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_running", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+
+    response = client.delete(f"/agent-runs/{run.run_id}", headers=_user_header())
+
+    assert response.status_code == 409
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_delete_agent_run_keeps_checkpoint_used_by_another_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    first = services.run_service.create_run(thread_id="thread_shared", project_id="sess_001")
+    second = services.run_service.create_run(thread_id="thread_shared", project_id="sess_001")
+    services.run_service.update_status(first.run_id, "succeeded")
+    checkpoint_path = services.config.base_data_dir / "thread_shared.sqlite"
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+
+    response = client.delete(f"/agent-runs/{first.run_id}", headers=_user_header())
+
+    assert response.status_code == 200
+    assert checkpoint_path.exists() is True
+    assert services.run_service.get_run(second.run_id).run_id == second.run_id
 
 
 def test_stream_agent_run_events_resumes_after_last_event_id(
@@ -223,7 +449,7 @@ def test_resume_clarification_claims_run_and_schedules_same_thread(tmp_path, mon
     assert ownership == {"session_id": "sess_001", "username": "dev"}
     assert seen["run_id"] == run.run_id
     assert seen["thread_id"] == "thread_clarification"
-    assert seen["answer"] == "월별 기준으로 분석해줘"
+    assert seen["resume_payload"] == {"answer": "월별 기준으로 분석해줘"}
     assert services.run_service.get_run(run.run_id).status.value == "running"
 
 
@@ -258,6 +484,213 @@ def test_resume_clarification_rejects_duplicate_submission(tmp_path, monkeypatch
     assert first.status_code == 202
     assert second.status_code == 409
     assert calls == [run.run_id]
+
+
+def test_resume_analysis_review_claims_run_and_forwards_selection(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_review",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(
+        run.run_id,
+        "waiting_input",
+        metadata={"interrupt_type": "analysis_review", "node": "collect_analysis_review"},
+    )
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "analysis_review", "approval_id": "run_x:analysis_agent:approval", "selected_option_id": "opt_1"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "analysis_review"
+    assert seen["resume_payload"] == {
+        "approval_id": "run_x:analysis_agent:approval",
+        "selected_option_id": "opt_1",
+        "free_text": None,
+    }
+
+
+def test_resume_analysis_review_rejects_both_option_and_free_text(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_review", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(
+        run.run_id,
+        "waiting_input",
+        metadata={"interrupt_type": "analysis_review", "node": "collect_analysis_review"},
+    )
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={
+            "type": "analysis_review",
+            "approval_id": "run_x:analysis_agent:approval",
+            "selected_option_id": "opt_1",
+            "free_text": "그냥 이렇게 해줘",
+        },
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 422
+
+
+def test_resume_approval_claims_waiting_approval_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "approval"
+    assert seen["resume_payload"] == {"approved": True}
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_resume_approval_rejects_run_not_waiting_approval(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 409
+
+
+def test_resume_approval_rejects_duplicate_submission(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_approval", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.resume_agent_run",
+        lambda **kwargs: calls.append(kwargs["run_id"]),
+    )
+
+    first = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+    second = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert calls == [run.run_id]
+
+
+def test_resume_approval_rejects_with_reason(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": False, "reason": "다시 검토가 필요합니다"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "approval"
+    assert seen["resume_payload"] == {"approved": False, "reason": "다시 검토가 필요합니다"}
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_resume_approval_requires_boolean_approved(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_approval", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 422
 
 
 def _succeeded_run(services, *, thread_id: str = "thread_branch_src"):

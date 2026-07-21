@@ -51,6 +51,142 @@ def render_node_summary_markdown(result: NodeSummaryResult, runtime: AgentRuntim
     return "\n".join(lines)
 
 
+def render_node_summary_artifact_markdown(result: NodeSummaryResult) -> str:
+    """실서비스에 저장할 Markdown을 만든다.
+
+    차트 파일을 로컬로 복사하지 않고 artifact URI로 참조한다. 백엔드/프론트는 이 논리 URI를
+    권한이 확인된 이미지 content URL로 해석한다.
+    """
+    lines: list[str] = [
+        f"# {result.title}", "", f"*{result.subtitle}*", "",
+        "## 분석 맥락", "", result.background, "",
+    ]
+    lines += _SERVICE_RENDERERS[result.detail.kind](result.detail)
+    lines += ["## 단계 해석", "", result.conclusion, ""]
+    if result.fallback_used:
+        lines += _callout("CAUTION", "자동 서술 생성 실패", ["근거 원본으로 대체되었습니다."])
+    return "\n".join(lines)
+
+
+def _artifact_chart_section(section: FindingSection) -> list[str]:
+    """선택 이유 → 실제 차트 → 관찰 결과 순서를 보존한다."""
+    lines = [f"### {section.heading}", ""]
+    if section.rationale:
+        lines += [section.rationale, ""]
+    for chart_id in section.chart_artifact_ids:
+        lines += [f"![{section.heading}](artifact://{chart_id})", ""]
+    lines += [section.body, ""]
+    return lines
+
+
+def _service_scope(items: list[str]) -> list[str]:
+    return _callout("WARNING", "해석 범위", items)
+
+
+def _service_handoff(value: str) -> list[str]:
+    return ["## 다음 단계 연결", "", value, ""] if value else []
+
+
+def _render_service_sql(detail: SQLSummaryDetail) -> list[str]:
+    lines: list[str] = []
+    if detail.design_rationale:
+        lines += ["## 데이터 구성 논리", "", detail.design_rationale, ""]
+    if detail.source_tables:
+        tables = " · ".join(f"`{table}`" for table in detail.source_tables)
+        lines += [f"사용한 원천 테이블: {tables}", ""]
+    if detail.sql_snippet:
+        lines += [
+            "<details>", "<summary><strong>실제 실행 SQL 보기</strong></summary>", "",
+            "```sql", detail.sql_snippet, "```", "", "</details>", "",
+        ]
+    if detail.mart_grain or detail.mart_columns or detail.mart_preview:
+        lines += ["## 구성된 데이터마트", ""]
+        if detail.mart_grain:
+            lines += [f"분석 단위: {detail.mart_grain}", ""]
+        if detail.mart_columns:
+            columns = ", ".join(f"`{column}`" for column in detail.mart_columns)
+            lines += [f"포함 컬럼: {columns}", ""]
+        if detail.mart_preview:
+            lines += [*_render_table(detail.mart_preview[:5]), ""]
+    if detail.derived_columns:
+        lines += ["<details>", "<summary><strong>파생 변수 정의 보기</strong></summary>", ""]
+        lines += _kv_table(("컬럼", "정의"), [(item.heading, item.body) for item in detail.derived_columns])
+        lines += ["", "</details>", ""]
+    lines += _service_scope(detail.interpretation_scope)
+    lines += _service_handoff(detail.handoff)
+    return lines
+
+
+def _render_service_eda(detail: EDASummaryDetail) -> list[str]:
+    lines: list[str] = []
+    if detail.data_profile:
+        lines += ["## 데이터 조건", "", detail.data_profile, ""]
+    lines += _callout("WARNING", "분석에 영향을 준 데이터 조건", detail.quality_issues)
+    if detail.statistical_findings:
+        lines += ["## 탐색 과정과 관찰 결과", ""]
+        for section in detail.statistical_findings:
+            lines += _artifact_chart_section(section)
+    if detail.hypotheses:
+        lines += _callout("IMPORTANT", "탐색에서 도출된 가설", detail.hypotheses)
+    lines += _service_scope(detail.interpretation_scope)
+    lines += _service_handoff(detail.handoff)
+    return lines
+
+
+def _render_service_analysis(detail: AnalysisSummaryDetail) -> list[str]:
+    lines: list[str] = []
+    if detail.method_decision:
+        method = str(detail.method_decision.get("selected_method") or "").strip()
+        rationale = str(detail.method_decision.get("rationale") or "").strip()
+        lines += ["## 방법론과 선택 근거", ""]
+        if method:
+            lines += [f"**{method}**", ""]
+        if rationale:
+            lines += [rationale, ""]
+    if detail.supporting_charts:
+        lines += ["## 분석에 사용한 시각적 근거", ""]
+        for section in detail.supporting_charts:
+            lines += _artifact_chart_section(section)
+    if detail.hypothesis_tests:
+        lines += ["## 검정 과정과 결과", ""]
+        for section in detail.hypothesis_tests:
+            lines += _artifact_chart_section(section)
+    if detail.evidence_tables:
+        lines += ["## 실제 근거표", ""]
+        for table in detail.evidence_tables:
+            lines += [f"### {table.title}", "", *_render_table(table.rows[:5]), ""]
+    if detail.interpretation:
+        lines += ["## 결과 해석", "", detail.interpretation, ""]
+    lines += _service_scope(detail.limitations)
+    lines += _service_handoff(detail.handoff)
+    return lines
+
+
+def _render_service_insight(detail: InsightSummaryDetail) -> list[str]:
+    lines: list[str] = []
+    if detail.evidence_synthesis:
+        lines += ["## 근거의 연결", "", detail.evidence_synthesis, ""]
+    for section in detail.supporting_charts:
+        lines += _artifact_chart_section(section)
+    if detail.answer:
+        lines += ["## 의미", "", detail.answer, ""]
+    if detail.action_plan:
+        lines += _callout("IMPORTANT", "활용 방향", detail.action_plan)
+    lines += _service_scope(detail.limitations)
+    if detail.evidence_sources:
+        sources = " · ".join(f"`{item}`" for item in detail.evidence_sources)
+        lines += ["## 근거 출처", "", sources, ""]
+    return lines
+
+
+_SERVICE_RENDERERS: dict[str, Callable[[BaseModel], list[str]]] = {
+    "sql": _render_service_sql,
+    "eda": _render_service_eda,
+    "analysis": _render_service_analysis,
+    "insight": _render_service_insight,
+}
+
+
 def _save_charts(detail: BaseModel, runtime: AgentRuntime, out_dir: Path) -> dict[str, str]:
     chart_ids = sorted(set(_collect_chart_ids(detail)))
     if not chart_ids:

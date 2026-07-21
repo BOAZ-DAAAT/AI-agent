@@ -3,8 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import json
+from dataclasses import dataclass
+
+from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
+from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
 
 
@@ -22,6 +26,17 @@ def _patch_build_app(monkeypatch, fake_app: _FakeApp) -> None:
         "DATA_Analyst_Assistant_Agent.agents.sql.graph.build_app",
         lambda: fake_app,
     )
+
+
+class _ExplodingApp:
+    def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("SQL LangGraph must not run in contract-only mode")
+
+
+@dataclass
+class _FakeAdapter:
+    def register_artifact(self, *args: Any, **kwargs: Any) -> ArtifactRef:
+        return ArtifactRef(artifact_id="artifact_contract", type=ArtifactType.file)
 
 
 def test_sql_agent_uses_agent_feedback_when_present(monkeypatch) -> None:
@@ -110,7 +125,39 @@ def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monk
     assert payload["query_rules"] == state.plan.query_rules
 
 
-def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
+def test_sql_agent_contract_only_repairs_metadata_without_regenerating_sql(monkeypatch) -> None:
+    _patch_build_app(monkeypatch, _ExplodingApp())
+    state = OrchestrationState(
+        run_id="run_1",
+        user_query="판매자별 월별 배송 추세를 분석해줘",
+        generated_sql="SELECT seller_id, month, AVG(delivery_days) AS avg_delivery_days FROM mart GROUP BY seller_id, month",
+        plan=AnalysisPlan(
+            goal="판매자별 월별 배송 추세",
+            generated_sql="SELECT seller_id, month, AVG(delivery_days) AS avg_delivery_days FROM mart GROUP BY seller_id, month",
+            source_sql="SELECT seller_id, month, AVG(delivery_days) AS avg_delivery_days FROM mart GROUP BY seller_id, month",
+            target_table="analytics.seller_month_delivery",
+            retry_context={
+                "mode": "contract_only",
+                "suggested_action": "repair_analysis_data_contract",
+                "last_failure": {
+                    "reason_code": "analysis_contract_invalid",
+                    "suggested_action": "repair_analysis_data_contract",
+                },
+            },
+        ),
+    )
+
+    envelope = SQLAgent().run(state, AgentRuntime(adapter=_FakeAdapter()))  # type: ignore[arg-type]
+
+    assert envelope.status.value == "success"
+    assert envelope.retry_hint.reason_code == "analysis_data_contract_repaired"
+    assert state.plan is not None
+    assert state.plan.generated_sql == state.generated_sql
+    assert state.plan.analysis_data_contract["row_grain"] == "seller_id, month"
+    assert state.plan.analysis_data_contract["generated_sql"] == state.generated_sql
+
+
+def test_retryable_warning_finding_uses_warning_disposition_not_error() -> None:
     finding = SQLAgent._validation_finding(
         {
             "category": "intent_mismatch",
@@ -120,5 +167,5 @@ def test_retryable_warning_finding_is_a_limitation_not_retry_required() -> None:
         }
     )
 
-    assert finding.disposition == "limitation"
+    assert finding.disposition == "warning"
     assert finding.retryable is True

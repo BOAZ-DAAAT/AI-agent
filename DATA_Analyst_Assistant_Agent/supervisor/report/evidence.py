@@ -183,6 +183,12 @@ def _read_analysis_stage(entries: list[tuple[str, str]], runtime: AgentRuntime) 
         "title": payload.get("title", ""),
         "executive_summary": payload.get("executive_summary", ""),
         "key_findings": payload.get("key_findings", []),
+        # method_decision/evidence는 analysis_kind와 무관하게 항상 존재하는 범용 필드다
+        # (세그멘테이션/코호트/회귀 등 가설검정이 아닌 분석도 이 형태로 나온다).
+        # hypotheses(H0/H1)는 correlation/group_comparison/trend류에서만 채워지는 특수 사례.
+        "method_decision": payload.get("method_decision"),
+        "evidence": payload.get("evidence", []),
+        "hypotheses": payload.get("hypotheses", []),
         "limitations": payload.get("limitations", []),
         "method_notes": payload.get("method_notes", []),
     }

@@ -28,9 +28,11 @@ from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 from DATA_Analyst_Assistant_Agent.shared.numeric_verify import collect_numbers, verify_texts
 from DATA_Analyst_Assistant_Agent.supervisor.summary.evidence import NodeEvidence, read_node_evidence
+from DATA_Analyst_Assistant_Agent.supervisor.summary.markdown import render_node_summary_artifact_markdown
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
     AnalysisSummaryDetail,
     EDASummaryDetail,
+    EvidenceTable,
     FindingSection,
     InsightSummaryDetail,
     NodeSummaryResult,
@@ -38,7 +40,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
 )
 
 _TOOL_NAME = "supervisor.summary.generator"
-_SUMMARY_VERSION = 8                                   # v8: SQL 마트 5행 미리보기(mart_preview) 추가 + sql_plan/sql_result 병합
+_SUMMARY_VERSION = 9                                   # v9: 설명형 서사 + 서비스 Markdown 아티팩트
                                                         # (v7: read_node_evidence가 artifact_ids[0]만 보던 버그 수정)
                                                         # (v6: chart_artifact_ids가 숫자검증에 잘못 포함되던 버그 수정)
                                                         # (v5: 노드 종류별 의미적 구조(discriminated union)로 전면 개편)
@@ -248,6 +250,7 @@ def _extract_sections(raw: Any, known_chart_ids: set[str]) -> list[FindingSectio
         chart_ids = [str(c) for c in (item.get("chart_artifact_ids") or []) if str(c) in known_chart_ids]
         out.append(FindingSection(
             heading=heading,
+            rationale=str(item.get("rationale") or "").strip(),
             body=body,
             source_label=(str(item.get("source_label")).strip() or None) if item.get("source_label") else None,
             chart_artifact_ids=chart_ids,
@@ -267,15 +270,15 @@ def _extract_str_list(raw: Any) -> list[str]:
 def _build_sql_prompt(evidence: NodeEvidence, feedback: str) -> str:
     facts_text, _, feedback_section = _prompt_common_parts(evidence, feedback)
     return f"""
-너는 데이터 분석 파이프라인의 SQL/마트 설계 단계를 설명하는 전문 리포트 작성자다. 아래 근거만
-보고 이 단계가 무엇을 확인하고 만들었는지, 실제 서비스에 들어갈 수준으로 풍부하고 전문적으로
-서술하라. 새로운 계산·추측을 하지 말고, 근거에 없는 이름·숫자를 만들지 마라.
+너는 SQL/마트 설계 결과를 설명하는 데이터 분석가다. 작업 순서를 일기처럼 나열하지 말고,
+데이터 조건이 왜 특정 grain·조인·집계 선택으로 이어졌는지와 그 결과 어떤 분석이 가능해졌는지
+하나의 흐름으로 서술하라. 새로운 계산·추측이나 근거에 없는 이름·숫자는 만들지 마라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 {feedback_section}
-[말투] "~를 진행하여 ~를 확인하였습니다. 결론적으로 ~합니다" 같은 정중하고 전문적인
-보고서체를 써라. 캐주얼한 구어체는 금지.
+[문체] "에이전트가 ~했습니다"를 반복하지 마라. 데이터와 분석 논리를 주어로 삼고, 앞 문장의
+판단이 다음 문장의 방법 선택 이유가 되게 작성하라.
 
 이 단계는 SQL 에이전트의 결과다 — 고유 역할은 (1) 데이터 정합성·결측 확인, (2) 파생 컬럼
 생성, (3) 최종 데이터마트 설계다. 아래 필드로 이 세 가지를 명확히 구분해서 채워라(근거에
@@ -285,13 +288,16 @@ def _build_sql_prompt(evidence: NodeEvidence, feedback: str) -> str:
 - title: 이 마트를 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
 - background: 왜 이 마트가 필요했는지(비즈니스 목적)만. 최대 2문단.
+- design_rationale: 데이터 특성 때문에 이 grain·조인·집계 방식을 선택한 이유. 1~2문단.
 - source_tables: 이 SQL이 사용한 원천 테이블명 리스트(근거에 등장한 것만)
-- integrity_checks: 정합성·결측·중복 처리를 위해 SQL이 수행한 항목들(문장 리스트)
+- integrity_checks: 결과 해석에 영향을 주는 핵심 정합성 처리만 최대 3개
 - derived_columns: 파생/계산된 컬럼 각각을 설명하는 섹션 리스트. 각 섹션:
   {{"heading":"컬럼명", "body":"정의·계산식·의도(1문단 이상)"}}
 - mart_grain: 최종 마트의 행 단위(grain)를 한 문장으로
 - mart_columns: 최종 마트에 포함된 컬럼명 리스트
 - conclusion: 이 단계에서 얻은 결론(무엇이 만들어졌는지). 1문단.
+- interpretation_scope: 이 마트를 해석할 때 주의할 범위. 최대 2개.
+- handoff: 다음 EDA 단계에서 이 마트로 무엇을 탐색할 수 있는지 한 문장.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 이름·숫자만 인용하라.
@@ -310,13 +316,16 @@ def _to_sql_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
     if not (source_tables or integrity_checks or derived_columns or mart_columns):
         return None
     detail = SQLSummaryDetail(
+        design_rationale=str(parsed.get("design_rationale") or "").strip(),
         source_tables=source_tables,
-        integrity_checks=integrity_checks,
+        integrity_checks=integrity_checks[:3],
         derived_columns=derived_columns,
         mart_grain=str(parsed.get("mart_grain") or "").strip(),
         mart_columns=mart_columns,
         mart_preview=list(evidence.facts.get("preview") or []),   # 근거 그대로(LLM이 안 씀)
         sql_snippet=evidence.code_used,
+        interpretation_scope=_extract_str_list(parsed.get("interpretation_scope"))[:2],
+        handoff=str(parsed.get("handoff") or "").strip(),
     )
     return NodeSummaryResult(
         title=base["title"], subtitle=base["subtitle"], background=base["background"],
@@ -332,16 +341,16 @@ def _to_sql_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
 def _build_eda_prompt(evidence: NodeEvidence, feedback: str) -> str:
     facts_text, charts_text, feedback_section = _prompt_common_parts(evidence, feedback)
     return f"""
-너는 데이터 분석 파이프라인의 EDA 단계를 설명하는 전문 리포트 작성자다. 아래 근거만 보고 이
-단계가 무엇을 확인했는지, 실제 서비스에 들어갈 수준으로 풍부하고 전문적으로 서술하라. 새로운
-계산·추측을 하지 말고, 근거에 없는 숫자를 만들지 마라.
+너는 EDA 결과를 설명하는 데이터 분석가다. 수행 항목을 나열하지 말고, 데이터 조건이 왜 특정
+탐색 방법과 차트 선택으로 이어졌는지, 그 근거에서 무엇이 관찰되어 어떤 가설이 생겼는지를
+연결해서 서술하라. 새로운 계산·추측이나 근거에 없는 숫자는 만들지 마라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 [사용 가능한 차트] {charts_text}
 {feedback_section}
-[말투] "~를 진행하여 ~를 확인하였습니다. 결론적으로 ~합니다" 같은 정중하고 전문적인
-보고서체를 써라. 캐주얼한 구어체는 금지.
+[문체] "EDA 에이전트가 ~했습니다"를 반복하지 마라. 데이터와 분석 내용을 주어로 삼아
+선택 이유 → 실제 근거 → 관찰 결과가 자연스럽게 이어지게 작성하라.
 
 이 단계는 EDA 에이전트의 결과다 — 고유 역할은 (1) 컬럼 프로파일링·품질 확인, (2) 통계 탐색,
 (3) 근거가 되는 차트 생성, (4) 가설 형성이다.
@@ -353,13 +362,13 @@ def _build_eda_prompt(evidence: NodeEvidence, feedback: str) -> str:
 - data_profile: 컬럼 타입·카디널리티·결측 등 데이터 구조 요약(1~2문단)
 - quality_issues: 발견된 품질 이슈(문장 리스트)
 - statistical_findings: 분포/상관/그룹비교 발견을 다루는 섹션 리스트(핵심 파트, 최소 1개
-  이상). 각 섹션: {{"heading":"소제목", "body":"본문(구체 수치 인용)",
+  이상). 각 섹션: {{"heading":"소제목", "rationale":"이 방법/차트가 필요한 이유",
+  "body":"차트나 통계에서 관찰된 내용과 의미(구체 수치 인용)",
   "source_label":"분포 차트 등(선택)", "chart_artifact_ids":["[사용 가능한 차트]에 있는
   artifact_id만"]}}. 차트 목록의 캡션을 보고 관련 있는 섹션에 반드시 연결하라.
 - hypotheses: 제안된 가설을 한 문장씩 요약한 리스트(근거의 가설 텍스트 기반)
-- charts_generated: "왜 이 차트를 만들었는지" 자체를 설명하는 섹션 리스트(무엇을 보여주는
-  차트인지 + 어떤 가설/질문의 근거인지). statistical_findings와 관점이 다르다(여긴 차트
-  생성 의도 관점) — 겹쳐도 된다.
+- interpretation_scope: 이 탐색 결과를 해석할 때 지켜야 할 범위. 최대 2개.
+- handoff: Analysis 단계에서 무엇을 어떤 조건으로 검증해야 하는지 한 문장.
 - conclusion: 이 단계에서 얻은 결론. 1문단.
 - key_finding: 위 전체를 압축한 한 문장
 
@@ -381,7 +390,8 @@ def _to_eda_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
         statistical_findings=statistical_findings,
         hypotheses=_extract_str_list(parsed.get("hypotheses")),
         primary_hypothesis=evidence.facts.get("primary_hypothesis") or {},   # 근거 그대로(LLM이 안 씀)
-        charts_generated=_extract_sections(parsed.get("charts_generated"), known_chart_ids),
+        interpretation_scope=_extract_str_list(parsed.get("interpretation_scope"))[:2],
+        handoff=str(parsed.get("handoff") or "").strip(),
     )
     return NodeSummaryResult(
         title=base["title"], subtitle=base["subtitle"], background=base["background"],
@@ -397,15 +407,15 @@ def _to_eda_result(parsed: dict[str, Any], evidence: NodeEvidence, known_chart_i
 def _build_analysis_prompt(evidence: NodeEvidence, feedback: str) -> str:
     facts_text, _, feedback_section = _prompt_common_parts(evidence, feedback)
     return f"""
-너는 데이터 분석 파이프라인의 분석 단계를 설명하는 전문 리포트 작성자다. 아래 근거만 보고 이
-단계가 무엇을 검정했는지, 실제 서비스에 들어갈 수준으로 풍부하고 전문적으로 서술하라. 새로운
-계산·추측을 하지 말고, 근거에 없는 숫자를 만들지 마라.
+너는 통계 분석 결과를 설명하는 데이터 분석가다. 검정 목록을 일기처럼 나열하지 말고, EDA에서
+생긴 질문과 데이터 조건이 왜 이 방법론 선택으로 이어졌는지, 여러 결과를 함께 읽으면 무엇을
+의미하는지 설명하라. 새로운 계산·추측이나 근거에 없는 숫자는 만들지 마라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 {feedback_section}
-[말투] "~를 진행하여 ~를 확인하였습니다. 결론적으로 ~합니다" 같은 정중하고 전문적인
-보고서체를 써라. 캐주얼한 구어체는 금지.
+[문체] "분석 에이전트가 ~했습니다"를 반복하지 마라. 방법론의 성질과 데이터 조건을 주어로
+삼고, 방법 선택 → 검정 근거 → 결과 해석이 이어지게 작성하라.
 
 이 단계는 분석 에이전트의 결과다 — 고유 역할은 (1) 통계 방법론 선택, (2) 가설 검정이다.
 방법론 선택 근거(method_decision)는 이미 구조화된 근거로 별도 제공되니 새로 쓰지 마라 —
@@ -416,9 +426,12 @@ def _build_analysis_prompt(evidence: NodeEvidence, feedback: str) -> str:
 - subtitle: 제목 아래 붙는 한 줄 태그라인
 - background: 왜 이 분석이 필요했는지(목적/배경)만. 최대 2문단.
 - hypothesis_tests: 가설 검정 각각을 설명하는 섹션 리스트(핵심 파트, 최소 1개 이상). 각
-  섹션: {{"heading":"가설 요약", "body":"H0/H1/판정(지지됨·지지안됨)과 근거(p-value 등)"}}
+  섹션: {{"heading":"가설 요약", "rationale":"이 검정이 필요한 이유",
+  "body":"H0/H1/판정(지지됨·지지안됨)과 근거(p-value 등)"}}
 - key_statistics: 핵심 수치 근거를 다루는 섹션 리스트(선택, 없으면 빈 리스트)
+- interpretation: 여러 검정과 실제 근거표를 함께 읽었을 때의 분석적 의미. 1~2문단.
 - limitations: 이 분석의 한계(문장 리스트)
+- handoff: Insight 단계에서 채택할 결론과 반드시 유지할 해석 경계를 한 문장으로.
 - conclusion: 이 단계에서 얻은 결론. 1문단.
 - key_finding: 위 전체를 압축한 한 문장
 
@@ -438,7 +451,14 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
         method_decision=evidence.facts.get("method_decision") or {},   # 근거 그대로(LLM이 안 씀)
         hypothesis_tests=hypothesis_tests,
         key_statistics=_extract_sections(parsed.get("key_statistics"), known_chart_ids),
+        evidence_tables=[
+            EvidenceTable.model_validate(table)
+            for table in (evidence.facts.get("evidence_tables") or [])
+        ],
+        supporting_charts=_charts_to_sections(evidence),
+        interpretation=str(parsed.get("interpretation") or "").strip(),
         limitations=_extract_str_list(parsed.get("limitations")),
+        handoff=str(parsed.get("handoff") or "").strip(),
     )
     return NodeSummaryResult(
         title=base["title"], subtitle=base["subtitle"], background=base["background"],
@@ -454,16 +474,16 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
 def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
     facts_text, charts_text, feedback_section = _prompt_common_parts(evidence, feedback)
     return f"""
-너는 데이터 분석 파이프라인의 최종 인사이트 단계를 설명하는 전문 리포트 작성자다. 아래 근거만
-보고 이 단계가 사용자 질문에 어떻게 답했는지, 실제 서비스에 들어갈 수준으로 풍부하고
-전문적으로 서술하라. 새로운 계산·추측을 하지 말고, 근거에 없는 숫자를 만들지 마라.
+너는 상류 분석 근거를 사용자 의미로 연결하는 데이터 분석가다. 최종 보고서를 되풀이하거나
+결과를 목록으로 나열하지 말고, 어떤 근거들이 서로 일치해 결론을 지지하는지와 그 결론을
+어디까지 활용할 수 있는지를 설명하라. 새로운 계산·추측이나 근거 없는 숫자는 만들지 마라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 [사용 가능한 차트] {charts_text}
 {feedback_section}
-[말투] "~를 진행하여 ~를 확인하였습니다. 결론적으로 ~합니다" 같은 정중하고 전문적인
-보고서체를 써라. 캐주얼한 구어체는 금지.
+[문체] "인사이트 에이전트가 ~했습니다"를 반복하지 마라. 근거와 분석 내용을 주어로 삼고,
+근거 연결 → 의미 → 활용 방향 → 해석 범위가 자연스럽게 이어지게 작성하라.
 
 이 단계는 인사이트 에이전트의 결과다 — 고유 역할은 상류 근거(SQL/EDA/분석)를 종합해 사용자
 질문에 직접 답하는 것이다. 근거 출처(evidence_sources)는 이미 구조화된 근거로 별도 제공되니
@@ -473,6 +493,7 @@ def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
 - title: 이 답변을 나타내는 구체적인 제목(짧게)
 - subtitle: 제목 아래 붙는 한 줄 태그라인
 - background: 사용자가 무엇을 물었는지(질문 배경)만. 최대 2문단.
+- evidence_synthesis: 어떤 상류 근거들이 서로 일치하거나 보완되어 결론을 지지하는지.
 - answer: 사용자 질문에 대한 직접적인 답변(핵심, 1~2문단)
 - key_insights: 핵심 통찰 리스트
 - action_plan: 실행 제안 리스트
@@ -493,6 +514,7 @@ def _to_insight_result(parsed: dict[str, Any], evidence: NodeEvidence, known_cha
     if not answer:
         return None
     detail = InsightSummaryDetail(
+        evidence_synthesis=str(parsed.get("evidence_synthesis") or "").strip(),
         answer=answer,
         key_insights=_extract_str_list(parsed.get("key_insights")),
         action_plan=_extract_str_list(parsed.get("action_plan")),
@@ -626,6 +648,30 @@ def _format_fact_value(value: Any) -> str:
 
 def _register(artifact_ids: list[str], result: NodeSummaryResult, runtime: AgentRuntime) -> ArtifactRef:
     anchor = runtime.adapter.get_artifact(artifact_ids[0])
+    markdown_artifact_id: str | None = None
+    try:
+        markdown_ref = runtime.adapter.register_artifact(
+            anchor.run_id,
+            ArtifactType.report,
+            content_text=render_node_summary_artifact_markdown(result),
+            filename="node_summary.md",
+            created_by_tool=_TOOL_NAME,
+            parent_ids=artifact_ids,
+            metadata={
+                "kind": "node_summary_markdown",
+                "source_artifact_ids": sorted(artifact_ids),
+                "summary_version": _SUMMARY_VERSION,
+            },
+            preview={
+                "title": result.title,
+                "source_kind": result.source_kind,
+                "format": "markdown",
+            },
+        )
+        markdown_artifact_id = markdown_ref.artifact_id
+    except Exception:  # noqa: BLE001 - Markdown 실패가 노드 완료와 JSON 요약 저장을 막지 않는다.
+        markdown_artifact_id = None
+
     return runtime.adapter.register_artifact(
         anchor.run_id,
         ArtifactType.file,
@@ -637,6 +683,7 @@ def _register(artifact_ids: list[str], result: NodeSummaryResult, runtime: Agent
             "kind": "node_summary",
             "source_artifact_ids": sorted(artifact_ids),
             "summary_version": _SUMMARY_VERSION,
+            "markdown_artifact_id": markdown_artifact_id,
         },
         preview={
             "title": result.title,
@@ -644,6 +691,7 @@ def _register(artifact_ids: list[str], result: NodeSummaryResult, runtime: Agent
             "key_finding": result.key_finding,
             "source_kind": result.source_kind,
             "fallback_used": result.fallback_used,
+            "markdown_artifact_id": markdown_artifact_id,
         },
     )
 

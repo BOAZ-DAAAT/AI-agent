@@ -29,10 +29,10 @@ def get_db_engine():
     try:
         engine = create_engine(database_url)
         with engine.connect() as connection:  # 실제 연결 확인
-            print(f"✅ DB 연결 성공: {db_name}")
+            print(f"[OK] DB 연결 성공: {db_name}")
         return engine
     except Exception as e:
-        print(f"❌ DB 연결 실패: {e}")
+        print(f"[FAIL] DB 연결 실패: {e}")
         return None
 
 
@@ -44,7 +44,7 @@ def get_table_samples(engine, table_name, sample_count=10):
             df = pd.read_sql(query, connection)
             return df.to_dict(orient="records")
     except Exception as e:
-        print(f"⚠️ {table_name} 샘플 추출 실패: {e}")
+        print(f"[WARN] {table_name} 샘플 추출 실패: {e}")
         return []
 
 
