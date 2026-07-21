@@ -416,6 +416,7 @@ _BRANCH_STAGE_AGENT = {
     "analysis": "analysis_agent",
     "insight": "insight",
 }
+_BRANCH_AGENT_STAGE = {agent: stage for stage, agent in _BRANCH_STAGE_AGENT.items()}
 
 
 class BranchPlanError(Exception):
@@ -428,6 +429,95 @@ class BranchPlan:
     original_question: str
     target_table: str | None
     default_parent_node_id: str | None
+
+
+def _run_lineage(*, services: BackendServices, run: RunRecord) -> list[RunRecord]:
+    lineage = [run]
+    seen = {run.run_id}
+    current = run
+    while True:
+        parent_run_id = current.metadata.get("branched_from_run_id")
+        if not isinstance(parent_run_id, str) or not parent_run_id:
+            break
+        if parent_run_id in seen:
+            raise BranchPlanError("분기 실행 계보에 순환 참조가 있습니다.")
+        try:
+            parent = services.run_service.get_run(parent_run_id)
+        except Exception as exc:
+            raise BranchPlanError("상위 분기 실행을 찾을 수 없습니다.") from exc
+        seen.add(parent.run_id)
+        lineage.append(parent)
+        current = parent
+    return list(reversed(lineage))
+
+
+def _event_artifact_ids(event) -> list[str]:
+    ids = event.artifact_ids
+    if not ids:
+        summary = event.metadata.get("summary")
+        if isinstance(summary, dict):
+            ids = summary.get("artifact_ids") or []
+    return [artifact_id for artifact_id in ids if isinstance(artifact_id, str) and artifact_id]
+
+
+def _effective_branch_stage_outputs(
+    *,
+    services: BackendServices,
+    lineage: list[RunRecord],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    artifact_ids_by_agent: dict[str, list[str]] = {}
+    node_id_by_agent: dict[str, str] = {}
+
+    for lineage_run in lineage:
+        for event in services.run_service.list_events(lineage_run.run_id):
+            if event.event_type != "agent.completed" or event.node_name not in _BRANCH_AGENT_STAGE:
+                continue
+            stage_artifact_ids = _event_artifact_ids(event)
+            if stage_artifact_ids:
+                artifact_ids_by_agent[event.node_name] = stage_artifact_ids
+            node_id = event.metadata.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                node_id_by_agent[event.node_name] = node_id
+
+    return artifact_ids_by_agent, node_id_by_agent
+
+
+def _default_branch_parent_node_id(
+    *,
+    services: BackendServices,
+    run_id: str,
+    start_stage: BranchStage,
+    checkpoint_state: dict[str, Any],
+    node_id_by_agent: dict[str, str] | None = None,
+) -> str | None:
+    """분기 시작 노드는 start_stage 직전 완료 노드에 붙인다.
+
+    예: EDA부터 다시 돌면 원본 SQL 노드 뒤에 새 EDA가 붙어야 하므로, 마지막 완료 노드
+    (보통 Insight)가 아니라 직전 단계(SQL)의 completed node_id를 사용한다.
+    """
+    start_index = _BRANCH_STAGE_ORDER.index(start_stage)
+    if start_index <= 0:
+        return None
+
+    previous_stage = _BRANCH_STAGE_ORDER[start_index - 1]
+    previous_agent = _BRANCH_STAGE_AGENT[previous_stage]
+    if node_id_by_agent and node_id_by_agent.get(previous_agent):
+        return node_id_by_agent[previous_agent]
+
+    latest_node_id: str | None = None
+
+    for event in services.run_service.list_events(run_id):
+        if event.event_type != "agent.completed" or event.node_name != previous_agent:
+            continue
+        node_id = event.metadata.get("node_id")
+        if isinstance(node_id, str) and node_id:
+            latest_node_id = node_id
+
+    if latest_node_id:
+        return latest_node_id
+
+    fallback = checkpoint_state.get("last_completed_node_id")
+    return fallback if isinstance(fallback, str) else None
 
 
 def prepare_branch_plan(
@@ -449,10 +539,17 @@ def prepare_branch_plan(
     orchestration_state = to_orchestration_state(checkpoint_state)
     start_index = _BRANCH_STAGE_ORDER.index(start_stage)
     upstream_stages = _BRANCH_STAGE_ORDER[:start_index]
+    lineage = _run_lineage(services=services, run=run)
+    effective_artifact_ids, effective_node_ids = _effective_branch_stage_outputs(
+        services=services,
+        lineage=lineage,
+    )
+    checkpoint_artifact_ids = dict(orchestration_state.artifact_ids)
+    checkpoint_artifact_ids.update(effective_artifact_ids)
     upstream_artifact_ids = {
-        _BRANCH_STAGE_AGENT[stage]: orchestration_state.artifact_ids.get(_BRANCH_STAGE_AGENT[stage], [])
+        _BRANCH_STAGE_AGENT[stage]: checkpoint_artifact_ids.get(_BRANCH_STAGE_AGENT[stage], [])
         for stage in upstream_stages
-        if orchestration_state.artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
+        if checkpoint_artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
     }
     missing_stages = [
         stage for stage in upstream_stages if not upstream_artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
@@ -460,12 +557,18 @@ def prepare_branch_plan(
     if missing_stages:
         raise BranchPlanError(f"{', '.join(missing_stages)} 단계 결과가 없어 분기를 시작할 수 없습니다.")
 
-    default_parent_node_id = checkpoint_state.get("last_completed_node_id")
+    default_parent_node_id = _default_branch_parent_node_id(
+        services=services,
+        run_id=run.run_id,
+        start_stage=start_stage,
+        checkpoint_state=checkpoint_state,
+        node_id_by_agent=effective_node_ids,
+    )
     return BranchPlan(
         upstream_artifact_ids=upstream_artifact_ids,
         original_question=orchestration_state.user_query,
         target_table=orchestration_state.plan.target_table if orchestration_state.plan else None,
-        default_parent_node_id=default_parent_node_id if isinstance(default_parent_node_id, str) else None,
+        default_parent_node_id=default_parent_node_id,
     )
 
 

@@ -63,6 +63,126 @@ def test_prepare_branch_plan_first_stage_needs_no_upstream(tmp_path, monkeypatch
     plan = prepare_branch_plan(services=services, run=run, start_stage="sql")
 
     assert plan.upstream_artifact_ids == {}
+    assert plan.default_parent_node_id is None
+
+
+def test_prepare_branch_plan_uses_previous_stage_node_as_branch_parent(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_branch", project_id="sess_001")
+    monkeypatch.setattr("backend.agent_runs.service.SupervisorAgent", FakeSupervisorForPlan)
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL completed",
+        node_name="sql_agent",
+        metadata={"node_id": "node_sql"},
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "EDA completed",
+        node_name="eda_agent",
+        metadata={"node_id": "node_eda", "parent_node_id": "node_sql"},
+    )
+
+    plan = prepare_branch_plan(services=services, run=run, start_stage="eda")
+
+    assert plan.upstream_artifact_ids == {"sql_agent": ["art_sql_1"]}
+    assert plan.default_parent_node_id == "node_sql"
+
+
+def test_prepare_branch_plan_merges_parent_branch_outputs(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    root_run = services.run_service.create_run(thread_id="thread_branch", project_id="sess_001")
+    branch_run = services.run_service.create_run(
+        thread_id="thread_branch",
+        project_id="sess_001",
+        metadata={"branched_from_run_id": root_run.run_id},
+    )
+    monkeypatch.setattr("backend.agent_runs.service.SupervisorAgent", FakeSupervisorForPlan)
+
+    services.run_service.append_event(
+        root_run.run_id,
+        "agent.completed",
+        "SQL completed",
+        node_name="sql_agent",
+        artifact_ids=["art_sql_root"],
+        metadata={"node_id": "node_sql_root"},
+    )
+    services.run_service.append_event(
+        root_run.run_id,
+        "agent.completed",
+        "EDA completed",
+        node_name="eda_agent",
+        artifact_ids=["art_eda_root"],
+        metadata={"node_id": "node_eda_root"},
+    )
+    services.run_service.append_event(
+        branch_run.run_id,
+        "agent.completed",
+        "Branched EDA completed",
+        node_name="eda_agent",
+        artifact_ids=["art_eda_branch"],
+        metadata={"node_id": "node_eda_branch", "parent_node_id": "node_sql_root"},
+    )
+
+    plan = prepare_branch_plan(services=services, run=branch_run, start_stage="analysis")
+
+    assert plan.upstream_artifact_ids == {
+        "sql_agent": ["art_sql_root"],
+        "eda_agent": ["art_eda_branch"],
+    }
+    assert plan.default_parent_node_id == "node_eda_branch"
+
+
+def test_prepare_branch_plan_merges_nested_branch_outputs(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    root_run = services.run_service.create_run(thread_id="thread_branch", project_id="sess_001")
+    eda_branch_run = services.run_service.create_run(
+        thread_id="thread_branch",
+        project_id="sess_001",
+        metadata={"branched_from_run_id": root_run.run_id},
+    )
+    analysis_branch_run = services.run_service.create_run(
+        thread_id="thread_branch",
+        project_id="sess_001",
+        metadata={"branched_from_run_id": eda_branch_run.run_id},
+    )
+    monkeypatch.setattr("backend.agent_runs.service.SupervisorAgent", FakeSupervisorForPlan)
+
+    services.run_service.append_event(
+        root_run.run_id,
+        "agent.completed",
+        "SQL completed",
+        node_name="sql_agent",
+        artifact_ids=["art_sql_root"],
+        metadata={"node_id": "node_sql_root"},
+    )
+    services.run_service.append_event(
+        eda_branch_run.run_id,
+        "agent.completed",
+        "Branched EDA completed",
+        node_name="eda_agent",
+        artifact_ids=["art_eda_branch"],
+        metadata={"node_id": "node_eda_branch", "parent_node_id": "node_sql_root"},
+    )
+    services.run_service.append_event(
+        analysis_branch_run.run_id,
+        "agent.completed",
+        "Branched analysis completed",
+        node_name="analysis_agent",
+        artifact_ids=["art_analysis_branch"],
+        metadata={"node_id": "node_analysis_branch", "parent_node_id": "node_eda_branch"},
+    )
+
+    plan = prepare_branch_plan(services=services, run=analysis_branch_run, start_stage="insight")
+
+    assert plan.upstream_artifact_ids == {
+        "sql_agent": ["art_sql_root"],
+        "eda_agent": ["art_eda_branch"],
+        "analysis_agent": ["art_analysis_branch"],
+    }
+    assert plan.default_parent_node_id == "node_analysis_branch"
 
 
 def test_prepare_branch_plan_raises_when_checkpoint_missing(tmp_path, monkeypatch) -> None:
