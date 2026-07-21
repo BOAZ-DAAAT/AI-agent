@@ -155,6 +155,54 @@ class RunService:
             )
         return self.get_run(run_id, context)
 
+    def claim_waiting_approval(
+        self,
+        run_id: str,
+        metadata: JsonDict | None = None,
+        context: PolicyContext | None = None,
+    ) -> RunRecord:
+        """Atomically claim a run waiting for approval before scheduling its resume task.
+
+        waiting_input(clarification/analysis_review)과 별개 상태다 — analysis_agent가
+        LangGraph interrupt 없이 terminal_state로 만드는 단순 승인(approval) 대기 상태.
+        """
+        context = context or PolicyContext(run_id=run_id)
+        self.policy_engine.enforce(
+            "run.update",
+            run_id,
+            {"status": RunStatus.running.value, "metadata": metadata or {}},
+            context,
+        )
+        run = self.get_run(run_id, context)
+        merged_metadata = dict(run.metadata)
+        merged_metadata.update(metadata or {})
+        now = utc_now_iso()
+
+        with self.sqlite.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET status = ?, metadata_json = ?, updated_at = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (
+                    RunStatus.running.value,
+                    dumps_json(merged_metadata),
+                    now,
+                    run_id,
+                    RunStatus.waiting_approval.value,
+                ),
+            )
+
+        if cursor.rowcount != 1:
+            current = self.get_run(run_id, context)
+            raise BackendError(
+                "RUN_NOT_WAITING_APPROVAL",
+                "Run is not waiting for approval.",
+                {"run_id": run_id, "status": current.status.value},
+            )
+        return self.get_run(run_id, context)
+
     def append_event(
         self,
         run_id: str,

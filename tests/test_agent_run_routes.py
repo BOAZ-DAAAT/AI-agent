@@ -223,7 +223,7 @@ def test_resume_clarification_claims_run_and_schedules_same_thread(tmp_path, mon
     assert ownership == {"session_id": "sess_001", "username": "dev"}
     assert seen["run_id"] == run.run_id
     assert seen["thread_id"] == "thread_clarification"
-    assert seen["answer"] == "월별 기준으로 분석해줘"
+    assert seen["resume_payload"] == {"answer": "월별 기준으로 분석해줘"}
     assert services.run_service.get_run(run.run_id).status.value == "running"
 
 
@@ -252,6 +252,163 @@ def test_resume_clarification_rejects_duplicate_submission(tmp_path, monkeypatch
     second = client.post(
         f"/agent-runs/{run.run_id}/resume",
         json={"type": "clarification", "answer": "분기별"},
+        headers=_user_header(),
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert calls == [run.run_id]
+
+
+def test_resume_analysis_review_claims_run_and_forwards_selection(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_review",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(
+        run.run_id,
+        "waiting_input",
+        metadata={"interrupt_type": "analysis_review", "node": "collect_analysis_review"},
+    )
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "analysis_review", "approval_id": "run_x:analysis_agent:approval", "selected_option_id": "opt_1"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "analysis_review"
+    assert seen["resume_payload"] == {
+        "approval_id": "run_x:analysis_agent:approval",
+        "selected_option_id": "opt_1",
+        "free_text": None,
+    }
+
+
+def test_resume_analysis_review_rejects_both_option_and_free_text(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_review", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(
+        run.run_id,
+        "waiting_input",
+        metadata={"interrupt_type": "analysis_review", "node": "collect_analysis_review"},
+    )
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={
+            "type": "analysis_review",
+            "approval_id": "run_x:analysis_agent:approval",
+            "selected_option_id": "opt_1",
+            "free_text": "그냥 이렇게 해줘",
+        },
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 422
+
+
+def test_resume_approval_claims_waiting_approval_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("backend.agent_runs.routes.resume_agent_run", lambda **kwargs: seen.update(kwargs))
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["resume_type"] == "approval"
+    assert seen["resume_payload"] == {"approved": True}
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_resume_approval_rejects_run_not_waiting_approval(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_approval",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+
+    response = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 409
+
+
+def test_resume_approval_rejects_duplicate_submission(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(thread_id="thread_approval", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+    run = services.run_service.update_status(run.run_id, "waiting_approval")
+    app = create_app(services=services)
+    client = TestClient(app)
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db"),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.resume_agent_run",
+        lambda **kwargs: calls.append(kwargs["run_id"]),
+    )
+
+    first = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
+        headers=_user_header(),
+    )
+    second = client.post(
+        f"/agent-runs/{run.run_id}/resume",
+        json={"type": "approval", "approved": True},
         headers=_user_header(),
     )
 

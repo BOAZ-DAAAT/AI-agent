@@ -98,34 +98,54 @@ def resume_run(
         raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
     session = get_owned_session(session_id, username)
 
-    if run.status != RunStatus.waiting_input:
-        raise HTTPException(
-            status_code=409,
-            detail="설명 입력을 기다리는 실행만 재개할 수 있습니다.",
-        )
-    if run.metadata.get("interrupt_type") != "clarification":
-        raise HTTPException(status_code=409, detail="현재 대기 요청은 clarification 유형이 아닙니다.")
     if not run.thread_id:
         raise HTTPException(status_code=409, detail="실행에 연결된 thread 정보가 없습니다.")
 
-    try:
-        services.run_service.claim_waiting_input(
-            run_id,
-            metadata={"resumed_from": "clarification"},
+    if payload.type in ("clarification", "analysis_review"):
+        # 둘 다 LangGraph interrupt 기반 — waiting_input 상태 + interrupt_type 일치 확인.
+        if run.status != RunStatus.waiting_input:
+            raise HTTPException(status_code=409, detail="입력을 기다리는 실행만 재개할 수 있습니다.")
+        if run.metadata.get("interrupt_type") != payload.type:
+            raise HTTPException(status_code=409, detail=f"현재 대기 요청은 {payload.type} 유형이 아닙니다.")
+        try:
+            services.run_service.claim_waiting_input(run_id, metadata={"resumed_from": payload.type})
+        except BackendError as exc:
+            if exc.code == "RUN_NOT_WAITING_INPUT":
+                raise HTTPException(
+                    status_code=409,
+                    detail="이미 재개되었거나 더 이상 입력 대기 상태가 아닙니다.",
+                ) from exc
+            raise
+        resume_payload: dict[str, object] = (
+            {"answer": payload.answer}
+            if payload.type == "clarification"
+            else {
+                "approval_id": payload.approval_id,
+                "selected_option_id": payload.selected_option_id,
+                "free_text": payload.free_text,
+            }
         )
-    except BackendError as exc:
-        if exc.code == "RUN_NOT_WAITING_INPUT":
-            raise HTTPException(
-                status_code=409,
-                detail="이미 재개되었거나 더 이상 입력 대기 상태가 아닙니다.",
-            ) from exc
-        raise
+    else:
+        # approval: LangGraph interrupt가 아니라 terminal_state(needs_user_approval)에서
+        # 만들어지는 단순 승인 대기 — waiting_input이 아니라 waiting_approval 상태.
+        if run.status != RunStatus.waiting_approval:
+            raise HTTPException(status_code=409, detail="승인을 기다리는 실행만 재개할 수 있습니다.")
+        try:
+            services.run_service.claim_waiting_approval(run_id, metadata={"resumed_from": "approval"})
+        except BackendError as exc:
+            if exc.code == "RUN_NOT_WAITING_APPROVAL":
+                raise HTTPException(
+                    status_code=409,
+                    detail="이미 재개되었거나 더 이상 승인 대기 상태가 아닙니다.",
+                ) from exc
+            raise
+        resume_payload = {"approved": True}
 
     background_tasks.add_task(
         resume_agent_run,
         services=services,
         session=session,
-        answer=payload.answer,
+        resume_payload=resume_payload,
         run_id=run_id,
         thread_id=run.thread_id,
     )
