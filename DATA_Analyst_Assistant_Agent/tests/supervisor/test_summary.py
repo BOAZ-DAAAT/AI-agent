@@ -358,6 +358,31 @@ def test_generate_analysis_summary_carries_method_decision_through_untouched_by_
     assert payload["detail"]["hypothesis_tests"][0]["heading"] == "빈도-매출 상관"
 
 
+def test_generate_analysis_summary_recovers_method_decision_from_analysis_artifact(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_analysis_decision_recovery")
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {
+            "title": "t",
+            "executive_summary": "배송일과 리뷰 점수의 관계를 Spearman 상관으로 검정했습니다.",
+            "key_findings": [],
+            "limitations": [],
+            "method_notes": ["순위 기반 관계를 보기 위해 Spearman 상관을 사용했습니다."],
+            "method_decision": {},
+            "hypothesis_tests": [{"null_hypothesis": "H0", "decision": "supported", "test_name": "Spearman correlation"}],
+        },
+        kind="analysis_result", filename="analysis_result.json",
+    )
+    fake_llm = _FakeLLM([_ANALYSIS_RESPONSE])
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
+
+    ref = generate_node_summary([artifact_id], runtime)
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+
+    assert payload["detail"]["method_decision"]["selected_method"] == "Spearman correlation"
+    assert payload["detail"]["method_decision"]["rationale"] == "배송일과 리뷰 점수의 관계를 Spearman 상관으로 검정했습니다."
+
+
 def test_generate_insight_summary_uses_evidence_labels(adapter, runtime, monkeypatch):
     run = adapter.create_run(thread_id="thread_insight_gen")
     artifact_id = _register(

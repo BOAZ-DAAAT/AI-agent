@@ -658,12 +658,13 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
     raw_tests = evidence.facts.get("hypothesis_tests") or []
     hypothesis_tests = _ground_analysis_test_sections(hypothesis_tests, raw_tests)
     decision_boundaries = _analysis_decision_boundaries(raw_tests)
+    method_decision = evidence.facts.get("method_decision") or _infer_analysis_method_decision(evidence.facts)
     interpretation_parts = [
         _ensure_analysis_emphasis(str(parsed.get("interpretation") or "").strip()),
         *(_ensure_analysis_emphasis(boundary) for boundary in decision_boundaries),
     ]
     detail = AnalysisSummaryDetail(
-        method_decision=evidence.facts.get("method_decision") or {},   # 근거 그대로(LLM이 안 씀)
+        method_decision=method_decision,
         hypothesis_tests=hypothesis_tests,
         key_statistics=_emphasize_sections(_extract_sections(parsed.get("key_statistics"), known_chart_ids)),
         evidence_tables=[
@@ -686,6 +687,33 @@ def _to_analysis_result(parsed: dict[str, Any], evidence: NodeEvidence, known_ch
         conclusion=conclusion, key_finding=key_finding,
         source_kind=evidence.source_kind, fallback_used=False,
     )
+
+
+def _infer_analysis_method_decision(facts: dict[str, Any]) -> dict[str, Any]:
+    tests = facts.get("hypothesis_tests") or []
+    selected_method = ""
+    if isinstance(tests, list):
+        for test in tests:
+            if not isinstance(test, dict):
+                continue
+            selected_method = str(test.get("test_name") or "").strip()
+            if selected_method:
+                break
+
+    rationale_candidates: list[str] = []
+    summary = str(facts.get("executive_summary") or "").strip()
+    if summary:
+        rationale_candidates.append(summary)
+    for note in facts.get("method_notes") or []:
+        text = str(note or "").strip()
+        if text:
+            rationale_candidates.append(text)
+    if not selected_method and not rationale_candidates:
+        return {}
+    return {
+        "selected_method": selected_method or "unspecified_analysis_method",
+        "rationale": rationale_candidates[0] if rationale_candidates else "상류 분석 아티팩트에서 방법 선택 근거를 복원했습니다.",
+    }
 
 
 # ─────────────────────────────
