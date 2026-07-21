@@ -1,5 +1,5 @@
 pydantic
-pandas
+pandas>=2.3.3,<3
 numpy
 duckdb
 sqlglot
