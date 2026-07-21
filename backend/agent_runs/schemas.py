@@ -28,6 +28,12 @@ class AgentNodeSummaryResponse(BaseModel):
     summary: NodeSummaryResult
 
 
+class AgentRunDeleteResponse(BaseModel):
+    run_id: str
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
 class AgentRunResumeRequest(BaseModel):
     type: Literal["clarification"]
     answer: str

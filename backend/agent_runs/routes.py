@@ -22,6 +22,7 @@ from .schemas import (
     AgentRunBranchRequest,
     AgentRunBranchResponse,
     AgentRunCreateRequest,
+    AgentRunDeleteResponse,
     AgentRunResponse,
     AgentRunResumeRequest,
     AgentRunResumeResponse,
@@ -29,6 +30,8 @@ from .schemas import (
 from .service import (
     BranchPlanError,
     NodeSummaryNotFoundError,
+    RunDeletionConflictError,
+    delete_terminal_run_data,
     get_node_summary,
     launch_agent_run,
     new_thread_id,
@@ -39,6 +42,34 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+@router.delete("/{run_id}", response_model=AgentRunDeleteResponse)
+def delete_agent_run(
+    run_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentRunDeleteResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    try:
+        result = delete_terminal_run_data(services=services, run_id=run_id)
+    except RunDeletionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return AgentRunDeleteResponse(
+        run_id=result.run_id,
+        deleted_event_count=result.deleted_event_count,
+        deleted_artifact_count=result.deleted_artifact_count,
+    )
 
 
 @router.get(

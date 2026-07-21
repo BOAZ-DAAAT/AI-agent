@@ -235,6 +235,98 @@ def test_get_completed_node_summary_resolves_legacy_event_by_source_artifacts(tm
     assert response.json()["summary_artifact_id"] == summary_artifact.artifact_id
 
 
+def test_delete_completed_agent_run_removes_events_artifacts_and_files(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_delete", project_id="sess_001")
+    checkpoint_path = services.config.base_data_dir / "thread_delete.sqlite"
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+    artifact = _register_file_artifact(
+        services,
+        run.run_id,
+        payload=_node_summary_payload(),
+        metadata={"kind": "node_summary", "source_artifact_ids": ["source_1"]},
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        artifact_ids=[artifact.artifact_id],
+        metadata={"node_id": "node_delete"},
+    )
+    services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.delete(f"/agent-runs/{run.run_id}", headers=_user_header())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": run.run_id,
+        "deleted_event_count": 1,
+        "deleted_artifact_count": 1,
+    }
+    assert services.artifact_store.exists(artifact.artifact_id) is False
+    assert checkpoint_path.exists() is False
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM run_events WHERE run_id = ?",
+        (run.run_id,),
+    ) is None
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM artifacts WHERE run_id = ?",
+        (run.run_id,),
+    ) is None
+    assert client.get(f"/agent-runs/{run.run_id}", headers=_user_header()).status_code == 404
+
+
+def test_delete_running_agent_run_is_rejected_without_deleting_data(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_running", project_id="sess_001")
+    services.run_service.update_status(run.run_id, "running")
+
+    response = client.delete(f"/agent-runs/{run.run_id}", headers=_user_header())
+
+    assert response.status_code == 409
+    assert services.run_service.get_run(run.run_id).status.value == "running"
+
+
+def test_delete_agent_run_keeps_checkpoint_used_by_another_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    first = services.run_service.create_run(thread_id="thread_shared", project_id="sess_001")
+    second = services.run_service.create_run(thread_id="thread_shared", project_id="sess_001")
+    services.run_service.update_status(first.run_id, "succeeded")
+    checkpoint_path = services.config.base_data_dir / "thread_shared.sqlite"
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+
+    response = client.delete(f"/agent-runs/{first.run_id}", headers=_user_header())
+
+    assert response.status_code == 200
+    assert checkpoint_path.exists() is True
+    assert services.run_service.get_run(second.run_id).run_id == second.run_id
+
+
 def test_stream_agent_run_events_resumes_after_last_event_id(
     tmp_path,
     monkeypatch,

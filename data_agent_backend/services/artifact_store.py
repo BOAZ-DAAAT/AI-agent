@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 from data_agent_backend.models.common import BackendError
@@ -47,3 +48,7 @@ class ArtifactStore:
         except BackendError:
             return False
 
+    def delete(self, artifact_id: str) -> None:
+        artifact_dir = ensure_child_path(self.base_dir, self.base_dir / artifact_id)
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir)
