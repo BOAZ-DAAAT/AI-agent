@@ -9,9 +9,14 @@ from data_agent_backend.models.artifacts import ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
-from DATA_Analyst_Assistant_Agent.supervisor.summary.markdown import render_node_summary_markdown
+from DATA_Analyst_Assistant_Agent.supervisor.summary.markdown import (
+    render_node_summary_artifact_markdown,
+    render_node_summary_markdown,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
+    AnalysisSummaryDetail,
     EDASummaryDetail,
+    EvidenceTable,
     FindingSection,
     InsightSummaryDetail,
     NodeSummaryResult,
@@ -217,3 +222,50 @@ def test_sql_without_preview_has_no_table(adapter, runtime, tmp_path):
     markdown = render_node_summary_markdown(result, runtime, out_dir)
 
     assert "최종 구성된 데이터마트는 다음과 같습니다" not in markdown
+
+
+def test_service_markdown_keeps_rationale_chart_and_observation_in_order():
+    result = NodeSummaryResult(
+        title="배송 EDA", subtitle="관계 탐색", background="배송과 리뷰의 관계를 살펴봅니다.",
+        conclusion="후속 검정이 필요합니다.", key_finding="음의 관계", source_kind="eda_summary",
+        detail=EDASummaryDetail(
+            statistical_findings=[FindingSection(
+                heading="배송기간과 리뷰점수",
+                rationale="표본 규모를 함께 보기 위해 버블 차트를 사용합니다.",
+                body="배송기간이 길수록 리뷰점수가 낮아지는 방향이 관찰됩니다.",
+                chart_artifact_ids=["art_chart_1"],
+            )],
+            handoff="Analysis 단계에서 관계의 일관성을 검증합니다.",
+        ),
+    )
+
+    markdown = render_node_summary_artifact_markdown(result)
+
+    chart = "![배송기간과 리뷰점수](artifact://art_chart_1)"
+    assert chart in markdown
+    assert markdown.index("표본 규모를 함께 보기 위해") < markdown.index(chart)
+    assert markdown.index(chart) < markdown.index("배송기간이 길수록")
+    assert "## 다음 단계 연결" in markdown
+    assert "한 줄 요약" not in markdown
+
+
+def test_service_analysis_markdown_renders_actual_evidence_table():
+    result = NodeSummaryResult(
+        title="관계 검증", subtitle="상관 분석", background="관계를 검증합니다.",
+        conclusion="음의 관계가 일관됩니다.", key_finding="음의 관계", source_kind="analysis_result",
+        detail=AnalysisSummaryDetail(
+            evidence_tables=[EvidenceTable(
+                title="검정 결과",
+                columns=["method", "value"],
+                rows=[{"method": "Pearson", "value": -0.372}],
+            )],
+            interpretation="두 검정의 방향이 일치합니다.",
+        ),
+    )
+
+    markdown = render_node_summary_artifact_markdown(result)
+
+    assert "## 실제 근거표" in markdown
+    assert "| method | value |" in markdown
+    assert "| Pearson | -0.372 |" in markdown
+    assert "## 결과 해석" in markdown
