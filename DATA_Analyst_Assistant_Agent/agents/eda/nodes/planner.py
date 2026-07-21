@@ -40,6 +40,7 @@ ANALYSIS_TOOLS = [
      "precond": lambda s: s["n_numeric"] >= 2 and s["row_count"] >= 10, "result_field": "clustering_result"},
 ]
 ANALYSIS_NAMES = [t["name"] for t in ANALYSIS_TOOLS]
+SUBSTANTIVE_ANALYSIS_NAMES = {"distribution", "comparison", "relationship", "time", "clustering"}
 
 
 def _data_shape(ctx) -> Dict[str, Any]:
@@ -55,6 +56,13 @@ def _data_shape(ctx) -> Dict[str, Any]:
     time = ctx.time_cols or []
     return {"n_numeric": len(numeric), "n_cat": len(cat), "n_time": len(time),
             "row_count": len(df), "numeric_cols": numeric, "cat_cols": cat, "time_cols": time}
+
+
+def _first_substantive_feasible(feasible: list[dict]) -> str:
+    for tool in feasible:
+        if tool["name"] in SUBSTANTIVE_ANALYSIS_NAMES:
+            return tool["name"]
+    return feasible[0]["name"]
 
 
 def planner_node(state: EDAState) -> dict:
@@ -135,6 +143,12 @@ def planner_node(state: EDAState) -> dict:
             # 배치가 비었거나(emit_batch=False, 또는 LLM이 codegen/done을 골랐을 때) 기존 단일선택 로직
             choice = decision.get("next", "done")
             reason = decision.get("reason", "")
+            if choice == "done" and feasible and not attempted and not _substantive_produced_output(state):
+                choice = _first_substantive_feasible(feasible)
+                reason = (
+                    "planner_done_unreliable: feasible analyses remain before any attempt; "
+                    f"selecting {choice}"
+                )
             # 환각 방지: feasible 목록 + codegen(특수 카드, 단 이미 한 번 써봤으면 재선택 금지 —
             # route_after_codegen이 도메인 밖 거부 시 planner로 되돌리는데, 여기서 또 codegen을
             # 고르게 두면 왕복 루프가 생긴다, #194) 밖 선택이면 done
@@ -162,7 +176,7 @@ def planner_node(state: EDAState) -> dict:
 
 
 # 질문을 실제로 '답하는' 실질 분석 (quality는 항상 도는 일반 점검이라 제외)
-_SUBSTANTIVE = {"distribution", "comparison", "relationship", "time", "clustering"}
+_SUBSTANTIVE = SUBSTANTIVE_ANALYSIS_NAMES
 _RESULT_FIELD = {t["name"]: t["result_field"] for t in ANALYSIS_TOOLS}
 
 

@@ -1713,6 +1713,21 @@ def test_planner_node_can_select_codegen(monkeypatch):
     assert out["next_analysis"] == "codegen"
 
 
+def test_planner_node_rejects_zero_attempt_done_when_feasible(monkeypatch):
+    import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
+    df = pd.DataFrame({"order_price": [1.0, 2.0, 3.0], "cat": ["a", "b", "a"]})
+    monkeypatch.setattr(P, "get_llm",
+                        lambda *a, **k: _FakeLLM('{"next": "done", "reason": "enough"}'))
+    reset_context()
+    set_context(EdaContext(df=df, measure_cols=["order_price"]))
+    try:
+        out = P.planner_node({"user_question": "category average", "controller_log": [], "round": 0})
+    finally:
+        reset_context()
+    assert out["next_analysis"] == "distribution"
+    assert "planner_done_unreliable" in out["controller_log"][-1]["reason"]
+
+
 def test_planner_node_rejects_hallucinated_choice(monkeypatch):
     # codegen은 허용하되, 목록 밖 엉뚱한 값은 여전히 done으로 강등한다.
     import DATA_Analyst_Assistant_Agent.agents.eda.nodes.planner as P
