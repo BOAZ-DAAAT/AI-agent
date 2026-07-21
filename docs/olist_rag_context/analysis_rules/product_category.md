@@ -3,7 +3,7 @@ document_id: product-category
 doc_type: analysis_query_rule
 query_type: product_category
 title: Olist Product Category Query Rules
-language: en
+language: ko
 version: "1.0"
 business_entities: [products, categories, orders, order_items]
 source_tables: [products, product_category_name_translation, order_items, orders, order_reviews]
@@ -11,135 +11,73 @@ grounding_level: schema_grounded
 intended_use: SQL planning rule retrieval
 prohibited_use: live metric evidence
 source_schema: DATA_Analyst_Assistant_Agent/agents/sql/data/db_schema.json
----
+---
+# 상품 카테고리 분석 규칙
 
-# Product Category Query Rules
+## 정의
 
-## Definition
+상품 카테고리 분석은 `products.product_category_name` 또는 `product_category_name_translation`의 영문명을 기준으로 주문·상품행·매출·배송·리뷰 지표를 카테고리별로 비교한다. 기본 출력 grain은 카테고리다.
 
-Product category analysis groups ordered products by `products.product_category_name` or its English translation in `product_category_name_translation`, then measures order, item, sales, freight, delivery, or review metrics by category.
+## 지원하는 질문
 
-## Supported Intents
+- 카테고리별 주문 수, 상품 행 수, 상품 매출, 배송비, 평균 가격을 비교한다.
+- 리뷰 점수·배송 지연·기간별 추이를 카테고리로 나눈다.
+- 포르투갈어 카테고리명과 영문 번역명을 선택해 보고한다.
 
-- Rank categories by order count, item count, or merchandise value.
-- Compare category-level average price, freight, review score, or delivery delay.
-- Translate Portuguese category names to English for reporting.
-- Identify categories with missing category names.
-- Analyze category performance over time.
-- Compare category mix by customer or seller region.
+## 검색 별칭
 
-## Default Metrics
+- 상품 카테고리, 카테고리별 매출, 카테고리 성과, 상품군, 카테고리 믹스, 영문 카테고리
+- product category, category sales, category performance, category mix, product mix
 
-- `COUNT(DISTINCT orders.order_id)` for category order count.
-- `COUNT(*)` from `order_items` for category item-line count.
-- `SUM(order_items.price)` for category merchandise value.
-- `AVG(order_items.price)` for average item price.
-- `SUM(order_items.freight_value)` for category freight.
-- `AVG(order_reviews.review_score)` only when satisfaction is requested.
-- Late rate only when delivery delay is requested.
+## 기본 지표
 
-## Entity Grain
+- [default] 카테고리별 주문 수는 `COUNT(DISTINCT orders.order_id)`이다.
+- [default] 카테고리별 상품 행 수는 `order_items`의 `COUNT(*)`이다.
+- [default] 카테고리별 상품 매출은 `SUM(order_items.price)`이고 평균 상품 가격은 `AVG(order_items.price)`다.
+- [prefer] 만족도는 요청이 있을 때만 `AVG(order_reviews.review_score)`를 사용하며, 배송 지표는 `delivery_delay` 규칙을 함께 적용한다.
 
-- Default grain: category.
-- Category key: `products.product_category_name`.
-- English category label: `product_category_name_translation.product_category_name_english`.
-- Item grain: `order_items.order_id`, `order_items.order_item_id`.
-- Order grain: `orders.order_id`.
+## Grain과 조인
 
-## Time Basis
+- [must] 카테고리는 상품/상품행 grain에서 정해지므로 `order_items.product_id = products.product_id`로 연결한다.
+- [must] 영문 라벨은 `products.product_category_name = product_category_name_translation.product_category_name`으로 연결한다.
+- [must] 주문 수·시간·상태가 필요하면 `order_items.order_id = orders.order_id`로 연결한다.
+- [avoid] 영문 카테고리명을 `products`에 직접 조인 키로 사용하지 않는다.
+- [avoid] 상품 행을 조인한 뒤 `COUNT(*)`를 카테고리 주문 수로 사용하지 않는다.
+- [prefer] 한 주문에 여러 카테고리가 있으면 해당 주문은 각 구매 카테고리에 한 번씩 나타난다고 결과에 밝힌다.
 
-- Use `orders.order_purchase_timestamp` as the default time basis for category sales and order trends.
-- Use `orders.order_delivered_customer_date` only for delivered-date category questions.
-- Use `order_reviews.review_creation_date` only for category review timing.
-- Use `order_items.shipping_limit_date` only for category shipping-deadline questions.
+## 상태·결측·기본 가정
 
-## Required Tables
+- [default] 완료·배송 완료 성과 요청일 때만 delivered 주문으로 제한한다.
+- [default] `products.product_category_name`이 null이면 unknown 카테고리로 남기고, 번역이 없으면 원문명을 보존한다.
+- [avoid] 리뷰가 없는 주문을 0점 리뷰로 보거나, 상품 마스터 행 수를 판매 상품 수로 보지 않는다.
 
-- `order_items`
-- `products`
-- `orders` when order count, time, status, customer region, or delivery metrics are needed.
-- `product_category_name_translation` when English category names are needed.
-- `order_reviews` only when review satisfaction is requested.
-- `customers` only when customer region is requested.
-- `sellers` only when seller region is requested.
+## 확인이 필요한 경우
 
-## Join Constraints
+- [ask_if_missing] “상위 카테고리” 또는 “카테고리 성과”의 기준이 매출·주문·리뷰·배송 중 무엇인지 확인하거나 가정한다.
+- [ask_if_missing] 카테고리 점유율에서 다중 카테고리 주문을 어떻게 해석할지가 결과를 바꾸면 명시한다.
+- 좋은 예: “영문 카테고리별 상품 매출과 서로 다른 주문 수를 비교해줘.”
+- 피해야 할 예: “브랜드별·3단계 카테고리 체계를 만들어줘.” 해당 스키마에는 단일 카테고리만 있다.
 
-- Join `order_items` to `products` on `order_items.product_id = products.product_id`.
-- Join `products` to `product_category_name_translation` on `products.product_category_name = product_category_name_translation.product_category_name`.
-- Join `order_items` to `orders` on `order_items.order_id = orders.order_id`.
-- Join `orders` to `order_reviews` on `orders.order_id = order_reviews.order_id` only for review metrics.
-- Join `orders` to `customers` on `orders.customer_id = customers.customer_id` only for customer region.
-- Join `order_items` to `sellers` on `order_items.seller_id = sellers.seller_id` only for seller region or seller analysis.
-- Count category orders with `COUNT(DISTINCT orders.order_id)`, not item rows.
-- Use item rows for item-line count and monetary sums because category is assigned at product/item grain.
-- If one order contains multiple categories, allow that order to count once in each category and state this behavior.
-- Do not aggregate category metrics by `product_id` unless product-level output is requested.
+## 관련 규칙
 
-## Status And Null Rules
+- `sales_orders`, `delivery_delay`, `review_satisfaction`, `seller_performance`, `regional_analysis`
 
-- Use delivered-order filtering only when the user asks for completed, delivered, or fulfilled category performance.
-- Keep null `products.product_category_name` as unknown when reporting all category distribution.
-- Keep null English translations as untranslated categories; do not drop the product by default.
-- Exclude null `order_items.price` from price sums and averages.
-- Exclude null `order_items.freight_value` from freight sums and averages.
-- Exclude null `orders.order_purchase_timestamp` from category trend grouping.
-- Do not require reviews for category sales/order metrics.
-- Do not treat missing review rows as zero review score.
-- Do not treat missing product dimensions as missing category.
-- Preserve Portuguese category name if English translation is unavailable.
+## 사용하지 않는 경우
 
-## Clarify When
+- [prefer] 카테고리 분해가 없으면 `sales_orders`, 판매자 자체 비교가 주제면 `seller_performance`를 우선한다.
 
-- The user asks for "top categories" without saying top by orders, items, sales, reviews, or delivery.
-- The user asks for category names without specifying Portuguese source names or English translations.
-- The user asks for category performance without defining the performance metric.
-- The user asks for category share and an order has multiple categories.
-- Ambiguous query example: "What are the best categories?"
-- Ambiguous query example: "Show category performance."
-- Ambiguous query example: "Compare categories by popularity."
+## 테이블 및 조인 가이드
 
-## Prohibited Interpretations
+- [must] `order_items.product_id = products.product_id`로 연결하고 영문 라벨은 category translation 테이블을 사용한다.
 
-- Do not use product dimensions as category labels.
-- Do not treat `product_category_name_english` as the join key to products.
-- Do not count product master rows as sold products.
-- Do not count category order volume with plain `COUNT(*)` after item joins unless item-line count is requested.
-- Do not infer human-readable category names outside the translation table.
-- Do not drop unknown categories unless the user asks to exclude them.
-- Do not infer product quantity beyond item rows.
-- Do not use review comments as category taxonomy.
-- Do not infer brand, department, or hierarchy levels; the schema has one category field.
-- Do not assume categories are mutually exclusive at order level.
+## 소프트 가이드
 
-## Unsupported Requests
+- [prefer] 주문 수가 상품행 기준인지 서로 다른 주문 기준인지, 다중 카테고리 주문 처리 방식을 표시한다.
 
-- Category hierarchy, department tree, or taxonomy levels beyond the single category column.
-- Brand-level analysis unless brand is encoded outside this schema.
-- Product text search by actual name or description; only name/description length fields exist.
-- Inventory by category.
-- Category margin or profitability.
+## 긍정 예시
 
-## Limitations
+- "영문 카테고리별 상품 매출과 서로 다른 주문 수를 비교해줘."
 
-- Product category is stored on product master records, not directly on orders.
-- English labels depend on translation-table coverage.
-- Multi-category orders can make category order counts sum above total distinct orders.
-- Product names and descriptions are not present, only length fields.
-- Category metrics inherit status and null limitations from joined order/item/review tables.
+## 부정 예시
 
-## Positive Examples
-
-- "Rank English product categories by merchandise sales."
-- "Count distinct delivered orders per category."
-- "Show item-line count and average price by Portuguese category."
-- "Compare average review score by category."
-- "Trend category sales by purchase month."
-
-## Negative Examples
-
-- "Build a three-level category hierarchy."
-- "Analyze brand performance by category."
-- "Use product master count as sold item count."
-- "Treat unknown category as zero sales."
-- "Join category using product_category_name_english to products."
+- "브랜드별 3단계 카테고리 체계를 만들어줘." 해당 스키마에는 없다.

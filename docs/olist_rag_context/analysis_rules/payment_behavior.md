@@ -3,7 +3,7 @@ document_id: payment-behavior
 doc_type: analysis_query_rule
 query_type: payment_behavior
 title: Olist Payment Behavior Query Rules
-language: en
+language: ko
 version: "1.0"
 business_entities: [payments, orders, customers]
 source_tables: [order_payments, orders, customers, order_items, products]
@@ -11,134 +11,66 @@ grounding_level: schema_grounded
 intended_use: SQL planning rule retrieval
 prohibited_use: live metric evidence
 source_schema: DATA_Analyst_Assistant_Agent/agents/sql/data/db_schema.json
----
+---
+# 결제 행동 분석 규칙
 
-# Payment Behavior Query Rules
+## 정의
 
-## Definition
+결제 수단, 할부, 결제 레코드 수, 결제 완료 주문 수, 결제금액을 분석한다. 결제 레코드 grain은 `order_payments.order_id`와 `order_payments.payment_sequential`의 조합이다.
 
-Payment behavior analysis measures payment method, installment use, payment row count, and payment value from `order_payments`, joined to orders and customer/item context only when needed.
+## 검색 별칭
 
-## Supported Intents
+- 결제 행동, 결제 수단, 결제 방식, 할부, 결제 금액, 신용카드, boleto, 결제 유형
+- payment behavior, payment method, installment, payment type, boleto, credit card, payment value
 
-- Compare payment method distribution.
-- Analyze installment counts and installment usage.
-- Calculate payment value by method.
-- Compare payment behavior by customer region, order status, category, or time.
-- Identify orders with multiple payment records.
-- Compare average payment value by payment type.
-- Analyze credit card versus boleto behavior.
+## 기본 지표
 
-## Default Metrics
+- [default] 결제 레코드 수는 `COUNT(*)` from `order_payments`다.
+- [default] 결제 주문 수는 `COUNT(DISTINCT order_payments.order_id)`다.
+- [default] 총 결제금액은 `SUM(order_payments.payment_value)`다.
+- [default] 평균 할부 횟수는 `AVG(order_payments.payment_installments)`다.
+- [prefer] 결제금액과 상품 매출은 서로 다른 금액 관점으로 유지한다.
 
-- `COUNT(*)` from `order_payments` for payment record count.
-- `COUNT(DISTINCT order_payments.order_id)` for paid order count.
-- `SUM(order_payments.payment_value)` for total payment value.
-- `AVG(order_payments.payment_value)` for average payment record value.
-- `AVG(order_payments.payment_installments)` for average installments.
-- `COUNT(DISTINCT order_id) FILTER (WHERE payment_installments > 1)` for installment order count after order-level aggregation.
-- Payment method share by `payment_type`.
+## Grain과 조인
 
-## Entity Grain
+- [must] 결제는 `order_payments.order_id = orders.order_id`로 주문에 연결한다.
+- [avoid] `payment_sequential`을 할부 횟수로 해석하지 않는다.
+- [avoid] `order_payments`와 `order_items`를 직접 조인한 뒤 `payment_value`를 합산하지 않는다.
+- [prefer] 카테고리·판매자·상품별 결제가 필요하면 먼저 결제 테이블을 주문 grain으로 집계한다.
 
-- Default grain: payment record, identified by `order_id` and `payment_sequential`.
-- Order grain: `order_payments.order_id`.
-- Customer grain, when requested: `customers.customer_unique_id`.
-- Category or seller grain requires item joins and explicit allocation caution.
+## 시간·상태·기본 가정
 
-## Time Basis
+- [default] `order_payments`에는 결제 시점이 없으므로 추세는 `orders.order_purchase_timestamp`를 사용한다.
+- [default] 결제수단 분포는 별도 요청이 없으면 모든 상태를 포함한다. delivered/완료 주문 요청이면 해당 상태를 제한한다.
+- [prefer] 결제수단 비율의 분모가 결제 레코드인지 서로 다른 주문인지 명시한다.
 
-- Use `orders.order_purchase_timestamp` as the default time basis for payment behavior trends.
-- No payment timestamp exists in `order_payments`; do not invent one.
-- Use approval time only when asking about approved orders.
-- Use delivery time only when payment behavior is compared with delivery outcomes.
+## 확인이 필요한 경우
 
-## Required Tables
+- [ask_if_missing] 결제수단 점유율의 분모가 레코드 수인지 주문 수인지에 따라 해석이 달라지면 확인한다.
+- [ask_if_missing] 주문 단위 결제금액을 판매자·카테고리에 배분하려면 배분 기준을 확인한다.
+- 좋은 예: “결제수단별 서로 다른 주문 수와 총 결제금액을 보여줘.”
+- 피해야 할 예: “상품 행에 결제금액을 붙여 카테고리별 결제금액을 합산해줘.”
 
-- `order_payments`
-- `orders` when order status, purchase time, approval, delivery, or customer joins are needed.
-- `customers` only when customer identity or region is requested.
-- `order_items` only when category, seller, price, freight, or item context is requested.
-- `products` only when product/category payment behavior is requested.
-- `product_category_name_translation` only when English category names are requested.
+## 관련 규칙
 
-## Join Constraints
+- `sales_orders`, `customer_value`, `regional_analysis`, `product_category`, `review_satisfaction`
 
-- Join `order_payments` to `orders` on `order_payments.order_id = orders.order_id`.
-- Join `orders` to `customers` on `orders.customer_id = customers.customer_id`.
-- Aggregate payment rows to `order_id` before joining to `order_items` for item/category/seller analysis.
-- Count paid orders with `COUNT(DISTINCT order_payments.order_id)`.
-- Count payment records with `COUNT(*)` only when payment splits or records are requested.
-- For payment method mix, be explicit whether the denominator is payment records or distinct orders.
-- For orders with multiple payment methods, decide whether to count each method record or classify the order as mixed.
-- Do not join payments directly to item rows and then sum `payment_value`; this multiplies payment totals.
-- Do not allocate order payment value to sellers or categories without a stated allocation rule.
-- Do not add `payment_value` to `order_items.price`; they are different monetary views.
+## 사용하지 않는 경우
 
-## Status And Null Rules
+- [prefer] 상품 매출이 주제면 `sales_orders`, 고객 구매가치가 주제면 `customer_value`를 우선한다.
 
-- Include all statuses for payment-method distribution unless the user asks for delivered, completed, or approved orders.
-- Filter to delivered orders when payment behavior of completed orders is requested.
-- Exclude null `payment_type` from payment method grouping unless an unknown bucket is requested.
-- Exclude null `payment_value` from payment value sums and averages.
-- Exclude null `payment_installments` from installment averages.
-- Treat `payment_installments = 1` as single-payment, not missing.
-- Treat `payment_sequential` as payment record order, not number of installments.
-- Keep zero-value payment rows only if they exist and the query asks for payment records; otherwise flag them as data-quality cases.
-- Do not infer payment date from purchase, approval, or delivery timestamps.
-- Do not treat missing payment rows as unpaid orders unless the query is explicitly auditing missing payments.
+## 테이블 및 조인 가이드
 
-## Clarify When
+- [must] `order_payments.order_id = orders.order_id`로 연결하고 상품·판매자 분석 전 결제를 주문 grain으로 선집계한다.
 
-- The user says "payment share" without specifying payment-record share or order share.
-- The user asks for "revenue by payment type" without confirming payment value versus item sales allocation.
-- The user asks for category or seller payment value without an allocation rule.
-- The user asks for "installment customers" without defining any installment threshold beyond `payment_installments > 1`.
-- Ambiguous query example: "Show payment mix."
-- Ambiguous query example: "Revenue by payment method and seller."
-- Ambiguous query example: "Which customers use installments?"
+## 소프트 가이드
 
-## Prohibited Interpretations
+- [prefer] 결제수단 비율의 분모가 결제 레코드인지 서로 다른 주문인지 표시한다.
 
-- Do not treat `payment_sequential` as installment count.
-- Do not treat `payment_installments` as number of payment rows.
-- Do not infer payment date; no payment timestamp exists.
-- Do not sum payment value after a direct many-to-many join with item rows.
-- Do not allocate full order payment to every seller or category in a multi-item order.
-- Do not use item price as payment value unless the query changes to sales analysis.
-- Do not infer failed, refunded, or chargeback payments; no such fields exist.
-- Do not infer credit risk or customer income.
-- Do not treat missing payment rows as zero unless auditing missing payments.
-- Do not convert boleto or credit_card labels to broader payment families unless requested.
+## 긍정 예시
 
-## Unsupported Requests
+- "결제수단별 서로 다른 주문 수와 총 결제금액을 보여줘."
 
-- Payment failure, fraud, chargeback, refund, or authorization timing analysis.
-- Exact payment date or settlement date analysis.
-- Credit risk, income, or bank account analysis.
-- Seller payout or payment allocation without a rule.
-- Tax, fee, or processor-cost analysis.
+## 부정 예시
 
-## Limitations
-
-- `order_payments` has no payment timestamp.
-- One order can have multiple payment rows.
-- Payment value is order-level payment information and is not natively allocated to item, seller, or category.
-- Payment method shares depend on whether the denominator is records or orders.
-- Refunds, failures, fees, and chargebacks are not represented.
-
-## Positive Examples
-
-- "Show payment_type share by distinct order count."
-- "Calculate total payment_value by payment_type."
-- "Find orders with more than one payment_sequential row."
-- "Compare average installments by customer_state."
-- "Analyze delivered orders paid with credit_card versus boleto."
-
-## Negative Examples
-
-- "Use payment_sequential as installments."
-- "Join payments to order_items and sum payment_value by category without allocation."
-- "Find payment failures."
-- "Trend payments by payment date."
-- "Calculate processor fees."
+- "상품 행에 결제금액을 붙여 카테고리별 결제금액을 합산해줘."

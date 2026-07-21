@@ -127,8 +127,8 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
         try:
             hits = rule_search(
                 query,
-                top_k=1,
-                metadata_filter={"doc_type": {"$eq": "analysis_query_rule"}},
+                top_k=12,
+                metadata_filter={"doc_type": {"$in": ["analysis_query_rule", "analysis_foundation", "analysis_integrity_caution"]}},
             )
         except Exception as exc:
             status = (
@@ -161,7 +161,6 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 ],
             }
 
-        hit = hits[0]
         try:
             extraction = invoke_supervisor_decision(
                 state,
@@ -170,12 +169,8 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 AnalysisRuleExtractionDecision,
                 extra={
                     "user_query": query,
-                    "document": {
-                        "document_id": _hit_value(hit, "document_id", ""),
-                        "title": _hit_value(hit, "title", ""),
-                        "metadata": _hit_value(hit, "metadata", {}),
-                        "content": _hit_value(hit, "text", ""),
-                    },
+                    "document": _rule_document_payload(hits[0]),
+                    "documents": [_rule_document_payload(hit) for hit in hits[:12]],
                 },
             )
         except Exception as exc:
@@ -199,7 +194,7 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 **base_updates,
                 "analysis_rule_retrieval": {
                     "status": "not_applicable",
-                    "document_id": str(_hit_value(hit, "document_id", "")),
+                    "document_id": str(_hit_value(hits[0], "document_id", "")),
                     "reason": extraction.reason,
                 },
                 "run_events": [
@@ -208,7 +203,7 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 ],
             }
 
-        context = _analysis_rule_context(hit, extraction)
+        context = _analysis_rule_context(hits[:12], extraction)
         return {
             **base_updates,
             "analysis_rule_context": context,
@@ -216,7 +211,9 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 "status": "success",
                 "document_id": context.get("document_id", ""),
                 "query_type": context.get("query_type", ""),
-                "score": float(_hit_value(hit, "score", 0.0) or 0.0),
+                "related_query_types": list(context.get("related_query_types", [])),
+                "hit_count": len(hits[:12]),
+                "score": float(_hit_value(hits[0], "score", 0.0) or 0.0),
                 "reason": extraction.reason,
             },
             "run_events": [
@@ -233,19 +230,50 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
 
 
 def _analysis_rule_context(
-    hit: Any,
+    hits: list[Any],
     extraction: AnalysisRuleExtractionDecision,
 ) -> dict[str, Any]:
-    metadata = _hit_value(hit, "metadata", {})
+    first_hit = hits[0] if hits else {}
+    metadata = _hit_value(first_hit, "metadata", {})
     metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    related_query_types = _ordered_unique(
+        str(_hit_metadata(hit).get("query_type") or "")
+        for hit in hits
+        if str(_hit_metadata(hit).get("query_type") or "").strip()
+    )[:3]
+    source_sections = _ordered_unique(
+        str(_hit_metadata(hit).get("section") or "")
+        for hit in hits
+        if str(_hit_metadata(hit).get("section") or "").strip()
+    )[:12]
+    integrity_cautions = _ordered_unique(
+        str(item)
+        for hit in hits
+        for item in _as_list(_hit_metadata(hit).get("integrity_cautions"))
+        if str(item).strip()
+    )[:12]
+    schema_warnings = _ordered_unique(
+        str(item)
+        for hit in hits
+        for item in _as_list(_hit_metadata(hit).get("schema_warnings"))
+        if str(item).strip()
+    )[:12]
     context: dict[str, Any] = {
         "document_id": str(
-            metadata.get("document_id") or _hit_value(hit, "document_id", "")
+            metadata.get("document_id") or _hit_value(first_hit, "document_id", "")
         ),
-        "title": str(metadata.get("title") or _hit_value(hit, "title", "")),
+        "title": str(metadata.get("title") or _hit_value(first_hit, "title", "")),
         "query_type": str(metadata.get("query_type") or ""),
         "version": str(metadata.get("version") or ""),
     }
+    if related_query_types:
+        context["related_query_types"] = related_query_types
+    if source_sections:
+        context["source_sections"] = source_sections
+    if integrity_cautions:
+        context["integrity_cautions"] = integrity_cautions
+    if schema_warnings:
+        context["schema_warnings"] = schema_warnings
     context["rules"] = [
         " ".join(str(rule).split())[:500]
         for rule in extraction.rules[:12]
@@ -258,10 +286,45 @@ def _analysis_rule_context(
     return context
 
 
+def _rule_document_payload(hit: Any) -> dict[str, Any]:
+    return {
+        "document_id": _hit_value(hit, "document_id", ""),
+        "title": _hit_value(hit, "title", ""),
+        "record_id": _hit_value(hit, "record_id", ""),
+        "score": _hit_value(hit, "score", 0.0),
+        "metadata": _hit_value(hit, "metadata", {}),
+        "content": _hit_value(hit, "text", ""),
+    }
+
+
 def _hit_value(hit: Any, key: str, default: Any) -> Any:
     if isinstance(hit, dict):
         return hit.get(key, default)
     return getattr(hit, key, default)
+
+
+def _hit_metadata(hit: Any) -> dict[str, Any]:
+    metadata = _hit_value(hit, "metadata", {})
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _ordered_unique(values) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = str(value).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
 
 
 def make_clarify_query_node(model: Any | None):

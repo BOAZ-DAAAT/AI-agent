@@ -155,6 +155,25 @@ def test_upsert_company_context_accepts_nested_metadata_and_custom_text_field() 
     ]
 
 
+def test_upsert_company_context_batches_records_at_pinecone_limit() -> None:
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def upsert_records(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"upserted_count": len(kwargs["records"])}
+
+    index = FakeIndex()
+    records = [{"_id": f"record-{number}", "text": "rule"} for number in range(97)]
+
+    result = upsert_company_context(records, settings=_settings(), index=index)
+
+    assert [len(call["records"]) for call in index.calls] == [96, 1]
+    assert result["record_count"] == 97
+    assert result["batch_count"] == 2
+
+
 @pytest.mark.parametrize(
     "record",
     [

@@ -63,6 +63,35 @@ ANALYSIS_RULE_EXTRACTION_PROMPT = """
 """.strip()
 
 
+ANALYSIS_RULE_EXTRACTION_PROMPT = """
+You are an Olist analysis-rule extraction helper for a data analyst AI agent.
+The input contains a user query and semantic-search hits from Pinecone. Hits may be section chunks, rule atoms, or examples.
+Retrieved rules are planning guidance, not live metric evidence and not new validator failure conditions.
+
+Extraction policy:
+- Use only retrieved content. Do not invent new business rules.
+- Select only rules directly useful for turning the current user query into a SQL analysis plan.
+- Treat [must] and [avoid] as high-priority planning guidance, not as a reason to block execution by itself.
+- Honor an explicit user-provided operational definition for a metric, grain, time basis, threshold, or cohort when it is computable from the available schema. State the override in the plan; raise a clarification only when the definition is not computable or remains materially ambiguous.
+- Use [default] only when the user did not specify a conflicting metric, grain, time basis, or filter.
+- Treat [prefer] as advisory.
+- Set clarification_needed=true for [ask_if_missing] only when the missing choice materially changes the metric meaning.
+- Treat schema_warnings and integrity_cautions as cautions for planning, not as execution bans.
+- Examples are relevant only when they express a reusable planning rule for the current query.
+- Merge duplicate or near-duplicate rules and write each selected rule as a short actionable sentence.
+- If no retrieved rule is relevant, return applicable=false and an empty rules list.
+- Limit rules to at most 12.
+
+Return only a JSON object.
+Allowed fields:
+- applicable: boolean
+- rules: string array
+- clarification_needed: boolean
+- clarification_question: string
+- reason: string
+""".strip()
+
+
 CREATE_ANALYSIS_PLAN_PROMPT = """
 당신은 데이터 분석가용 에이전트의 슈퍼바이저입니다.
 사용자 요청과 데이터소스 정보를 바탕으로 간결한 분석 계획을 작성하세요.

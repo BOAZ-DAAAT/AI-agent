@@ -37,8 +37,6 @@ QUERY_TYPES = [
 def _write_doc(root: Path, filename: str, query_type: str, *, source_tables: list[str] | None = None) -> Path:
     source_tables = source_tables or ["customers", "orders"]
     section_body = "\n".join(f"- {query_type} rule item {idx}" for idx in range(1, 4))
-    constraints = "\n".join(f"- {query_type} deterministic constraint {idx}" for idx in range(1, 11))
-    ambiguous = "\n".join(f"- {query_type} ambiguous query {idx}" for idx in range(1, 4))
     text = f"""---
 document_id: {query_type}
 doc_type: analysis_query_rule
@@ -79,14 +77,8 @@ prohibited_use: live metric evidence
 ## status_and_null_rules
 {section_body}
 
-## constraints
-{constraints}
-
 ## clarify_when
 {section_body}
-
-## ambiguous_examples
-{ambiguous}
 
 ## prohibited_interpretations
 {section_body}
@@ -102,6 +94,39 @@ prohibited_use: live metric evidence
 
 ## negative_examples
 {section_body}
+
+## search_aliases
+- {query_type}
+- {query_type} Korean alias
+
+## when_to_use
+- [prefer] Use this rule for {query_type} questions.
+
+## when_not_to_use
+- [prefer] Use another rule when {query_type} is not the main intent.
+
+## metric_definitions
+- [default] {query_type} default metric uses `orders.order_id`.
+
+## grain_guidance
+- [must] {query_type} grain is grounded in `orders.order_id`.
+
+## table_and_join_guidance
+- [must] Join `orders.customer_id` to `customers.customer_id` when customer context is needed.
+- [avoid] Do not use `orders.missing_column` as a real schema column.
+
+## default_assumptions
+- [default] Use the observed dataset when no period is supplied.
+
+## soft_guidance
+- [prefer] State assumptions in the final answer.
+
+## clarification_triggers
+- [ask_if_missing] Ask only when the missing choice changes the metric meaning.
+
+## related_rule_types
+- sales_orders
+- purchase_frequency
 """
     path = root / filename
     path.write_text(text, encoding="utf-8")
@@ -152,38 +177,53 @@ def test_validate_rejects_unknown_source_tables(rule_dir: Path) -> None:
         rules.validate_rule_directory(rule_dir)
 
 
-def test_validate_requires_constraint_and_ambiguous_example_minimums(rule_dir: Path) -> None:
-    path = rule_dir / "delivery_delay.md"
-    text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("- delivery_delay deterministic constraint 10\n", ""), encoding="utf-8")
+def test_validate_schema_mismatches_are_warnings_not_blocking(rule_dir: Path) -> None:
+    docs = rules.validate_rule_directory(rule_dir)
 
-    with pytest.raises(rules.RuleValidationError, match="constraints"):
-        rules.validate_rule_directory(rule_dir)
-
-    _write_doc(rule_dir, "delivery_delay.md", "delivery_delay")
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("- delivery_delay ambiguous query 3\n", ""),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(rules.RuleValidationError, match="ambiguous_examples"):
-        rules.validate_rule_directory(rule_dir)
+    delivery = next(doc for doc in docs if doc.front_matter["query_type"] == "delivery_delay")
+    assert any("unknown referenced column" in warning for warning in delivery.warnings)
 
 
-def test_build_jsonl_is_stable_one_record_per_markdown(rule_dir: Path, tmp_path: Path) -> None:
+def test_build_jsonl_is_stable_section_rule_and_example_records(rule_dir: Path, tmp_path: Path) -> None:
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
 
     records = rules.build_jsonl(rule_dir, first)
     rules.build_jsonl(rule_dir, second)
 
-    assert len(records) == 9
+    assert len(records) > 9
     assert first.read_bytes() == second.read_bytes()
     lines = [json.loads(line) for line in first.read_text(encoding="utf-8").splitlines()]
-    assert [line["_id"] for line in lines] == QUERY_TYPES
     assert all(line["doc_type"] == "analysis_query_rule" for line in lines)
-    assert all(line["chunk_index"] == 0 and line["chunk_count"] == 1 for line in lines)
+    assert {"section_chunk", "rule_atom", "example"} <= {line["record_type"] for line in lines}
+    assert any(line["rule_strength"] == "must" for line in lines)
+    assert any("schema_warnings" in line for line in lines)
     assert all("PINECONE_API_KEY" not in json.dumps(line) for line in lines)
+
+
+def test_record_metadata_scopes_referenced_columns_to_its_own_chunk(rule_dir: Path) -> None:
+    records = rules.build_records(rule_dir)
+
+    metric_atom = next(
+        record
+        for record in records
+        if record["_id"] == "sales_orders__rule__default__metric_definitions__001"
+    )
+    join_atom = next(
+        record
+        for record in records
+        if record["_id"] == "sales_orders__rule__must__table_and_join_guidance__001"
+    )
+
+    assert metric_atom["referenced_columns"] == ["orders.order_id"]
+    assert join_atom["referenced_columns"] == ["customers.customer_id", "orders.customer_id"]
+
+
+def test_record_id_segment_is_ascii_for_korean_section_names() -> None:
+    segment = rules._record_id_segment("조작적 정의")
+
+    assert segment.startswith("section-")
+    assert segment.isascii()
 
 
 def test_ingest_uses_stable_record_ids_and_namespace(rule_dir: Path, tmp_path: Path) -> None:
@@ -199,13 +239,12 @@ def test_ingest_uses_stable_record_ids_and_namespace(rule_dir: Path, tmp_path: P
 
     result = rules.ingest_jsonl(output, index=FakeIndex(), namespace="test-rules", text_field="content")
 
-    assert result == {"upserted_count": 9}
+    assert result == {"upserted_count": len(calls[0]["records"])}
     assert calls[0]["namespace"] == "test-rules"
-    assert [record["_id"] for record in calls[0]["records"]] == QUERY_TYPES
     assert all("content" in record and "text" not in record for record in calls[0]["records"])
 
 
-def test_search_smoke_uses_analysis_rule_filter_and_top_k_one(monkeypatch) -> None:
+def test_search_smoke_uses_analysis_rule_filter_and_top_k_twelve(monkeypatch) -> None:
     calls: list[dict] = []
 
     def fake_search(query: str, **kwargs):
@@ -229,8 +268,8 @@ def test_search_smoke_uses_analysis_rule_filter_and_top_k_one(monkeypatch) -> No
     assert calls == [
         {
             "query": "자주 구매하는 고객",
-            "top_k": 1,
-            "metadata_filter": {"doc_type": {"$eq": "analysis_query_rule"}},
+            "top_k": 12,
+            "metadata_filter": {"doc_type": {"$in": ["analysis_query_rule", "analysis_foundation", "analysis_integrity_caution"]}},
             "settings": rules.PineconeRuntimeSettings(namespace="test-rules"),
         }
     ]

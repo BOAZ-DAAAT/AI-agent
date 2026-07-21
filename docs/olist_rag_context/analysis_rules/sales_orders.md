@@ -3,7 +3,7 @@ document_id: sales-orders
 doc_type: analysis_query_rule
 query_type: sales_orders
 title: Olist Sales and Orders Query Rules
-language: en
+language: ko
 version: "1.0"
 business_entities: [orders, customers, payments, order_items]
 source_tables: [customers, orders, order_items, order_payments]
@@ -11,137 +11,70 @@ grounding_level: schema_grounded
 intended_use: SQL planning rule retrieval
 prohibited_use: live metric evidence
 source_schema: DATA_Analyst_Assistant_Agent/agents/sql/data/db_schema.json
----
+---
+# 매출 및 주문 분석 규칙
 
-# Sales Orders Query Rules
+## 정의와 사용 시점
 
-## Definition
+- 주문 수, 상품 매출, 배송비, 주문 상태, 객단가(AOV), 기간별 매출을 분석할 때 사용한다.
+- 범용 매출 질문의 기반 규칙이며, 지역·카테고리·판매자·결제 분석이 필요하면 해당 규칙을 함께 사용한다.
+- 결제수단이나 할부가 주제면 `payment_behavior`, 재구매나 고객가치가 주제면 각각 `purchase_frequency`, `customer_value`를 우선한다.
 
-Sales orders analysis measures order volume, item volume, gross merchandise value, freight, and order lifecycle status using Olist order header and item/payment detail tables. The default order grain is one row per `orders.order_id`.
+## 검색 별칭
 
-## Supported Intents
+- 매출, 주문, 주문 수, 판매액, 거래액, 상품금액, 객단가, 월별 매출, 주문 상태
+- sales, revenue, order volume, GMV, merchandise sales, order count, item count, AOV
 
-- Count orders by time period, status, customer region, seller, product, or category.
-- Calculate gross sales from `order_items.price`.
-- Calculate freight from `order_items.freight_value`.
-- Compare item count, order count, and average order value.
-- Analyze order status distribution from `orders.order_status`.
-- Track created, approved, shipped, delivered, and estimated delivery milestones.
+## 지표 정의
 
-## Default Metrics
+- [default] 주문 수는 `COUNT(DISTINCT orders.order_id)`이다.
+- [default] 상품 매출은 `SUM(order_items.price)`이며 배송비는 포함하지 않는다.
+- [default] 배송비 포함 상품 매출은 `SUM(order_items.price + order_items.freight_value)`이다.
+- [default] 객단가는 `SUM(order_items.price) / COUNT(DISTINCT orders.order_id)`이다.
+- [prefer] `SUM(order_payments.payment_value)`는 상품 매출과 다른 결제금액 관점이므로, 사용자가 결제·수납 금액을 요청한 경우에만 사용한다.
 
-- `COUNT(DISTINCT orders.order_id)` for order count.
-- `COUNT(*)` from `order_items` only for item-line count.
-- `SUM(order_items.price)` for merchandise sales before freight.
-- `SUM(order_items.price + order_items.freight_value)` for merchandise plus freight.
-- `SUM(order_payments.payment_value)` only for payment-collected value when explicitly requested.
-- `AVG(order_items.price)` for average item price.
-- `SUM(order_items.price) / COUNT(DISTINCT orders.order_id)` for average merchandise value per order.
+## Grain과 조인
 
-## Entity Grain
+- [must] 주문 단위 지표는 `orders.order_id` grain을 유지하고 다대일이 아닌 상세 테이블을 붙이기 전에 집계한다.
+- [must] 상품 매출·판매자·상품·카테고리 분석은 `orders.order_id = order_items.order_id`로 조인한다.
+- [avoid] `order_items`와 `order_payments`를 그대로 조인한 뒤 금액을 합산하지 않는다. 한 주문에 양쪽 모두 여러 행이 있을 수 있다.
+- [avoid] `order_items.order_item_id`를 주문 수나 수량으로 해석하지 않는다. 상품 행 수가 필요할 때만 `COUNT(*)`를 사용한다.
+- [prefer] 고객 지역은 `orders.customer_id = customers.customer_id`로, 상품 속성은 `order_items.product_id = products.product_id`로 연결한다.
 
-- Default grain: `orders.order_id`.
-- Item grain: `order_items.order_id`, `order_items.order_item_id`.
-- Customer grain, when requested: `customers.customer_unique_id`.
-- Seller grain, when requested: `order_items.seller_id`.
-- Product grain, when requested: `order_items.product_id`.
+## 시간·상태·기본 가정
 
-## Time Basis
+- [default] 기간 기준은 `orders.order_purchase_timestamp`를 사용한다.
+- [default] 일반 주문 추이는 모든 상태를 포함하며, delivered/completed/fulfilled 요청일 때만 `orders.order_status = 'delivered'` 필터를 사용한다.
+- [avoid] 리뷰 생성일을 주문일로 사용하거나, 결측 배송일을 예상 배송일로 대체하지 않는다.
+- [prefer] 결과에는 상품금액, 배송비 포함 금액, 결제금액 중 어떤 금액 관점인지 명시한다.
 
-- Use `orders.order_purchase_timestamp` as the default sales/order time.
-- Use `orders.order_approved_at` only for approval timing questions.
-- Use `orders.order_delivered_customer_date` only for delivered-date questions.
-- Use `order_items.shipping_limit_date` only for seller shipping deadline questions.
-- Do not use `order_reviews.review_creation_date` for sales timing.
+## 확인이 필요한 경우와 예시
 
-## Required Tables
+- [ask_if_missing] “매출” 또는 “revenue”가 상품금액, 배송비 포함 금액, 결제금액 중 무엇인지 결과를 크게 바꾸면 질문하거나 가정을 명시한다.
+- [ask_if_missing] “최근”의 기간이 정의되지 않아 추세 해석이 달라지면 기간 가정을 명시한다.
+- 좋은 예: “2018년 월별 delivered 주문 수와 상품 매출을 보여줘.”
+- 피해야 할 예: “주문별 이익을 계산해줘.” 비용·마진·환불·세금 데이터는 스키마에 없다.
 
-- `orders`
-- `order_items` when sales amount, item count, freight, product, seller, or category is needed.
-- `order_payments` only when payment value or payment method is needed.
-- `customers` only when customer identity or customer region is needed.
-- `products` only when product attributes or product category are needed.
-- `product_category_name_translation` only when English category names are needed.
-- `sellers` only when seller location is needed.
+## 관련 규칙
 
-## Join Constraints
+- `customer_value`, `product_category`, `seller_performance`, `payment_behavior`, `regional_analysis`, `delivery_delay`
 
-- Join `orders` to `order_items` on `orders.order_id = order_items.order_id`.
-- Join `orders` to `customers` on `orders.customer_id = customers.customer_id`.
-- Join `order_items` to `products` on `order_items.product_id = products.product_id`.
-- Join `products` to `product_category_name_translation` on `products.product_category_name = product_category_name_translation.product_category_name`.
-- Join `order_items` to `sellers` on `order_items.seller_id = sellers.seller_id`.
-- Join `orders` to `order_payments` on `orders.order_id = order_payments.order_id`.
-- Avoid joining `order_items` and `order_payments` directly without first aggregating at `order_id`; both tables can have multiple rows per order and can multiply monetary totals.
-- Count orders with `COUNT(DISTINCT orders.order_id)` after any join to item, payment, product, review, or seller tables.
-- Aggregate `order_items.price` at item grain before joining to payment rows if both item and payment metrics are requested.
-- Do not use `customers.customer_id` as a repeat-customer identifier; it is an order-level join key.
-- Do not join `geolocation` unless the query explicitly asks for coordinates or zip-prefix geography.
+## 사용하지 않는 경우
 
-## Status And Null Rules
+- [prefer] 결제수단·할부가 핵심이면 `payment_behavior`, 반복 구매·고객 생애가치가 핵심이면 고객 규칙을 우선한다.
 
-- Use `orders.order_status` as the only order status field.
-- Treat `order_status = 'delivered'` as delivered order status; do not infer delivery from non-null dates alone unless status handling is requested.
-- Filter to delivered orders for completed-sales reporting when the user asks for completed, delivered, fulfilled, or final sales.
-- Do not exclude non-delivered statuses for general order intake or order creation questions.
-- Exclude rows with null `orders.order_purchase_timestamp` when grouping by purchase date.
-- Exclude rows with null `order_items.price` from price sums and averages.
-- Exclude rows with null `order_items.freight_value` from freight sums and averages.
-- Keep null `product_category_name` as unknown category instead of dropping it when the query asks for all categories.
-- Keep zero or one-installment payments as valid payment records; do not drop them as null-like values.
-- Do not coalesce missing delivery dates to the estimated delivery date.
+## 테이블 및 조인 가이드
 
-## Clarify When
+- [must] 상품 매출은 `orders.order_id = order_items.order_id`로 연결하고, 결제금액을 함께 쓸 때는 각 상세 테이블을 주문 grain으로 선집계한다.
 
-- The user says "sales" but does not indicate whether freight should be included.
-- The user says "revenue" but does not indicate whether to use item price or payment value.
-- The user asks for "valid orders" without defining which statuses are valid.
-- The user asks for "recent sales" without a date range.
-- Ambiguous query example: "Show total sales by state."
-- Ambiguous query example: "Which orders count as successful?"
-- Ambiguous query example: "Compare recent order performance."
+## 소프트 가이드
 
-## Prohibited Interpretations
+- [prefer] 결과에 상품금액·배송비 포함 금액·결제금액 중 어느 금액 관점인지 표시한다.
 
-- Do not treat `order_items` row count as order count.
-- Do not treat `order_payments.payment_value` as item price.
-- Do not add `order_items.price` to `order_payments.payment_value`; they are alternate monetary views.
-- Do not infer net revenue, margin, profit, discounts, refunds, taxes, or fees; those fields are not in the schema.
-- Do not treat `customer_id` as a stable customer identifier across multiple orders.
-- Do not assume status values outside the values present in `orders.order_status`.
-- Do not use review dates as purchase dates.
-- Do not infer SKU quantity from `order_item_id`; it is an item sequence within an order.
-- Do not use geolocation latitude/longitude for sales region unless coordinates are explicitly requested.
-- Do not assume currency conversion or inflation adjustment.
+## 긍정 예시
 
-## Unsupported Requests
+- "2018년 월별 delivered 주문 수와 상품 매출을 보여줘."
 
-- Profit, margin, cost of goods sold, seller commission, discounts, refunds, or tax analysis.
-- Inventory, stockout, or fulfillment capacity analysis.
-- Customer acquisition source or marketing campaign sales attribution.
-- Real-time order status beyond the stored Olist tables.
-- SKU-level unit quantity when duplicate item rows are not enough to answer the request.
+## 부정 예시
 
-## Limitations
-
-- The schema has no cost, margin, discount, tax, refund, or currency conversion fields.
-- `order_payments` can contain multiple payment rows for one order.
-- `order_items` can contain multiple item rows for one order.
-- `customers.customer_id` maps to an order-level customer record, not a stable person.
-- Status values and date completeness depend on the loaded Olist data.
-
-## Positive Examples
-
-- "Count distinct orders by month using purchase timestamp."
-- "Show delivered merchandise sales by seller state."
-- "Compare order count and item price sum by product category."
-- "Calculate average merchandise value per order for 2018."
-- "Break down order status counts by customer state."
-
-## Negative Examples
-
-- "Calculate profit by order."
-- "Show discounts by product category."
-- "Use review date as the order date."
-- "Count item rows as total orders."
-- "Estimate refunds from payment differences."
+- "주문별 이익을 계산해줘." 비용·마진 데이터는 없다.

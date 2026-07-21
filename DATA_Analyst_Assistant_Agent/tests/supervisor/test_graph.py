@@ -223,9 +223,9 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
 
     def fake_search(query: str, **kwargs: Any) -> list[CompanyContextHit]:
         assert query == "자주 구매하는 고객 특징을 분석해줘"
-        assert kwargs["top_k"] == 1
+        assert kwargs["top_k"] == 12
         assert kwargs["metadata_filter"] == {
-            "doc_type": {"$eq": "analysis_query_rule"}
+            "doc_type": {"$in": ["analysis_query_rule", "analysis_foundation", "analysis_integrity_caution"]}
         }
         return [
             CompanyContextHit(
@@ -234,7 +234,13 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
                 text=document_text,
                 document_id="purchase_frequency",
                 title="Olist 구매 빈도 분석 규칙",
-                metadata={"query_type": "purchase_frequency", "version": "1.0"},
+                metadata={
+                    "query_type": "purchase_frequency",
+                    "version": "1.0",
+                    "record_type": "rule_atom",
+                    "section": "metric_definitions",
+                    "integrity_cautions": ["integrity caution: orders status=STALE"],
+                },
             )
         ]
 
@@ -265,6 +271,9 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
     ]
     extraction_payload = json.loads(model.messages[0][1]["content"])
     assert extraction_payload["document"]["content"] == document_text
+    assert extraction_payload["documents"][0]["content"] == document_text
+    assert updates["analysis_rule_context"]["source_sections"] == ["metric_definitions"]
+    assert updates["analysis_rule_context"]["integrity_cautions"] == ["integrity caution: orders status=STALE"]
     serialized = json.dumps(updates["analysis_rule_context"], ensure_ascii=False)
     assert "이 예시는 state에 저장하면 안 된다" not in serialized
     assert "이 원문도 state에 저장하면 안 된다" not in serialized
