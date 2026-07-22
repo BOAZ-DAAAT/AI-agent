@@ -199,20 +199,29 @@ def validate_candidate(
 
     if semantic_decision is None:
         reason = f"semantic validation 모델 호출에 반복 실패했습니다: {semantic_error}"
+        accept_analysis_limitation = result.agent == "analysis_agent"
         checks.append(
             ValidationCheckResult(
                 name="semantic",
-                passed=False,
+                passed=accept_analysis_limitation,
                 findings=[
                     ValidationFinding(
                         code="semantic_model_failed",
                         source="supervisor",
-                        severity="error",
-                        disposition="error",
+                        severity="warning" if accept_analysis_limitation else "error",
+                        disposition="limitation" if accept_analysis_limitation else "error",
                         message=reason,
+                        retryable=False,
+                        details={
+                            "attempts": semantic_failures,
+                            "failure_reason": str(semantic_error),
+                        },
                     )
                 ],
-                details={"attempts": 2},
+                details={
+                    "attempts": semantic_failures,
+                    "failure_reason": str(semantic_error),
+                },
             )
         )
         updates = {
@@ -221,10 +230,18 @@ def validate_candidate(
                 result,
                 checks,
                 ValidationOutcome(
-                    disposition="reject",
+                    disposition=(
+                        "accept_with_limitations"
+                        if accept_analysis_limitation
+                        else "reject"
+                    ),
                     reason=reason,
                     reason_code="semantic_model_failed",
-                    terminal_state=SupervisorTerminalState.failed_with_recoverable_context.value,
+                    terminal_state=(
+                        "running"
+                        if accept_analysis_limitation
+                        else SupervisorTerminalState.failed_with_recoverable_context.value
+                    ),
                 ),
             ),
             "pending_result": updated_pending,
@@ -234,12 +251,20 @@ def validate_candidate(
         updates["semantic_retry_counts"] = counts
         return updates
 
+    semantic_invalid = (
+        semantic_decision.severity == "error"
+        or not semantic_decision.semantic_valid
+    )
     semantic_recover = semantic_decision.severity == "error" or (
         semantic_decision.severity == "info"
         and not semantic_decision.semantic_valid
     )
+    accept_analysis_limitation = result.agent == "analysis_agent" and semantic_invalid
+    if accept_analysis_limitation:
+        semantic_recover = False
     semantic_advisory = (
-        semantic_decision.severity == "warning"
+        accept_analysis_limitation
+        or semantic_decision.severity == "warning"
         or bool(semantic_decision.missing_evidence)
     )
     semantic_advisory_reason = semantic_decision.reason
@@ -262,7 +287,11 @@ def validate_candidate(
     elif semantic_advisory:
         semantic_findings = [
             ValidationFinding(
-                code="semantic_validation_warning",
+                code=(
+                    "semantic_validation_failed"
+                    if accept_analysis_limitation
+                    else "semantic_validation_warning"
+                ),
                 source="supervisor",
                 severity="warning",
                 disposition="limitation",
@@ -289,6 +318,15 @@ def validate_candidate(
             reason=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
             reason_code="semantic_validation_failed",
             recovery_action=semantic_decision.recommended_next_action or None,
+        )
+    elif accept_analysis_limitation:
+        outcome = ValidationOutcome(
+            disposition="accept_with_limitations",
+            reason=(
+                semantic_advisory_reason
+                or "semantic validation을 통과하지 못한 분석 결과를 제한사항과 함께 수용합니다."
+            ),
+            reason_code="semantic_validation_failed",
         )
     elif contract_decision.decision == "await_approval":
         outcome = outcome_from_contract_decision(result.agent, contract_decision)

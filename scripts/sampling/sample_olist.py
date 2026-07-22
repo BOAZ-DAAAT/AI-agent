@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -50,16 +51,57 @@ def _engine(database: str | None = None) -> Engine:
     return create_engine(url)
 
 
-def create_target_schema(target_db: str) -> None:
-    """seed/00_schema.sql의 CREATE TABLE 구문을 target_db에 그대로 적용한다(원본 스키마와 동일)."""
+def _database_charset_and_collation(engine: Engine, database: str) -> tuple[str, str]:
+    """원본 DB의 기본 문자셋과 collation을 반환한다."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
+                FROM information_schema.SCHEMATA
+                WHERE SCHEMA_NAME = :database
+                """
+            ),
+            {"database": database},
+        ).one_or_none()
+    if row is None:
+        raise ValueError(f"원본 DB를 찾을 수 없습니다: {database}")
+
+    charset, collation = str(row[0]), str(row[1])
+    safe_name = re.compile(r"^[A-Za-z0-9_]+$")
+    if not safe_name.fullmatch(charset) or not safe_name.fullmatch(collation):
+        raise ValueError(f"지원하지 않는 문자셋/collation입니다: {charset}/{collation}")
+    return charset, collation
+
+
+def create_target_schema(source_db: str, target_db: str) -> None:
+    """원본 DB의 문자 규칙으로 target_db를 만들고 공용 스키마를 적용한다."""
     sql_text = _SCHEMA_SQL.read_text(encoding="utf-8")
     statements = [s.strip() for s in sql_text.split(";") if s.strip()]
     statements = [s for s in statements if not s.upper().startswith(("CREATE DATABASE", "USE "))]
 
     server_engine = _engine()
+    charset, collation = _database_charset_and_collation(server_engine, source_db)
+    # MySQL 8에서는 CREATE TABLE ... CHARACTER SET utf8mb4만 명시하면 DB의
+    # 기본값이 아니라 서버의 utf8mb4 기본값(보통 utf8mb4_0900_ai_ci)을 선택할 수 있다.
+    # 모든 공용 스키마 테이블에 원본 DB의 collation까지 명시해 크로스 DB JOIN을 보장한다.
+    statements = [
+        re.sub(
+            r"CHARACTER\s+SET\s+[A-Za-z0-9_]+",
+            f"CHARACTER SET {charset} COLLATE {collation}",
+            statement,
+            flags=re.IGNORECASE,
+        )
+        for statement in statements
+    ]
     with server_engine.begin() as conn:
         conn.execute(text(f"DROP DATABASE IF EXISTS `{target_db}`"))
-        conn.execute(text(f"CREATE DATABASE `{target_db}` CHARACTER SET utf8mb4"))
+        conn.execute(
+            text(
+                f"CREATE DATABASE `{target_db}` "
+                f"CHARACTER SET {charset} COLLATE {collation}"
+            )
+        )
 
     target_engine = _engine(target_db)
     with target_engine.begin() as conn:
@@ -159,11 +201,25 @@ def cascade_copy(source_db: str, target_db: str, customer_unique_ids: list[str])
     """샘플된 customer_unique_id를 기준으로 부모->자식 순서로 계단식 복사한다."""
     target_engine = _engine(target_db)
     id_frame = pd.DataFrame({"customer_unique_id": customer_unique_ids})
-    with target_engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS `{target_db}`.`{_STAGING_TABLE}`"))
-    id_frame.to_sql(_STAGING_TABLE, target_engine, if_exists="replace", index=False)
-
     engine = _engine()  # 서버 레벨 연결 — 크로스 DB 쿼리용
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS `{target_db}`.`{_STAGING_TABLE}`"))
+        # pandas.to_sql(if_exists="replace")로 만들면 문자열 컬럼이 대상 DB의 기본
+        # collation을 따른다. 원본 customers 컬럼과 DB 기본 collation이 다르면
+        # customer_unique_id JOIN에서 MySQL 1267 오류가 발생하므로, 원본 컬럼의
+        # 타입과 collation을 상속하는 빈 테이블을 먼저 만든다.
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE `{target_db}`.`{_STAGING_TABLE}` AS
+                SELECT customer_unique_id
+                FROM `{source_db}`.customers
+                WHERE 1 = 0
+                """
+            )
+        )
+    id_frame.to_sql(_STAGING_TABLE, target_engine, if_exists="append", index=False)
+
     counts: dict[str, int] = {}
     with engine.begin() as conn:
         conn.execute(
@@ -248,7 +304,7 @@ def main() -> None:
     print(f"      실제 뽑힌 고객 수: {len(sample):,}명")
 
     print(f"[4/5] {args.target_db} 스키마 생성 중...")
-    create_target_schema(args.target_db)
+    create_target_schema(args.source_db, args.target_db)
 
     print("[5/5] 계단식 복사 중 (customers -> orders -> items/payments/reviews, 나머지는 전체 복사)...")
     counts = cascade_copy(args.source_db, args.target_db, sample["customer_unique_id"].tolist())

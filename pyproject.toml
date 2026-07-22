@@ -18,7 +18,7 @@ dependencies = [
     "matplotlib>=3.11.0",
     "numpy>=2.4.6",
     "ortools>=9.15.6755",
-    "pandas>=3.0.4",
+    "pandas>=2.3.3,<3",
     "pydantic>=2.13.4",
     "pymc-marketing==0.19.3",
     "pymysql>=1.2.0",
