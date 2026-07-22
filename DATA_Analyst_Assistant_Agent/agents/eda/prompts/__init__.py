@@ -6,6 +6,7 @@
 
 from DATA_Analyst_Assistant_Agent.agents.eda.prompts.analysis import (
     comparison_prompt,
+    clustering_prompt,
     distribution_prompt,
     inspect_prompt,
     quality_prompt,
@@ -28,6 +29,7 @@ __all__ = [
     "quality_prompt",
     "distribution_prompt",
     "comparison_prompt",
+    "clustering_prompt",
     "relationship_prompt",
     "time_prompt",
     "insight_prompt",

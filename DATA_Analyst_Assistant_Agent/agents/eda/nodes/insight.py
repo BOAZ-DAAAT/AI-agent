@@ -528,6 +528,7 @@ def insight_node(state: EDAState) -> dict:
         _facts_block("comparison_facts", "comparison_result", "그룹 비교"),
         _facts_block("relationship_facts", "relationship_result", "관계 탐색"),
         _facts_block("time_facts", "time_result", "시간 분석"),
+        _facts_block("clustering_facts", "clustering_summary", "clustering"),
     ])
     prompt = insight_prompt(state["user_question"], statistical_metadata, all_results)
     fb = state.get("validation_feedback")

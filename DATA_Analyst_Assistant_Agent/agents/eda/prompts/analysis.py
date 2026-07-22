@@ -49,6 +49,27 @@ def inspect_prompt(user_question: str, grain: str, result_json: str) -> str:
 {_FACTS_BLOCK}"""
 
 
+def clustering_prompt(user_question: str, inspect_result: str, result_json: str) -> str:
+    return f"""
+You are an exploratory EDA clustering analyst.
+
+[User question] {user_question}
+[Inspect result]
+{inspect_result}
+
+[Clustering result: K-means cluster count, silhouette score, centroids, labels, and charts]
+{result_json}
+
+Summarize only the observed cluster structure:
+1. whether clustering was skipped and why, if skip=true
+2. number of clusters and silhouette score, if available
+3. centroid patterns using the original measure names
+4. what follow-up Analysis should verify
+Do not claim final significance, causality, validated segments, or business decisions.
+{_EXPLORATORY_BOUNDARY}
+{_FACTS_BLOCK}"""
+
+
 def quality_prompt(user_question: str, inspect_result: str, result_json: str) -> str:
     return f"""
 너는 데이터 품질 전문가다.
