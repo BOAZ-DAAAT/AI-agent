@@ -6,8 +6,32 @@ import json
 import re
 from typing import Any
 
+from DATA_Analyst_Assistant_Agent.agents.sql.execution_errors import REPAIR_STRATEGY_BY_MYSQL_CODE
 from DATA_Analyst_Assistant_Agent.agents.sql.planner_support import extract_schema_json, schema_tables
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import build_intent_contract
+
+
+_STRATEGY_CONTRACTS = {
+    "rewrite_syntax": """
+- 실패한 구문의 문법, 함수 호출 또는 alias 오류만 수정한다.
+- SQL의 의미, grain, 출력 컬럼과 결과 계약은 변경하지 않는다.
+""".strip(),
+    "rewrite_identifier": """
+- 관련 테이블 스키마에 실제로 존재하는 컬럼과 alias만 사용해 참조를 교정한다.
+- 없는 컬럼을 새로 만들거나 지표, 조인, 출력 계약을 변경하지 않는다.
+""".strip(),
+    "rewrite_aggregation": """
+- 유지 계약의 grain과 aggregation contract를 보존한다.
+- GROUP BY와 집계 표현식만 교정하고 집계 수준이나 출력 의미를 바꾸지 않는다.
+""".strip(),
+    "normalize_invalid_value": """
+- execution_error_info의 column_name과 invalid_value를 원본 행 삭제 없이 안전하게 NULL로 정규화한다.
+- datetime 비정상 값은 정제 CTE 안에서 CASE + 명시적 CAST + NULL로 정규화하고, 이후 정렬·집계·출력은 정제 alias만 사용한다.
+- 숫자·문자 변환 오류도 CASE, NULLIF, 명시적 CAST를 사용해 변환 불가능한 값은 NULL로 둔다.
+- 의미가 불명확한 값 변환, 임의 문자열 절단, 값 조작, 비정상 행을 제거하는 WHERE 조건을 사용하지 않는다.
+- precheck_sql에는 오류 컬럼과 오류 값을 기준으로 비정상 값 건수를 세는 SELECT를 반드시 포함한다.
+""".strip(),
+}
 
 
 def _referenced_tables(state: dict[str, Any], draft: dict[str, Any]) -> list[str]:
@@ -92,8 +116,20 @@ def repair_sql_prompt(state: dict[str, Any], previous_sql_draft: dict[str, Any])
         "successful_statements": statement_results,
         "retry_hint": state.get("retry_hint") or {},
     }
+    repair_strategy = str(
+        (state.get("execution_error_info") or {}).get("repair_strategy")
+        or state.get("repair_strategy")
+        or REPAIR_STRATEGY_BY_MYSQL_CODE.get((state.get("execution_error_info") or {}).get("error_code"))
+        or "none"
+    )
+    strategy_contract = _STRATEGY_CONTRACTS.get(
+        repair_strategy,
+        "- 자동 repair 대상 전략이 아니므로 SQL을 변경하지 않는다.",
+    )
     return f"""
 너는 MySQL SQL repair 전담 작성기다. 아래의 유효한 이전 SQLDraft에서 보고된 국소 오류만 수정한다.
+
+선택된 repair 전략: {repair_strategy}
 
 이전 SQLDraft:
 {json.dumps(previous_sql_draft, ensure_ascii=False, indent=2)}
@@ -107,7 +143,10 @@ def repair_sql_prompt(state: dict[str, Any], previous_sql_draft: dict[str, Any])
 유지해야 할 최소 계약:
 {json.dumps(_repair_contract(state, route_kind, previous_sql_draft), ensure_ascii=False, indent=2)}
 
-repair 범위:
+전략별 repair 계약:
+{strategy_contract}
+
+공통 repair 계약:
 - 사용자 질문에 없던 필터, 조건, 지표, 테이블을 임의로 추가하지 말 것
 - SQL 유형({previous_sql_draft.get('sql_type')})을 변경하지 말 것
 - 실패 component가 precheck 또는 postcheck이면 main sql을 변경하지 말 것

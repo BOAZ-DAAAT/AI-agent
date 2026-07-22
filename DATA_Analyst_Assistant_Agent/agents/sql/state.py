@@ -236,4 +236,8 @@ class AgentState(TypedDict):
     failed_statement_sql: str
     failed_sql_component: Optional[Literal["precheck", "main", "postcheck"]]
     execution_error_info: Dict[str, Any]
+    classification: str
+    repair_strategy: str
+    repair_attempted: bool
+    repair_validation_result: Dict[str, Any]
     final_answer: str

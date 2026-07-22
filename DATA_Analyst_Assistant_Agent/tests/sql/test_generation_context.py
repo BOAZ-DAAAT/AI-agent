@@ -390,6 +390,8 @@ def test_generation_prompts_keep_semantic_contract_and_conditional_rules():
     assert "preserve_common_grain:" in preserve_prompt
     assert "aggregate_to_common_grain:" not in preserve_prompt
     assert "관련 무결성 실패만" in aggregate_prompt
+    for token in ("integrity_failures는 필수 생성 계약", "CASE, NULLIF, 명시적 CAST와 NULL", "비정상 값 건수", "원본 행 삭제"):
+        assert token in aggregate_prompt
 
 
 def test_static_generation_prompts_are_at_least_thirty_five_percent_shorter():

@@ -8,6 +8,14 @@ CLARIFY_QUERY_PROMPT = """
 """.strip()
 
 
+REWRITE_RETRIEVAL_QUERY_PROMPT = """
+당신은 Olist 분석 규칙용 semantic search 검색문 생성기입니다.
+원본 사용자 질문과 이전 clarification 답변의 의미를 보존하면서 검색에 적합한 자연스러운 한 문장을 작성하세요.
+사용자에게 질문하지 말고, 새로운 분석 조건이나 수치 기준을 만들지 마세요.
+반드시 retrieval_query와 reason 필드만 있는 JSON 객체를 반환하세요.
+""".strip()
+
+
 CLARIFY_DECISION_PROMPT = """
 Important clarification policy:
 - Distinguish structural derivations from analysis heuristics.

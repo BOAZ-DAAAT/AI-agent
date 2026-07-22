@@ -123,34 +123,35 @@ class AnalysisAgent:
         )
         review = public_result["human_review"]
         workflow_failed = terminal_reason != "validated_result"
-        retry_action = (
-            "repair_analysis_data_contract"
-            if terminal_reason == "analysis_contract_invalid"
-            else "retry_analysis"
-        )
         codegen_attempts = int(result.get("codegen_attempts") or 0)
         failure_reason = _analysis_failure_reason(result, terminal_reason)
+        envelope_local_checks = [
+            check.model_copy(update={"severity": "warning"})
+            if workflow_failed and check.severity == "error"
+            else check
+            for check in local_checks
+        ]
         return AgentEnvelope(
-            status=AgentStatus.failed if workflow_failed else AgentStatus.success,
+            status=AgentStatus.warning if workflow_failed else AgentStatus.success,
             agent_name=self.name,
             summary=(
-                f"분석 워크플로가 검증을 통과하지 못했습니다: {failure_reason}"
+                "분석이 검증을 완전히 통과하지 못했지만 결과를 보존했습니다: "
+                f"{failure_reason}"
                 if workflow_failed
                 else "Analysis result generated from SQL result CSV and EDA profile artifacts."
             ),
             artifact_refs=[ref, debug_ref],
             validation=ValidationBlock(
-                local_checks=local_checks,
+                local_checks=envelope_local_checks,
                 findings=_analysis_validation_findings(
                     public_result,
                     terminal_reason,
                     workflow_failed,
-                    suggested_action=retry_action,
                 ),
             ),
             retry_hint=RetryHint(
-                retryable=workflow_failed,
-                suggested_action=retry_action if workflow_failed else "continue",
+                retryable=False,
+                suggested_action="continue",
                 reason_code=terminal_reason if workflow_failed else "none",
                 details={
                     "terminal_reason": terminal_reason,
@@ -164,7 +165,7 @@ class AnalysisAgent:
                 reason=review["reason"] if (not workflow_failed) and review["required"] else "",
                 approval_type="analysis.review" if (not workflow_failed) and review["required"] else "",
             ),
-            error=failure_reason if workflow_failed else "",
+            error="",
         )
 
 
@@ -194,8 +195,6 @@ def _analysis_validation_findings(
     public_result: dict[str, Any],
     terminal_reason: str,
     workflow_failed: bool,
-    *,
-    suggested_action: str = "retry_analysis",
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     if workflow_failed:
@@ -203,18 +202,20 @@ def _analysis_validation_findings(
             ValidationFinding(
                 code=terminal_reason,
                 source="analysis_workflow",
-                severity="error",
-                disposition="error",
+                severity="warning",
+                disposition="limitation",
                 message="분석 워크플로가 검증된 결과를 생성하지 못했습니다.",
-                retryable=True,
-                suggested_action=suggested_action,
-                details={"status": public_result.get("status")},
+                retryable=False,
+                suggested_action="continue",
+                details={
+                    "status": public_result.get("status"),
+                    "terminal_reason": terminal_reason,
+                },
             )
         )
-        return findings
 
     review_request = public_result.get("review_request")
-    if isinstance(review_request, dict):
+    if not workflow_failed and isinstance(review_request, dict):
         findings.append(
             ValidationFinding(
                 code="analysis_review_request",

@@ -159,6 +159,9 @@ class SupervisorState(TypedDict, total=False):
     latest_user_query: str
     user_turns: list[dict[str, str]]
     clarified_query: str
+    clarification_answers: list[str]
+    retrieval_query: str
+    retrieval_query_generation: dict[str, Any]
     needs_clarification: bool
     clarification_question: str
     clarification_input_mode: str
@@ -234,6 +237,9 @@ def empty_supervisor_state(
         "latest_user_query": user_query,
         "user_turns": [{"run_id": run_id, "query": user_query}],
         "clarified_query": "",
+        "clarification_answers": [],
+        "retrieval_query": "",
+        "retrieval_query_generation": {"status": "not_started"},
         "needs_clarification": False,
         "clarification_question": "",
         "analysis_rule_context": None,
@@ -264,7 +270,7 @@ def empty_supervisor_state(
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 6,
+        "state_schema_version": 7,
         "semantic_retry_counts": {},
         "semantic_recovery_attempts": {},
         "limitations": [],
@@ -526,7 +532,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             },
             "run_events": list(state.get("run_events", [])),
             "validation_history": validation_history,
-            "state_schema_version": 6,
+            "state_schema_version": 7,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
             "analysis_selection_response": (
@@ -546,6 +552,17 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                 if schema_version >= 6
                 else {"status": "not_started"}
             ),
+            "clarification_answers": (
+                list(state.get("clarification_answers", [])) if schema_version >= 7 else []
+            ),
+            "retrieval_query": (
+                str(state.get("retrieval_query") or "") if schema_version >= 7 else ""
+            ),
+            "retrieval_query_generation": (
+                dict(state.get("retrieval_query_generation") or {"status": "not_started"})
+                if schema_version >= 7
+                else {"status": "not_started"}
+            ),
         }
         normalized.pop("validation_results", None)
         normalized.pop("evidence_validation_results", None)
@@ -561,7 +578,7 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "active_node": None,
         "last_completed_node_id": None,
         "node_sequence": 0,
-        "state_schema_version": 6,
+        "state_schema_version": 7,
         "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),
@@ -581,6 +598,9 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "analysis_review_decisions": [],
         "analysis_rule_context": None,
         "analysis_rule_retrieval": {"status": "not_started"},
+        "clarification_answers": [],
+        "retrieval_query": "",
+        "retrieval_query_generation": {"status": "not_started"},
     }
     return _ensure_json_serializable(normalized)
 

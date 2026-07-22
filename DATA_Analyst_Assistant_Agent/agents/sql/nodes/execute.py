@@ -74,6 +74,8 @@ def _execution_failure(
         "failed_statement_index": statement_index,
         "failed_statement_sql": failed_sql,
         "execution_error_info": info,
+        "classification": info["classification"],
+        "repair_strategy": info["repair_strategy"],
     }
 
 
