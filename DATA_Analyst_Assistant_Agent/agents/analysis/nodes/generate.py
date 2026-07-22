@@ -270,6 +270,27 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
         f"Temporal: {context.temporal_columns}\n"
         f"Sample rows: {context.sample_rows}\n"
     )
+    if context.analysis_data_contract:
+        prompt += (
+            "\nDeclared upstream SQL/datamart analysis contract:\n"
+            f"{json.dumps(context.analysis_data_contract, ensure_ascii=False, sort_keys=True, default=str)}\n"
+            "Use this contract as binding context for grain, required downstream calculations, "
+            "safe interpretations, and limitations. In particular, honor row_grain, "
+            "grain_columns, metric_support.calculation_grain, required_mart_columns, "
+            "and metric_support.downstream_calculation when deciding whether to analyze "
+            "rows directly or aggregate first.\n"
+        )
+    if context.mart_columns:
+        prompt += (
+            "\nDeclared mart column lineage:\n"
+            f"{json.dumps(context.mart_columns, ensure_ascii=False, sort_keys=True, default=str)}\n"
+        )
+    if context.contract_issues:
+        prompt += (
+            "\nKnown analysis contract issues:\n"
+            f"{json.dumps(context.contract_issues, ensure_ascii=False, sort_keys=True, default=str)}\n"
+            "Treat these as limitations or repair cues; do not invent missing grain or lineage.\n"
+        )
     if context.eda_candidate_insights or context.eda_candidate_hypotheses:
         prompt += (
             "\nEDA exploratory candidates (optional context; use only if relevant to the plan):\n"

@@ -159,6 +159,23 @@ def test_question_plan_contract_has_exactly_nine_fields():
     ]
 
 
+def test_question_plan_normalization_removes_unresolved_template_filters():
+    parsed = question_payload(
+        filters=[
+            "seller_id = {{seller_id}}",
+            "customer_id = <customer_id>",
+            "is_single_seller_order = TRUE",
+            "amount < 10",
+        ]
+    )
+
+    normalized = plan._normalize_question_plan(base_state(), parsed)
+
+    assert normalized["filters"] == ["is_single_seller_order = TRUE", "amount < 10"]
+    assert "seller_id = {{seller_id}}" in normalized["reasoning"]
+    assert "customer_id = <customer_id>" in normalized["reasoning"]
+
+
 def test_mart_design_preserves_common_grain_contract_and_derives_legacy_lists():
     payload = mart_design_payload(
         key_columns=["wrong_key"],

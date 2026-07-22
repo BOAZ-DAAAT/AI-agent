@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from DATA_Analyst_Assistant_Agent.agents.sql import prompts
@@ -16,6 +17,23 @@ def _list_of_str(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item not in (None, "")]
     raise ValueError("plan field must be a list")
+
+
+_TEMPLATE_TOKEN_RE = re.compile(r"(\{\{\s*[^{}]+\s*\}\}|<\s*[A-Za-z_][A-Za-z0-9_]*\s*>)")
+
+
+def _split_resolved_filters(filters: list[str]) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for filter_text in filters:
+        text = str(filter_text or "").strip()
+        if not text:
+            continue
+        if _TEMPLATE_TOKEN_RE.search(text):
+            unresolved.append(text)
+        else:
+            resolved.append(text)
+    return resolved, unresolved
 
 
 def _plan_failure(*, reason_code: str, detail: str, retryable: bool) -> dict[str, Any]:
@@ -79,16 +97,24 @@ def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[
     target_metrics = _list_of_str(parsed.get("target_metrics"))
     if route_kind == "comprehensive" and not target_metrics:
         target_metrics = ["mart_metric"]
+    filters, unresolved_filters = _split_resolved_filters(_list_of_str(parsed.get("filters")))
+    reasoning = str(parsed.get("reasoning") or "").strip()
+    if unresolved_filters:
+        reasoning = (
+            f"{reasoning}\n"
+            "Removed unresolved template filters that did not have user-provided values: "
+            + "; ".join(unresolved_filters)
+        ).strip()
     normalized = {
         "route_kind": route_kind,
         "question_type": str(parsed.get("question_type") or "").strip(),
         "target_metrics": target_metrics,
         "analysis_entities": _list_of_str(parsed.get("analysis_entities")),
         "dimensions": _list_of_str(parsed.get("dimensions")),
-        "filters": _list_of_str(parsed.get("filters")),
+        "filters": filters,
         "candidate_tables": _list_of_str(parsed.get("candidate_tables")),
         "required_aggregations": _list_of_str(parsed.get("required_aggregations")),
-        "reasoning": str(parsed.get("reasoning") or "").strip(),
+        "reasoning": reasoning,
     }
     try:
         return QuestionPlan(**normalized).model_dump()

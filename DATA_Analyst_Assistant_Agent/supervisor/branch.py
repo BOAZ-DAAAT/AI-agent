@@ -357,6 +357,10 @@ def _analysis_contract_from_plan_context(context: BranchPlanContext) -> dict[str
         "target_table": context.target_table or _target_table_from_mart_design(mart_design),
         "row_grain": context.business_grain or _non_empty_string(mart_design.get("grain")) or "",
         "grain_columns": grain_columns,
+        "metric_support": [
+            dict(item) for item in (mart_design.get("metric_support") or [])
+            if isinstance(item, dict)
+        ],
         "entity_keys": [column for column in grain_columns if not _looks_temporal_column(column)],
         "time_basis": [
             item for item in column_plan

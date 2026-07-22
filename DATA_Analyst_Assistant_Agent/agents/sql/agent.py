@@ -630,6 +630,10 @@ class SQLAgent:
             "target_table": sql_draft.get("target_table") or mart_design.get("mart_name"),
             "row_grain": mart_design.get("grain") or sql_draft.get("business_grain") or "",
             "grain_columns": grain_columns,
+            "metric_support": [
+                dict(item) for item in (mart_design.get("metric_support") or [])
+                if isinstance(item, dict)
+            ],
             "entity_keys": [
                 column for column in grain_columns if not _looks_temporal_column(column)
             ],

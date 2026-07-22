@@ -74,3 +74,10 @@ source_schema: DATA_Analyst_Assistant_Agent/agents/sql/data/db_schema.json
 ## 부정 예시
 
 - "결제금액 전체를 각 판매자 매출로 더해줘."
+
+## Attribution and Filter Notes
+
+- [must] When order-level review or delivery metrics are attributed to a seller, distinguish an attribution/scope rule from an entity-value filter.
+- [must] A single-seller-order scope means the order has exactly one distinct `order_items.seller_id`; it is not the same as filtering to one specific `seller_id` value.
+- [avoid] Do not create a placeholder filter such as `seller_id = {{seller_id}}` unless the user supplied an actual seller id value.
+- [prefer] For seller-level review or delivery conclusions, first use a safe order-level mart that preserves `seller_id` and `order_id`, then aggregate downstream to the requested seller grain with counts and the relevant mean/median measures.

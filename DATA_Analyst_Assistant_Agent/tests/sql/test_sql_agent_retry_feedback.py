@@ -194,6 +194,52 @@ def test_analysis_data_contract_marks_unimplemented_required_derivation() -> Non
     assert "seller_order_count" in rule["count_like_columns_require_contract_match"]
 
 
+def test_analysis_data_contract_carries_metric_support() -> None:
+    contract = SQLAgent._analysis_data_contract(
+        mart_design={
+            "grain": "seller_id x order_id",
+            "grain_columns": ["seller_id", "order_id"],
+            "column_plan": [
+                {
+                    "output_column": "seller_id",
+                    "role": "dimension",
+                    "source_columns": ["order_items.seller_id"],
+                    "calculation_type": "passthrough",
+                    "calculation_rule": "seller id",
+                    "aggregation_method": "none",
+                },
+                {
+                    "output_column": "order_month",
+                    "role": "dimension",
+                    "source_columns": ["orders.order_purchase_timestamp"],
+                    "calculation_type": "derived",
+                    "calculation_rule": "month bucket",
+                    "aggregation_method": "none",
+                },
+                {
+                    "output_column": "delivery_days",
+                    "role": "measure",
+                    "source_columns": ["orders.order_purchase_timestamp", "orders.order_delivered_customer_date"],
+                    "calculation_type": "derived",
+                    "calculation_rule": "delivery day difference",
+                    "aggregation_method": "none",
+                },
+            ],
+            "metric_support": [{
+                "metric_name": "monthly_avg_delivery_days",
+                "calculation_grain": ["seller_id", "order_month"],
+                "required_mart_columns": ["seller_id", "order_month", "delivery_days"],
+                "downstream_calculation": "Group by seller_id and order_month before averaging delivery_days.",
+            }],
+        },
+        sql_draft={"target_table": "analytics.seller_orders", "source_tables": ["orders", "order_items"]},
+        generated_sql="SELECT seller_id, order_month, delivery_days FROM mart",
+    )
+
+    assert contract["metric_support"][0]["metric_name"] == "monthly_avg_delivery_days"
+    assert contract["metric_support"][0]["calculation_grain"] == ["seller_id", "order_month"]
+
+
 def test_sql_agent_contract_only_repairs_metadata_without_regenerating_sql(monkeypatch) -> None:
     _patch_build_app(monkeypatch, _ExplodingApp())
     state = OrchestrationState(

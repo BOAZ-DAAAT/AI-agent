@@ -274,6 +274,20 @@ def run_analysis(
             )
 
         feedback = critique.feedback or "; ".join(critique.method_issues)
+        if _is_contract_coverage_failure(critique):
+            history.append({"stage": "critic", "code": code.code, "error": feedback})
+            if attempt < max_attempts:
+                previous_failure_signature = _failure_signature("critic", feedback)
+                continue
+            return AnalysisOutcome(
+                status="failed",
+                attempts=attempt,
+                code=code,
+                result=result,
+                critique=critique,
+                error_history=history,
+                early_stop_reason="analysis_data_contract_coverage_failed",
+            )
         _append_method_note(
             result,
             "Analysis critic warning: " + (feedback or "method review raised a caution"),
@@ -298,6 +312,13 @@ def run_analysis(
         result=last_result,
         critique=last_critique,
         error_history=history,
+    )
+
+
+def _is_contract_coverage_failure(critique: CodeCritique) -> bool:
+    return any(
+        "contract_metric_support:" in str(issue)
+        for issue in critique.method_issues
     )
 
 
