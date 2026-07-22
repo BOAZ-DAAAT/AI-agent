@@ -1,0 +1,11 @@
+{
+  "source_namespace": "olist-rag-v1",
+  "source_record_count": 542,
+  "question_count": 20,
+  "metrics": {
+    "hit_at_5": 1.0,
+    "hit_at_10": 1.0,
+    "recall_at_5": 0.8571428571428571,
+    "recall_at_10": 1.0
+  }
+}

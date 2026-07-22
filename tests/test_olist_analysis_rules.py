@@ -201,6 +201,18 @@ def test_build_jsonl_is_stable_section_rule_and_example_records(rule_dir: Path, 
     assert all("PINECONE_API_KEY" not in json.dumps(line) for line in lines)
 
 
+def test_default_records_are_contextualized_and_have_535_unique_ids() -> None:
+    records = rules.build_records()
+
+    assert len(records) == 535
+    assert len({record["_id"] for record in records}) == 535
+    sample = next(record for record in records if record["doc_type"] == "analysis_query_rule")
+    assert sample["source_text"]
+    assert sample["source_text"] in sample["text"]
+    for label in ("제목:", "문서 유형:", "질문 유형:", "섹션:", "관련 테이블:", "관련 컬럼:", "본문:"):
+        assert label in sample["text"]
+
+
 def test_record_metadata_scopes_referenced_columns_to_its_own_chunk(rule_dir: Path) -> None:
     records = rules.build_records(rule_dir)
 
@@ -273,3 +285,119 @@ def test_search_smoke_uses_analysis_rule_filter_and_top_k_twelve(monkeypatch) ->
             "settings": rules.PineconeRuntimeSettings(namespace="test-rules"),
         }
     ]
+
+
+class _FakeNamespaceIndex:
+    def __init__(self, records: dict[str, dict], *, fail_upsert: bool = False) -> None:
+        self.records = dict(records)
+        self.fail_upsert = fail_upsert
+
+    def list(self, **_kwargs):
+        yield {"vectors": [{"id": record_id} for record_id in sorted(self.records)]}
+
+    def fetch(self, *, ids, **_kwargs):
+        return {"vectors": {record_id: self.records[record_id] for record_id in ids}}
+
+    def upsert_records(self, *, records, **_kwargs):
+        if self.fail_upsert:
+            self.fail_upsert = False
+            raise RuntimeError("upsert failed")
+        for record in records:
+            self.records[record["_id"]] = {
+                "values": [9.0],
+                "metadata": {key: value for key, value in record.items() if key != "_id"},
+            }
+
+    def delete(self, *, ids=None, delete_all=False, **_kwargs):
+        if delete_all:
+            self.records.clear()
+        for record_id in ids or []:
+            self.records.pop(record_id, None)
+
+    def upsert(self, *, vectors, **_kwargs):
+        for vector in vectors:
+            self.records[vector["id"]] = {
+                "values": list(vector["values"]),
+                "metadata": dict(vector.get("metadata") or {}),
+            }
+
+
+def test_sync_namespace_deletes_only_ids_absent_from_new_set(tmp_path: Path) -> None:
+    index = _FakeNamespaceIndex(
+        {
+            "keep": {"values": [1.0], "metadata": {"text": "old keep"}},
+            "delete": {"values": [2.0], "metadata": {"text": "old delete"}},
+        }
+    )
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text(
+        "\n".join(
+            json.dumps(record, ensure_ascii=False)
+            for record in (
+                {"_id": "keep", "text": "new keep"},
+                {"_id": "new", "text": "new record"},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    backup_path = tmp_path / "backup.json"
+
+    result = rules.sync_namespace(
+        input_path,
+        backup_path,
+        index=index,
+        namespace="olist-rag-v1",
+        expected_count=2,
+        expected_delete_count=1,
+        expected_add_count=1,
+    )
+
+    assert result["deleted_ids"] == ["delete"]
+    assert result["record_count"] == 2
+    assert set(index.records) == {"keep", "new"}
+    assert json.loads(backup_path.read_text(encoding="utf-8"))["record_count"] == 2
+
+
+def test_sync_namespace_restores_backup_when_upsert_fails(tmp_path: Path) -> None:
+    original = {
+        "old-a": {"values": [1.0], "metadata": {"text": "a"}},
+        "old-b": {"values": [2.0], "metadata": {"text": "b"}},
+    }
+    index = _FakeNamespaceIndex(original, fail_upsert=True)
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text(
+        '{"_id":"new-a","text":"a"}\n{"_id":"new-b","text":"b"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="upsert failed"):
+        rules.sync_namespace(
+            input_path,
+            tmp_path / "backup.json",
+            index=index,
+            namespace="olist-rag-v1",
+            expected_count=2,
+            expected_delete_count=2,
+            expected_add_count=2,
+        )
+
+    assert index.records == original
+
+
+def test_sync_namespace_aborts_before_write_when_id_delta_is_unexpected(tmp_path: Path) -> None:
+    original = {"old": {"values": [1.0], "metadata": {"text": "old"}}}
+    index = _FakeNamespaceIndex(original)
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text('{"_id":"new","text":"new"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="승인된 동기화 범위"):
+        rules.sync_namespace(
+            input_path,
+            tmp_path / "backup.json",
+            index=index,
+            namespace="olist-rag-v1",
+            expected_count=1,
+        )
+
+    assert index.records == original

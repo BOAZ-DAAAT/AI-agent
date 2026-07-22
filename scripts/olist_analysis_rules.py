@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -207,7 +209,14 @@ def build_records(
         records.extend(_records_from_document(document))
     if resolved_rule_dir == DEFAULT_RULE_DIR.resolve():
         records.extend(_integrity_caution_records(integrity_path))
-    return _with_chunk_counts(records)
+    normalized = _with_chunk_counts(records)
+    contextualized = _ensure_unique_record_ids(
+        [_contextualize_record(record) for record in normalized]
+    )
+    record_ids = [str(record["_id"]) for record in contextualized]
+    if len(record_ids) != len(set(record_ids)):
+        raise RuleValidationError("생성된 Pinecone 레코드 ID가 중복되었습니다.")
+    return contextualized
 
 
 def build_jsonl(
@@ -229,6 +238,7 @@ def build_jsonl(
     if output is None:
         sys.stdout.write(content)
     else:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
         Path(output).write_text(content, encoding="utf-8")
     return records
 
@@ -263,6 +273,139 @@ def ingest_jsonl(
         resolved_namespace = namespace or "olist-rag-v1"
 
     return index.upsert_records(namespace=resolved_namespace, records=records)
+
+
+def backup_namespace(
+    output: Path,
+    *,
+    index: Any | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    """namespace의 ID, vector, metadata를 복원 가능한 JSON으로 백업합니다."""
+
+    index, resolved_namespace = _resolve_index(index, namespace)
+    record_ids = list_namespace_ids(index, resolved_namespace)
+    records: list[dict[str, Any]] = []
+    for batch in _batches(record_ids, 100):
+        response = index.fetch(ids=batch, namespace=resolved_namespace)
+        vectors = _mapping_value(response, "vectors", {})
+        for record_id in batch:
+            vector = _mapping_value(vectors, record_id, None)
+            if vector is None:
+                raise RuntimeError(f"백업 fetch 응답에서 레코드를 찾을 수 없습니다: {record_id}")
+            records.append(_backup_vector(record_id, vector))
+
+    payload = {
+        "namespace": resolved_namespace,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "record_count": len(records),
+        "records": records,
+    }
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    return payload
+
+
+def restore_namespace(
+    backup_path: Path,
+    *,
+    index: Any | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    """백업 시점의 vector와 metadata로 namespace 전체를 복원합니다."""
+
+    payload = json.loads(Path(backup_path).read_text(encoding="utf-8"))
+    records = payload.get("records") if isinstance(payload, Mapping) else None
+    if not isinstance(records, list):
+        raise ValueError("유효한 Pinecone namespace 백업 파일이 아닙니다.")
+    index, resolved_namespace = _resolve_index(
+        index,
+        namespace or str(payload.get("namespace") or "") or None,
+    )
+    index.delete(delete_all=True, namespace=resolved_namespace)
+    for batch in _batches(records, 100):
+        index.upsert(vectors=batch, namespace=resolved_namespace)
+    restored_ids = _wait_for_namespace_ids(
+        index,
+        resolved_namespace,
+        {str(record["id"]) for record in records},
+    )
+    return {"namespace": resolved_namespace, "record_count": len(restored_ids)}
+
+
+def sync_namespace(
+    jsonl_path: Path,
+    backup_path: Path,
+    *,
+    index: Any | None = None,
+    namespace: str | None = None,
+    text_field: str = "text",
+    expected_count: int = 535,
+    expected_delete_count: int = 7,
+    expected_add_count: int = 0,
+) -> dict[str, Any]:
+    """백업 후 신규 레코드를 동기화하며 실패하면 기존 namespace를 복원합니다."""
+
+    records = [_record_for_text_field(record, text_field) for record in _read_jsonl(jsonl_path)]
+    new_ids = {str(record["_id"]) for record in records}
+    if len(records) != expected_count or len(new_ids) != expected_count:
+        raise ValueError(
+            f"동기화 입력은 고유 레코드 {expected_count}개여야 합니다: "
+            f"records={len(records)}, unique_ids={len(new_ids)}"
+        )
+
+    index, resolved_namespace = _resolve_index(index, namespace)
+    backup = backup_namespace(backup_path, index=index, namespace=resolved_namespace)
+    old_ids = {str(record["id"]) for record in backup["records"]}
+    delete_ids = sorted(old_ids - new_ids)
+    add_ids = sorted(new_ids - old_ids)
+    print(
+        json.dumps(
+            {
+                "delete_count": len(delete_ids),
+                "delete_ids": delete_ids,
+                "add_count": len(add_ids),
+                "add_ids": add_ids,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    if len(delete_ids) != expected_delete_count or len(add_ids) != expected_add_count:
+        raise ValueError(
+            "원격/신규 ID 차이가 승인된 동기화 범위와 다릅니다: "
+            f"delete={len(delete_ids)}(expected={expected_delete_count}), "
+            f"add={len(add_ids)}(expected={expected_add_count})"
+        )
+
+    try:
+        for batch in _batches(records, 96):
+            index.upsert_records(namespace=resolved_namespace, records=batch)
+        current_ids = _wait_for_namespace_ids(index, resolved_namespace, new_ids, allow_extra=True)
+        missing_ids = sorted(new_ids - current_ids)
+        if missing_ids:
+            raise RuntimeError(f"upsert 후 누락된 레코드가 있습니다: {missing_ids}")
+        if delete_ids:
+            index.delete(ids=delete_ids, namespace=resolved_namespace)
+        final_ids = _wait_for_namespace_ids(index, resolved_namespace, new_ids)
+        if final_ids != new_ids:
+            raise RuntimeError(
+                f"namespace 레코드 집합이 일치하지 않습니다: expected={len(new_ids)}, actual={len(final_ids)}"
+            )
+    except Exception:
+        restore_namespace(backup_path, index=index, namespace=resolved_namespace)
+        raise
+
+    return {
+        "namespace": resolved_namespace,
+        "backup_path": str(backup_path),
+        "previous_count": len(old_ids),
+        "record_count": len(final_ids),
+        "deleted_ids": delete_ids,
+    }
 
 
 def search_company_context(query: str, **kwargs: Any) -> list[Any]:
@@ -728,7 +871,7 @@ def _record(
     record = {
         **dict(base),
         "_id": record_id,
-        "text": " ".join(text.split()),
+        "source_text": " ".join(text.split()),
         "referenced_columns": referenced_columns,
         "record_type": record_type,
         "section": section,
@@ -736,6 +879,53 @@ def _record(
         "rule_strength_rank": RULE_STRENGTH_ORDER.get(rule_strength, 99),
     }
     return dict(sorted(record.items()))
+
+
+def _contextualize_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    source_text = " ".join(str(record.get("source_text") or record.get("text") or "").split())
+    source_tables = ", ".join(str(item) for item in record.get("source_tables", []) if str(item).strip())
+    referenced_columns = ", ".join(
+        str(item) for item in record.get("referenced_columns", []) if str(item).strip()
+    )
+    contextual_text = "\n".join(
+        (
+            f"제목: {record.get('title', '')}",
+            f"문서 유형: {record.get('doc_type', '')}",
+            f"질문 유형: {record.get('query_type', '')}",
+            f"섹션: {record.get('section', '')}",
+            f"관련 테이블: {source_tables}",
+            f"관련 컬럼: {referenced_columns}",
+            f"본문: {source_text}",
+        )
+    )
+    return dict(sorted({**dict(record), "source_text": source_text, "text": contextual_text}.items()))
+
+
+def _ensure_unique_record_ids(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """기존 ID는 유지하고 실제 충돌 레코드에만 결정론적 접미사를 붙입니다."""
+
+    positions: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        positions.setdefault(str(record["_id"]), []).append(index)
+
+    normalized = [dict(record) for record in records]
+    for record_id, indexes in positions.items():
+        # 과거 upsert에서는 같은 ID의 마지막 레코드가 남았으므로 마지막 ID를 보존한다.
+        for index in indexes[:-1]:
+            record = normalized[index]
+            identity = "|".join(
+                str(record.get(key) or "")
+                for key in (
+                    "document_id",
+                    "record_type",
+                    "section",
+                    "rule_strength",
+                    "source_text",
+                )
+            )
+            digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
+            record["_id"] = f"{record_id}__collision_{digest}"
+    return [dict(sorted(record.items())) for record in normalized]
 
 
 def _with_chunk_counts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -766,6 +956,80 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}:{line_number}: JSONL record must be an object")
         records.append(record)
     return records
+
+
+def _resolve_index(index: Any | None, namespace: str | None) -> tuple[Any, str]:
+    if index is not None:
+        return index, namespace or "olist-rag-v1"
+    from DATA_Analyst_Assistant_Agent.shared.pinecone import PineconeSettings, get_pinecone_index
+
+    settings = PineconeSettings.from_env()
+    return get_pinecone_index(settings), namespace or settings.namespace
+
+
+def list_namespace_ids(index: Any, namespace: str) -> list[str]:
+    record_ids: list[str] = []
+    for page in index.list(namespace=namespace):
+        vectors = _mapping_value(page, "vectors", []) or []
+        for vector in vectors:
+            record_id = _mapping_value(vector, "id", "")
+            if str(record_id).strip():
+                record_ids.append(str(record_id))
+    return sorted(set(record_ids))
+
+
+def _backup_vector(record_id: str, vector: Any) -> dict[str, Any]:
+    record = {
+        "id": record_id,
+        "values": list(_mapping_value(vector, "values", []) or []),
+        "metadata": dict(_mapping_value(vector, "metadata", {}) or {}),
+    }
+    sparse_values = _mapping_value(vector, "sparse_values", None)
+    if sparse_values:
+        record["sparse_values"] = _json_compatible(sparse_values)
+    return record
+
+
+def _mapping_value(value: Any, key: str, default: Any) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _json_compatible(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_compatible(item) for item in value]
+    if hasattr(value, "to_dict"):
+        return _json_compatible(value.to_dict())
+    if hasattr(value, "model_dump"):
+        return _json_compatible(value.model_dump(mode="json"))
+    return value
+
+
+def _batches(items: Sequence[Any], size: int) -> Iterable[list[Any]]:
+    for start in range(0, len(items), size):
+        yield list(items[start : start + size])
+
+
+def _wait_for_namespace_ids(
+    index: Any,
+    namespace: str,
+    expected_ids: set[str],
+    *,
+    allow_extra: bool = False,
+    attempts: int = 10,
+) -> set[str]:
+    current_ids: set[str] = set()
+    for attempt in range(attempts):
+        current_ids = set(list_namespace_ids(index, namespace))
+        matches = expected_ids <= current_ids if allow_extra else expected_ids == current_ids
+        if matches:
+            return current_ids
+        if attempt < attempts - 1:
+            time.sleep(1)
+    return current_ids
 
 
 def _record_for_text_field(record: Mapping[str, Any], text_field: str) -> dict[str, Any]:
@@ -822,6 +1086,23 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--namespace", default=None)
     ingest_parser.add_argument("--text-field", default="text")
 
+    backup_parser = subparsers.add_parser("backup")
+    backup_parser.add_argument("--output", type=Path, required=True)
+    backup_parser.add_argument("--namespace", default=None)
+
+    restore_parser = subparsers.add_parser("restore")
+    restore_parser.add_argument("--input", type=Path, required=True)
+    restore_parser.add_argument("--namespace", default=None)
+
+    sync_parser = subparsers.add_parser("sync")
+    sync_parser.add_argument("--input", type=Path, required=True)
+    sync_parser.add_argument("--backup", type=Path, required=True)
+    sync_parser.add_argument("--namespace", default=None)
+    sync_parser.add_argument("--text-field", default="text")
+    sync_parser.add_argument("--expected-count", type=int, default=535)
+    sync_parser.add_argument("--expected-delete-count", type=int, default=7)
+    sync_parser.add_argument("--expected-add-count", type=int, default=0)
+
     smoke_parser = subparsers.add_parser("search-smoke")
     smoke_parser.add_argument("query")
     smoke_parser.add_argument("--namespace", default=None)
@@ -841,6 +1122,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "ingest":
             result = ingest_jsonl(args.input, namespace=args.namespace, text_field=args.text_field)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+        elif args.command == "backup":
+            result = backup_namespace(args.output, namespace=args.namespace)
+            print(json.dumps({"record_count": result["record_count"], "output": str(args.output)}, ensure_ascii=False))
+        elif args.command == "restore":
+            result = restore_namespace(args.input, namespace=args.namespace)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        elif args.command == "sync":
+            result = sync_namespace(
+                args.input,
+                args.backup,
+                namespace=args.namespace,
+                text_field=args.text_field,
+                expected_count=args.expected_count,
+                expected_delete_count=args.expected_delete_count,
+                expected_add_count=args.expected_add_count,
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         elif args.command == "search-smoke":
             _print_search_hits(search_smoke(args.query, namespace=args.namespace))
         else:

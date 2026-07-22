@@ -5,11 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from DATA_Analyst_Assistant_Agent.shared.pinecone import (
+    CompanyContextHit,
     PineconeUpsertError,
     PineconeConfigurationError,
     PineconeSearchError,
+    PineconeRerankError,
     PineconeSettings,
     get_pinecone_index,
+    rerank_company_context,
     search_company_context,
     upsert_company_context,
 )
@@ -35,6 +38,8 @@ def test_settings_load_pinecone_environment(monkeypatch) -> None:
     monkeypatch.setenv("PINECONE_TEXT_FIELD", "content")
     monkeypatch.setenv("PINECONE_TOP_K", "7")
     monkeypatch.setenv("PINECONE_TIMEOUT_SECONDS", "3.5")
+    monkeypatch.setenv("PINECONE_RERANK_ENABLED", "false")
+    monkeypatch.setenv("PINECONE_RERANK_MODEL", "test-reranker")
 
     settings = PineconeSettings.from_env()
 
@@ -44,6 +49,8 @@ def test_settings_load_pinecone_environment(monkeypatch) -> None:
     assert settings.text_field == "content"
     assert settings.top_k == 7
     assert settings.timeout_seconds == 3.5
+    assert settings.rerank_enabled is False
+    assert settings.rerank_model == "test-reranker"
 
 
 def test_settings_reject_missing_api_key(monkeypatch) -> None:
@@ -327,3 +334,74 @@ def test_search_wraps_pinecone_errors() -> None:
         search_company_context("배송", settings=_settings(), index=FailingIndex())
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+def test_rerank_maps_scores_and_preserves_dense_scores() -> None:
+    hits = [
+        SimpleNamespace(
+            record_id="record-a",
+            score=0.9,
+            text="매출 규칙",
+            document_id="sales-orders",
+            title="매출",
+            metadata={},
+            rerank_score=None,
+        ),
+        SimpleNamespace(
+            record_id="record-b",
+            score=0.8,
+            text="결제 규칙",
+            document_id="payment-behavior",
+            title="결제",
+            metadata={},
+            rerank_score=None,
+        ),
+    ]
+
+    class FakeInference:
+        def rerank(self, **kwargs):
+            assert kwargs["model"] == "bge-reranker-v2-m3"
+            assert len(kwargs["documents"]) == 2
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=1, score=0.97),
+                    SimpleNamespace(index=0, score=0.65),
+                ]
+            )
+
+    client = SimpleNamespace(inference=FakeInference())
+    normalized_hits = [CompanyContextHit(**vars(hit)) for hit in hits]
+
+    reranked = rerank_company_context(
+        "월별 매출과 결제 행동",
+        normalized_hits,
+        settings=_settings(),
+        client=client,
+    )
+
+    assert [hit.record_id for hit in reranked] == ["record-b", "record-a"]
+    assert [hit.score for hit in reranked] == [0.8, 0.9]
+    assert [hit.rerank_score for hit in reranked] == [0.97, 0.65]
+
+
+def test_rerank_wraps_api_errors() -> None:
+    class FailingInference:
+        def rerank(self, **_kwargs):
+            raise RuntimeError("rerank unavailable")
+
+    hit = CompanyContextHit(
+        record_id="record-a",
+        score=0.9,
+        text="매출 규칙",
+        document_id="sales-orders",
+        title="매출",
+        metadata={},
+    )
+
+    with pytest.raises(PineconeRerankError, match="rerank에 실패"):
+        rerank_company_context(
+            "매출",
+            [hit],
+            settings=_settings(),
+            client=SimpleNamespace(inference=FailingInference()),
+        )
