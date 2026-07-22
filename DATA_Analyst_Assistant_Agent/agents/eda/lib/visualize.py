@@ -92,6 +92,19 @@ def _plot_sample(data, cap: int = _MAX_PLOT_POINTS):
     return data.sample(cap, random_state=42)
 
 
+def _masked_columns(df: pd.DataFrame, mask: pd.Series, columns: list) -> pd.DataFrame:
+    """Return only needed columns for a boolean mask.
+
+    On the Windows/Pandas runtime used by this project, boolean-indexing a mixed
+    object/datetime DataFrame (`df[mask]`) has produced native access violations.
+    Selecting the narrow column block with `.loc` avoids taking unrelated blocks.
+    """
+    available = [col for col in columns if col in df.columns]
+    if not available:
+        return pd.DataFrame(index=df.index)
+    return df.loc[mask, available].copy()
+
+
 def _is_binary_flag(s: pd.Series) -> bool:
     """0/1(불리언) 플래그 — 히스토그램·박스·산점도 축은 무의미(두 줄짜리 그림)."""
     if pd.api.types.is_bool_dtype(s):
@@ -1236,8 +1249,9 @@ def plot_cluster_scatter(df: pd.DataFrame, x_col: str, y_col: str, cluster_col: 
         mask = df[cluster_col] == cid
         ax.scatter(df.loc[mask, x_col], df.loc[mask, y_col],
                    label=f"Cluster {cid}", color=color, alpha=0.75, s=60, edgecolors="white", linewidth=0.5)
-        if key_col and key_col in df.columns and df[mask].shape[0] <= 30:
-            for _, row in df[mask].iterrows():
+        cluster_rows = _masked_columns(df, mask, [key_col, x_col, y_col]) if key_col and key_col in df.columns else pd.DataFrame()
+        if key_col and key_col in df.columns and len(cluster_rows) <= 30:
+            for _, row in cluster_rows.iterrows():
                 ax.annotate(str(row[key_col])[:10], (row[x_col], row[y_col]),
                             fontsize=6, alpha=0.7, xytext=(3, 3), textcoords="offset points")
     _apply_style(ax, f"Cluster: {x_col} vs {y_col}", xlabel=x_col, ylabel=y_col)
@@ -1490,7 +1504,8 @@ def plot_crosstab_heatmap(df: pd.DataFrame, cat_a: str = None, cat_b: str = None
 
     top_a = df[cat_a].value_counts().nlargest(max_card).index
     top_b = df[cat_b].value_counts().nlargest(max_card).index
-    sub = df[df[cat_a].isin(top_a) & df[cat_b].isin(top_b)]
+    mask = df[cat_a].isin(top_a) & df[cat_b].isin(top_b)
+    sub = _masked_columns(df, mask, [cat_a, cat_b]).dropna()
     ct = pd.crosstab(sub[cat_a], sub[cat_b])
     if ct.size == 0:
         return {"chart_paths": [], "stats": {}, "skipped": "교차표 비어있음"}
