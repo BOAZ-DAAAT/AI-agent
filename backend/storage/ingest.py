@@ -84,13 +84,15 @@ def _copy_table(host: str, port: int, user: str, password: str, database: str, t
             
         with local.cursor() as cur:
             cur.execute(create_sql)
+            db.ensure_internal_row_id(cur, quoted)
 
         copied = 0
         with remote.cursor(pymysql.cursors.SSCursor) as rcur:
             rcur.execute(f"SELECT * FROM {quoted} LIMIT %s", (INGEST_ROW_LIMIT,))
-            n_cols = len(rcur.description)
-            placeholders = ", ".join(["%s"] * n_cols)
-            insert_sql = f"INSERT INTO {quoted} VALUES ({placeholders})"
+            source_columns = [desc[0] for desc in rcur.description]
+            placeholders = ", ".join(["%s"] * len(source_columns))
+            quoted_columns = ", ".join(db.quote_identifier(column) for column in source_columns)
+            insert_sql = f"INSERT INTO {quoted} ({quoted_columns}) VALUES ({placeholders})"
 
             while True:
                 rows = rcur.fetchmany(INGEST_CHUNK_SIZE)

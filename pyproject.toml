@@ -32,3 +32,6 @@ dependencies = [
     "great-expectations>=1.19.0",
     "uuid-utils>=0.17.0",
 ]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]

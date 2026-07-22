@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -241,9 +242,17 @@ def list_session_tables(session_id: str, username: str) -> list[str]:
     )
 
 # 사용자 세션의 테이블 데이터 반환
-def preview_session_table(session_id: str, username: str, table: str, limit: int = 50) -> tuple[list[str], list[dict]]:
+def preview_session_table(
+    session_id: str,
+    username: str,
+    table: str,
+    limit: int = 50,
+    sort_by: str | None = None,
+    sort_order: str = "asc",
+    cursor: str | None = None,
+) -> db.TablePreviewPage:
     session = get_owned_session(session_id, username)
-    return db.preview_table(
+    return db.preview_table_page(
         StorageMySQL.HOST,
         StorageMySQL.PORT,
         StorageMySQL.USER,
@@ -251,6 +260,29 @@ def preview_session_table(session_id: str, username: str, table: str, limit: int
         session.session_db,
         table,
         limit,
+        sort_by,
+        sort_order,
+        cursor,
+    )
+
+
+def export_session_table_csv(
+    session_id: str,
+    username: str,
+    table: str,
+    sort_by: str | None = None,
+    sort_order: str = "asc",
+) -> Iterator[str]:
+    session = get_owned_session(session_id, username)
+    return db.stream_table_csv(
+        StorageMySQL.HOST,
+        StorageMySQL.PORT,
+        StorageMySQL.USER,
+        StorageMySQL.PASSWORD,
+        session.session_db,
+        table,
+        sort_by,
+        sort_order,
     )
 
 # 사용자 id를 받고 reset_mart_database함수 실행하여 데이터 마트 삭제

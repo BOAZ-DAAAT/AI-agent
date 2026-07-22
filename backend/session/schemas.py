@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.mysql.schemas import MySQLConn
 
@@ -41,6 +41,12 @@ class TablesResponse(BaseModel):
     tables: list[str]
 
 
+class PreviewPageInfo(BaseModel):
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class PreviewResponse(BaseModel):
     columns: list[str]
     rows: list[dict]
+    page_info: PreviewPageInfo = Field(default_factory=PreviewPageInfo)
