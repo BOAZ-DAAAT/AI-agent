@@ -116,6 +116,7 @@ CREATE_ANALYSIS_PLAN_PROMPT = """
 
 PLAN_DECISION_PROMPT = """
 Important planning policy:
+- The top-level JSON object must always be the analysis plan and must always include goal. Do not return a single derivation object such as {"name": "..."} at the top level; place derivations inside required_derivations.
 - Separate SQL-required structural derivations from analyst-side heuristics.
 - Put SQL/mart variables in required_derivations only when downstream EDA/Analysis should receive an explicit column or contract entry. Examples: seller-level order_count computed as COUNT(DISTINCT order_id), cohort_month, first_purchase_date, entity-level numerator/denominator fields.
 - Put thresholds, bins, low-n rules, heuristic labels, and method-choice assumptions in analysis_heuristics. These must be recorded and critic-reviewed as warnings/limitations, but they are not SQL generation requirements unless the user explicitly asks for a persisted column.

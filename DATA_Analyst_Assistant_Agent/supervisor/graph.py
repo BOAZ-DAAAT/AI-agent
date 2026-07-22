@@ -5,7 +5,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     SupervisorInterruptPayload,
@@ -842,6 +842,21 @@ def make_create_analysis_plan_node(model: Any | None):
                 extra=build_plan_context(state),
             )
         except Exception as exc:
+            if _is_missing_goal_validation_error(exc):
+                plan = _fallback_analysis_plan_from_state(state)
+                return {
+                    "analysis_plan": plan,
+                    "current_step": "create_analysis_plan",
+                    "decision_errors": [
+                        *state.get("decision_errors", []),
+                        {
+                            "node": "create_analysis_plan",
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                            "recovered": True,
+                        },
+                    ],
+                }
             return _decision_failure_updates(state, "create_analysis_plan", exc)
 
         plan: dict[str, Any] = {
@@ -869,6 +884,41 @@ def make_create_analysis_plan_node(model: Any | None):
         }
 
     return create_analysis_plan_node
+
+
+def _is_missing_goal_validation_error(exc: Exception) -> bool:
+    if not isinstance(exc, ValidationError):
+        return False
+    return any(
+        tuple(error.get("loc", ())) == ("goal",) and error.get("type") == "missing"
+        for error in exc.errors()
+    )
+
+
+def _fallback_analysis_plan_from_state(state: SupervisorState) -> dict[str, Any]:
+    goal = _one_line_text(
+        state.get("clarified_query")
+        or state.get("latest_user_query")
+        or state.get("user_query")
+        or "analysis request"
+    )
+    return {
+        "goal": goal,
+        "route_kind": "comprehensive",
+        "planner_mode": "fallback",
+        "steps": [
+            "Build the requested dataset with SQL.",
+            "Profile relationships, distributions, and trends.",
+            "Generate evidence-backed insights.",
+        ],
+        "metric": None,
+        "dimension": None,
+        "filters": [],
+        "requires_mart_review": False,
+        "query_rules": dict(state.get("analysis_rule_context") or {}),
+        "required_derivations": [],
+        "analysis_heuristics": [],
+    }
 
 
 def make_decide_next_action_node(model: Any | None):

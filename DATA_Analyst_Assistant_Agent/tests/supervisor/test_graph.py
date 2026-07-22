@@ -1219,6 +1219,18 @@ def test_plan_node_records_required_derivations_and_heuristics_separately() -> N
     assert result["analysis_plan"]["analysis_heuristics"][0]["name"] == "low_n_threshold"
 
 
+def test_plan_node_recovers_missing_goal_with_fallback_plan() -> None:
+    node = make_create_analysis_plan_node(SequencedDecisionModel([{"route_kind": "trend"}]))
+    state = _state("seller delivery and review analysis")
+
+    result = node(state)
+
+    assert "terminal_state" not in result
+    assert result["analysis_plan"]["goal"] == "seller delivery and review analysis"
+    assert result["analysis_plan"]["planner_mode"] == "fallback"
+    assert result["decision_errors"][0]["recovered"] is True
+
+
 def test_execute_subagent_runs_only_the_registered_action() -> None:
     adapter = FakeSubAgentAdapter()
     decisions = [

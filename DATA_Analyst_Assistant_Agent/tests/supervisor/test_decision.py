@@ -109,6 +109,29 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
     assert decision.reason == "리포트 완료"
 
 
+def test_analysis_plan_decision_recovers_derivation_shaped_payload_without_goal() -> None:
+    decision = parse_decision_json_as(
+        json.dumps(
+            {
+                "name": "delivery_days",
+                "purpose": "delivery days calculation",
+                "source_columns": [
+                    "orders.order_purchase_timestamp",
+                    "orders.order_delivered_customer_date",
+                ],
+                "definition": "purchase timestamp to delivered customer date in days",
+            }
+        ),
+        AnalysisPlanDecision,
+    )
+
+    assert decision.goal == "delivery days calculation"
+    assert decision.required_derivations[0]["name"] == "delivery_days"
+    assert decision.required_derivations[0]["definition"] == (
+        "purchase timestamp to delivered customer date in days"
+    )
+
+
 @pytest.mark.parametrize(
     ("schema", "payload"),
     [
@@ -138,6 +161,8 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "dimension": "월",
                 "filters": [],
                 "requires_mart_review": False,
+                "required_derivations": [],
+                "analysis_heuristics": [],
                 "reason": "추이 분석",
             },
         ),

@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
@@ -19,7 +19,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 from DATA_Analyst_Assistant_Agent.supervisor.validation import ResultValidationDecision
 
 
-_SNAPSHOT_MAX_TEXT = 400
+_SNAPSHOT_MAX_TEXT = 380
 _SNAPSHOT_MAX_ITEMS = 8
 _SNAPSHOT_MAX_DEPTH = 4
 
@@ -74,6 +74,43 @@ class AnalysisPlanDecision(BaseModel):
     required_derivations: list[dict[str, Any]] = Field(default_factory=list)
     analysis_heuristics: list[dict[str, Any]] = Field(default_factory=list)
     reason: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def recover_missing_goal(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("goal"):
+            return value
+
+        recovered = dict(value)
+        fallback_goal = (
+            recovered.get("objective")
+            or recovered.get("purpose")
+            or recovered.get("reason")
+            or recovered.get("name")
+        )
+        if fallback_goal:
+            recovered["goal"] = str(fallback_goal)
+
+        derivation_keys = {
+            "name",
+            "purpose",
+            "entity",
+            "grain",
+            "source_columns",
+            "definition",
+            "preferred_name",
+            "safe_for",
+            "not_for",
+        }
+        looks_like_derivation = "name" in recovered and any(
+            key in recovered for key in derivation_keys - {"name"}
+        )
+        if looks_like_derivation and not recovered.get("required_derivations"):
+            recovered["required_derivations"] = [
+                {key: recovered[key] for key in derivation_keys if key in recovered}
+            ]
+
+        return recovered
 
 
 class AnalysisRuleExtractionDecision(BaseModel):
@@ -216,7 +253,7 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
     )
     context["agent_capabilities"] = _bounded_value(
         agent_capabilities_context(),
-        max_text=130,
+        max_text=120,
         max_items=8,
         depth=3,
     )
