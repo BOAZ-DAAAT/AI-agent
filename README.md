@@ -141,6 +141,11 @@ pip install -r requirements.txt
 pip install -r requirements-backend.txt
 ```
 
+Runtime note: the analysis code runner is pinned to `pandas==2.3.3`
+with `numpy==2.4.6`. Do not upgrade the analysis environment to
+`pandas>=3`; `pandas 3.0.4` on Windows was observed to crash the
+subprocess runner in daily datetime range operations.
+
 ---
 
 ## 5. 실행 방법

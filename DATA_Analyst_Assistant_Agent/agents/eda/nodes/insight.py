@@ -396,6 +396,7 @@ def insight_node(state: EDAState) -> dict:
     data_level: Dict[str, Any] = {}
     cautions: list = []
     analysis_constraints: list = []
+    analysis_data_contract = state.get("analysis_data_contract") or {}
     if df is not None:
         from DATA_Analyst_Assistant_Agent.agents.eda.lib.missing import detect_missing
         from DATA_Analyst_Assistant_Agent.agents.eda.lib.outlier import detect_outliers_iqr
@@ -466,6 +467,15 @@ def insight_node(state: EDAState) -> dict:
                 ),
                 "recommended_action": ["verify_grain_before_group_analysis"],
             }]
+        if analysis_data_contract.get("unimplemented_derivations"):
+            cautions = cautions + [{
+                "code": "SQL_DERIVATION_CONTRACT_INCOMPLETE",
+                "source": "analysis_data_contract",
+                "severity": "medium",
+                "message_ko": "SQL이 요청받은 구조적 파생변수 중 일부를 구현하지 못했습니다. 해당 변수에 의존하는 해석은 제한으로 보고해야 합니다.",
+                "recommended_action": ["treat_as_interpretation_limit", "avoid_name_based_substitution"],
+                "details": analysis_data_contract.get("unimplemented_derivations"),
+            }]
         # 상류 원천 테이블의 GE 정합성 이슈(스코핑+fail_only+100줄 캡, #123 함수 재사용). 없으면 "".
         integrity_text = load_scoped_integrity_text(state.get("plan_source_tables") or [])
         if integrity_text:
@@ -488,6 +498,7 @@ def insight_node(state: EDAState) -> dict:
             "sample_reliability": sample_reliability,
             "cautions":           cautions,
             "analysis_constraints": analysis_constraints,
+            "analysis_data_contract": analysis_data_contract,
             "distribution":       dist_stats,
             "group_comparison":   group_comparison,
             "correlation_pairs":  corr_pairs,
@@ -500,13 +511,6 @@ def insight_node(state: EDAState) -> dict:
                 "cluster_centroids": clustering.get("cluster_centroids", {}),
             } if (clustering and not clustering.get("skip")) else {"skip": True},
         }
-
-        # codegen 탈출구 성공 결과를 수치 계약에 편입(도구로 답 못 낸 질문에만 채워짐).
-        # 생성코드 원문(provenance)·계측·llm_generated caution 포함. 실패(out_of_domain)는
-        # 여기 안 넣고 agent.py payload의 top-level 플래그로 노출한다.
-        codegen = state.get("codegen") or {}
-        if codegen.get("status") == "success":
-            statistical_metadata["adhoc_analysis"] = codegen
 
     def _facts_block(facts_key: str, result_key: str, label: str) -> str:
         # 원문 대신 각 노드가 뽑은 짧은 facts로 insight 입력을 줄인다(#194 후속).
@@ -524,6 +528,7 @@ def insight_node(state: EDAState) -> dict:
         _facts_block("comparison_facts", "comparison_result", "그룹 비교"),
         _facts_block("relationship_facts", "relationship_result", "관계 탐색"),
         _facts_block("time_facts", "time_result", "시간 분석"),
+        _facts_block("clustering_facts", "clustering_summary", "clustering"),
     ])
     prompt = insight_prompt(state["user_question"], statistical_metadata, all_results)
     fb = state.get("validation_feedback")
@@ -575,6 +580,7 @@ def insight_node(state: EDAState) -> dict:
         "data_level": data_level,
         "cautions": cautions,
         "analysis_constraints": analysis_constraints,
+        "analysis_data_contract": analysis_data_contract,
         "chart_requests": chart_requests,
         "error_log": append_errors(state, err),
     }

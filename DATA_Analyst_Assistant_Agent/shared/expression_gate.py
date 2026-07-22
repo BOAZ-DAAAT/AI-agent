@@ -1,4 +1,4 @@
-"""codegen 안전 게이트 — LLM이 생성한 pandas 표현식을 실행 전에 정적 검사한다.
+"""표현식 안전 게이트 — LLM이 제안한 pandas 표현식을 실행 전에 정적 검사한다.
 
 원칙: LLM은 표현식을 '제안'만 하고, 실행 여부는 이 게이트(코드)가 결정한다.
 - 단일 표현식만(ast.parse mode='eval') → 다중문·반복문·무한루프 차단
@@ -11,7 +11,7 @@
    - 리소스 폭발: 흔한 메서드만 막고 우회 가능. OOM 계측 쌓이면 v2 서브프로세스 승격.
    - IO/코드실행: 직접 IO 함수명(pandas·numpy) + 서브모듈 진입점(lib/core/io 등)까지 막지만,
      알려지지 않은 introspection 경로를 정적으로 100% 보장하진 못함 → 완전 격리는 v2 서브프로세스.
-   v1은 최후수단만 발동(빈도 낮음) + 화이트리스트 이름제한 + builtins 제거 심층방어로 잔여 리스크를 낮춘다.
+   v1은 제한된 보조 계산에서만 발동 + 화이트리스트 이름제한 + builtins 제거 심층방어로 잔여 리스크를 낮춘다.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ _VALID_SHAPES = {"scalar", "series", "frame"}
 _VALID_HINTS = {"bar", "line", "grouped_bar"}            # None = 차트 부적합(LLM 판단)
 
 
-class CodegenRequest(BaseModel):
+class ExpressionRequest(BaseModel):
     """LLM이 발행하는 구조적 신호(자유 문자열 실행 아님)."""
     intent: str                                          # 자연어: 뭘 계산하려는지
     target_columns: list[str] = Field(default_factory=list)
@@ -121,8 +121,8 @@ def validate_expression(expression: str, allowed_columns: list[str]) -> GateResu
         if isinstance(node, ast.Subscript):
             # 원본 df에서 직접 꺼내는 첨자만 검증한다(df["col"] / df[["a","b"]]).
             # 중간·파생 결과의 첨자(df.groupby(...).agg(prop=...)["prop"])는 원본에 없는
-            # '계산 컬럼'이라 검증 대상이 아니다 — 파생 컬럼 계산이 codegen의 본질이므로 막으면 안 된다.
-            # (진짜 오타난 원본컬럼은 실행 시 KeyError→out_of_domain으로 걸려 안전은 그대로.)
+            # '계산 컬럼'이라 검증 대상이 아니다 — 파생 컬럼 계산을 막으면 안 된다.
+            # (진짜 오타난 원본컬럼은 실행 시 KeyError로 걸려 안전은 그대로.)
             if isinstance(node.value, ast.Name) and node.value.id == "df":
                 for s in _subscript_strings(node):
                     if s not in cols:
@@ -131,13 +131,13 @@ def validate_expression(expression: str, allowed_columns: list[str]) -> GateResu
     return GateResult(ok=True)
 
 
-def validate_request(req: CodegenRequest, allowed_columns: list[str]) -> GateResult:
-    """CodegenRequest 전체 검증: expected_shape·선언 컬럼 실존 + 표현식 게이트."""
+def validate_request(req: ExpressionRequest, allowed_columns: list[str]) -> GateResult:
+    """ExpressionRequest 전체 검증: expected_shape·선언 컬럼 실존 + 표현식 게이트."""
     if req.expected_shape not in _VALID_SHAPES:
         return GateResult(ok=False, reason=f"invalid_expected_shape: {req.expected_shape}")
     if req.chart_hint is not None and req.chart_hint not in _VALID_HINTS:
         return GateResult(ok=False, reason=f"invalid_chart_hint: {req.chart_hint}")
     # target_columns는 LLM의 '선언'일 뿐 실행되지 않으므로(오직 expression만 eval) 보안과 무관하다.
-    # 여기엔 파생·중간 컬럼이 섞여 들어올 수 있어(codegen의 본질) 하드 거부하지 않는다.
+    # 여기엔 파생·중간 컬럼이 섞여 들어올 수 있어 하드 거부하지 않는다.
     # 실제 컬럼 실존 검증은 expression의 df 직접 첨자에서 수행한다(validate_expression).
     return validate_expression(req.expression, allowed_columns)

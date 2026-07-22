@@ -24,6 +24,7 @@ class EDAState(TypedDict, total=False):
     # SQL 에이전트가 넘긴 원천 테이블/선언 grain. GE 정합성 스코핑 + grain 교차검증용(없으면 폴백).
     plan_source_tables: List[str]  # GE 정합성을 이 테이블들로 스코핑해 읽는다
     plan_business_grain: str       # SQL이 선언한 엔티티 grain (예: "one row per customer_unique_id")
+    analysis_data_contract: Dict[str, Any]  # SQL이 하류 분석에 넘긴 grain/파생변수/heuristic 계약
     analysis_target: str        # 실제 df 컬럼으로 확정된 target (가설 6유형 앵커)
 
     # planner 결정 (하위호환 — 컨트롤러가 priority_metrics/focus를 여기 보관)
@@ -48,6 +49,7 @@ class EDAState(TypedDict, total=False):
     relationship_result: str
     time_result: str
     clustering_result: Dict[str, Any]
+    clustering_summary: str
 
     # 각 노드가 원문과 별도로 뽑은 짧은 핵심 사실 — insight 입력용(원문 대체 아니라 병행, #194 후속)
     inspect_facts: List[str]
@@ -56,6 +58,7 @@ class EDAState(TypedDict, total=False):
     comparison_facts: List[str]
     relationship_facts: List[str]
     time_facts: List[str]
+    clustering_facts: List[str]
 
     # 컬럼 의미 분류 (LLM이 로드 직후 판단)
     time_columns: List[str]    # 시간/날짜 컬럼
@@ -80,10 +83,6 @@ class EDAState(TypedDict, total=False):
     key_chart_captions: Dict[str, str]    # {파일명: 선정 이유 캡션} — 아티팩트 메타데이터로 실림(#71 B)
     statistical_metadata: Dict[str, Any]  # downstream 에이전트용 raw 수치
     chart_requests: List[Dict[str, Any]]  # EDA가 발행한 차트 주문서(intent/stats/columns/hint) — chart/ 렌더용
-
-    # codegen 탈출구 결과 (도구로 답 못 낸 도메인 밖 질문에만 채워짐)
-    # {status: "success"|"out_of_domain", ...} — status 필드는 미래 "partial" 확장 여지
-    codegen: Dict[str, Any]
 
     # 에러 로그
     error_log: List[str]

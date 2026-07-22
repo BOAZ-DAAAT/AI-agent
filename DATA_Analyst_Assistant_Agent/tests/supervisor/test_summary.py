@@ -213,7 +213,10 @@ _ANALYSIS_RESPONSE = json.dumps({
 
 _INSIGHT_RESPONSE = json.dumps({
     "title": "고가치 저만족 고객 진단", "subtitle": "케어 우선순위 도출", "background": "고가치 고객의 이탈 위험을 파악하기 위함입니다.",
+    "evidence_synthesis": "고가치 고객군과 만족도 지표가 함께 낮은 구간을 가리킵니다.",
     "answer": "고가치이면서 만족도가 낮은 고객군이 존재합니다.",
+    "as_is": "현재 고가치 고객 중 일부는 만족도가 낮은 상태입니다.",
+    "to_be": "고가치 저만족 고객을 우선 관리 대상으로 분리해야 합니다. 해당 고객군의 만족도 변화를 지속적으로 추적해야 합니다. 관리 결과를 다시 검증해 우선순위가 유지되는지 확인해야 합니다.",
     "key_insights": ["고가치 저만족 고객군이 존재합니다."],
     "action_plan": ["해당 고객군에 대한 케어 프로세스를 우선 도입합니다."],
     "limitations": ["관찰 데이터 기반으로 인과관계를 보장하지 않습니다."],
@@ -401,6 +404,37 @@ def test_generate_insight_summary_uses_evidence_labels(adapter, runtime, monkeyp
 
     assert payload["detail"]["kind"] == "insight"
     assert payload["detail"]["evidence_sources"] == ["SQL 결과 테이블"]
+    assert payload["detail"]["as_is"] == "현재 고가치 고객 중 일부는 만족도가 낮은 상태입니다."
+    assert "고가치 저만족 고객을 우선 관리 대상으로 분리해야 합니다." in payload["detail"]["to_be"]
+
+
+def test_insight_summary_expands_sparse_to_be(adapter, runtime, monkeypatch):
+    run = adapter.create_run(thread_id="thread_insight_to_be")
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {"answer": "배송 지연과 낮은 리뷰가 함께 관찰됩니다.", "key_insights": [], "action_plan": [], "limitations": []},
+        kind="insight_payload", filename="insight_payload.json",
+    )
+    response = json.dumps({
+        "title": "배송 지연 관리", "subtitle": "운영 관리 방향이 필요합니다.",
+        "background": "배송 지연과 리뷰 관계를 확인하기 위함입니다.",
+        "evidence_synthesis": "배송 지연과 낮은 리뷰가 함께 관찰됩니다.",
+        "answer": "배송 지연과 낮은 리뷰가 함께 관찰됩니다.",
+        "as_is": "배송 지연과 낮은 리뷰가 함께 관찰됩니다.",
+        "to_be": "배송 지연을 관리 지표로 삼아야 합니다.",
+        "key_insights": [],
+        "action_plan": ["배송 소요일이 긴 판매자군을 우선 점검합니다."],
+        "limitations": [],
+        "conclusion": "상관 수준에서 활용해야 합니다.",
+        "key_finding": "배송 지연과 낮은 리뷰가 함께 관찰됩니다.",
+    }, ensure_ascii=False)
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: _FakeLLM([response]))
+
+    ref = generate_node_summary([artifact_id], runtime)
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+
+    assert payload["detail"]["to_be"].count("다.") >= 3
+    assert "배송 소요일이 긴 판매자군을 우선 점검합니다." in payload["detail"]["to_be"]
 
 
 def test_collect_texts_excludes_chart_artifact_ids_from_numeric_verification():
@@ -486,6 +520,7 @@ def test_analysis_summary_accepts_numbers_from_visual_evidence(adapter, runtime,
     payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
 
     assert payload["fallback_used"] is False
+    assert payload["detail"]["analysis_items"][0]["purpose"] == "이 항목은 관계 검정 항목의 판단 근거를 확인하기 위해 분석했습니다."
     assert payload["detail"]["supporting_charts"][0]["body"].startswith("상관계수는 -0.367")
     assert len(fake_llm.calls) == 1
 
@@ -540,6 +575,7 @@ def test_analysis_summary_preserves_inconclusive_decision_boundary(adapter, runt
     assert analysis_item["decision"] == "inconclusive"
     assert "p-value=0.099" in analysis_item["key_numbers"]
     assert analysis_item["result"] == "월별 선형추세 결과의 원본 판정은 inconclusive입니다."
+    assert analysis_item["interpretation"] == ""
     assert "원본 판정은 'inconclusive'입니다" in test_result["body"]
     assert "**p-value=0.099**" in test_result["body"]
     assert "통계적으로 확정하기 어렵습니다" in payload["detail"]["interpretation"]

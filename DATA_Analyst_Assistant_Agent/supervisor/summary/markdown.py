@@ -350,17 +350,17 @@ def _render_analysis_detail(detail: AnalysisSummaryDetail, chart_map: dict[str, 
 # ─────────────────────────────
 def _render_insight_detail(detail: InsightSummaryDetail, chart_map: dict[str, str]) -> list[str]:
     lines: list[str] = []
-    if detail.answer:
-        lines += ["## 답변", "", detail.answer, ""]
-    lines += _callout("TIP", "핵심 인사이트", detail.key_insights)
-    lines += _callout("IMPORTANT", "실행 제안", detail.action_plan)
+    as_is = detail.as_is or detail.evidence_synthesis or detail.answer
+    if as_is:
+        lines += ["## AS-IS", "", "분석으로 확인한 현재 상태입니다.", "", as_is, ""]
     if detail.supporting_charts:
-        lines += ["## 근거 차트", ""]
         for section in detail.supporting_charts:
             lines += _render_chart_section(section, chart_map)
-    if detail.evidence_sources:
-        lines += ["## 근거 출처", "", " · ".join(f"`{e}`" for e in detail.evidence_sources), ""]
-    lines += _callout("WARNING", "한계", detail.limitations)
+    to_be = detail.to_be or "확인된 관계를 운영 관리 기준으로 삼아 우선 점검 대상과 추적 지표를 정리해야 합니다."
+    lines += ["## TO-BE", "", "이 결과가 가리키는 지향 방향입니다.", "", to_be, ""]
+    action_plan = detail.action_plan or ["근거 기반 실행 제안은 추가 검증 후 확정해야 합니다."]
+    lines += _callout("IMPORTANT", "ACTION", action_plan)
+    lines += _callout("WARNING", "주의사항", detail.limitations)
     return lines
 
 

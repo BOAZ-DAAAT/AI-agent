@@ -74,19 +74,59 @@ def repair_state(**overrides):
         "failed_sql_component": "main",
         "failed_statement_index": 1,
         "failed_statement_sql": "SELECT orders.total FROM orders",
-        "execution_error_info": {"error_code": 1054, "classification": "repairable_sql", "retryable": True},
+        "execution_error_info": {
+            "error_code": 1054,
+            "classification": "repairable_sql",
+            "repair_strategy": "rewrite_identifier",
+            "retryable": True,
+            "component": "main",
+        },
+        "classification": "repairable_sql",
+        "repair_strategy": "rewrite_identifier",
+        "repair_attempted": False,
+        "repair_validation_result": {"result": "not_attempted"},
     }
     state.update(overrides)
     return state
 
 
-@pytest.mark.parametrize("code", [1052, 1054, 1055, 1060, 1064, 1066, 1111, 1140, 1248, 1305, 1582])
-def test_mysql_sql_errors_are_repairable(code):
+@pytest.mark.parametrize("code, strategy", [
+    (1052, "rewrite_identifier"),
+    (1054, "rewrite_identifier"),
+    (1060, "rewrite_identifier"),
+    (1055, "rewrite_aggregation"),
+    (1111, "rewrite_aggregation"),
+    (1140, "rewrite_aggregation"),
+    (1064, "rewrite_syntax"),
+    (1066, "rewrite_syntax"),
+    (1109, "rewrite_syntax"),
+    (1248, "rewrite_syntax"),
+    (1305, "rewrite_syntax"),
+    (1582, "rewrite_syntax"),
+])
+def test_mysql_sql_errors_are_classified_by_repair_strategy(code, strategy):
     info = classify_execution_error(DriverError(code, "driver detail"))
 
     assert info["classification"] == "repairable_sql"
+    assert info["repair_strategy"] == strategy
     assert info["retryable"] is True
     assert info["error_code"] == code
+
+
+@pytest.mark.parametrize("code, message, column_name, invalid_value", [
+    (1265, "Data truncated: '12x' for column 'amount' at row 1", "amount", "12x"),
+    (1292, "Incorrect datetime value: '0000-00-00 00:00:00' for column 'review_creation_date' at row 1", "review_creation_date", "0000-00-00 00:00:00"),
+    (1366, "Incorrect integer value: 'abc' for column 'quantity' at row 1", "quantity", "abc"),
+    (1411, "Incorrect datetime value: 'bad-date' for column 'created_at' in function str_to_date", "created_at", "bad-date"),
+])
+def test_mysql_data_value_errors_extract_repair_context(code, message, column_name, invalid_value):
+    info = classify_execution_error(DriverError(code, message))
+
+    assert info["classification"] == "repairable_data"
+    assert info["repair_strategy"] == "normalize_invalid_value"
+    assert info["retryable"] is True
+    assert info["column_name"] == column_name
+    assert info["invalid_value"] == invalid_value
 
 
 @pytest.mark.parametrize("error, classification", [
@@ -99,6 +139,7 @@ def test_non_repairable_execution_errors_stop(error, classification):
     info = classify_execution_error(error)
 
     assert info["classification"] == classification
+    assert info["repair_strategy"] == "none"
     assert info["retryable"] is False
 
 
@@ -121,16 +162,167 @@ def test_repair_prompt_contains_only_relevant_context():
     assert "노출되면 안 되는 원문 질문" not in prompt
 
 
+@pytest.mark.parametrize("strategy, required_rules", [
+    ("rewrite_syntax", ["문법, 함수 호출 또는 alias 오류만", "SQL의 의미, grain, 출력 컬럼"]),
+    ("rewrite_identifier", ["실제로 존재하는 컬럼과 alias만", "없는 컬럼을 새로 만들거나"]),
+    ("rewrite_aggregation", ["grain과 aggregation contract", "GROUP BY와 집계 표현식만"]),
+    ("normalize_invalid_value", ["원본 행 삭제 없이", "CASE + 명시적 CAST + NULL", "precheck_sql"]),
+])
+def test_repair_prompt_contains_strategy_specific_local_rules(strategy, required_rules):
+    state = repair_state(
+        repair_strategy=strategy,
+        execution_error_info={
+            "error_code": 1292 if strategy == "normalize_invalid_value" else 1064,
+            "classification": "repairable_data" if strategy == "normalize_invalid_value" else "repairable_sql",
+            "repair_strategy": strategy,
+            "retryable": True,
+            "component": "main",
+            "column_name": "review_creation_date" if strategy == "normalize_invalid_value" else None,
+            "invalid_value": "0000-00-00 00:00:00" if strategy == "normalize_invalid_value" else None,
+        },
+    )
+
+    prompt = repair_sql_prompt(state, state["previous_sql_draft"])
+
+    assert f"선택된 repair 전략: {strategy}" in prompt
+    for rule in required_rules:
+        assert rule in prompt
+
+
 def test_repair_success_returns_valid_draft_and_clears_failure_context(monkeypatch):
+    state = repair_state(
+        previous_sql_draft=sql_draft(sql="SELECT order_id, SUM(total) AS revenue FROM orders GROUP BY order_id")
+    )
     repaired = sql_draft(sql="SELECT order_id, SUM(amount) AS revenue FROM orders GROUP BY order_id")
     monkeypatch.setattr(repair_node, "try_llm_json", lambda _: json.dumps(repaired, ensure_ascii=False))
 
-    result = repair_node.repair_sql(repair_state())
+    result = repair_node.repair_sql(state)
 
     assert result["generation_source"] == "repair"
     assert result["sql_draft"]["sql"].rstrip(";") == repaired["sql"]
     assert result["validation_findings"] == []
     assert result["execution_error_info"] == {}
+    assert result["repair_attempted"] is True
+    assert result["repair_validation_result"]["result"] == "passed"
+
+
+def test_unchanged_sql_is_blocked_before_execution(monkeypatch):
+    state = repair_state()
+    monkeypatch.setattr(
+        repair_node,
+        "try_llm_json",
+        lambda _: json.dumps(state["previous_sql_draft"], ensure_ascii=False),
+    )
+
+    result = repair_node.repair_sql(state)
+
+    assert result["generation_source"] == "failed"
+    assert result["generation_failure_reason"] == "repair_no_effect"
+    assert result["repair_validation_result"]["result"] == "failed"
+    assert result["retry_hint"]["retryable"] is False
+
+
+def _datetime_repair_state(**overrides):
+    invalid_value = "0000-00-00 00:00:00"
+    broken = sql_draft(
+        sql="SELECT CAST(review_creation_date AS DATETIME) AS review_creation_date FROM orders",
+        source_column_refs=["orders.review_creation_date"],
+        derived_columns=["review_creation_date"],
+        output_columns=["review_creation_date"],
+        reasoning="리뷰 생성일 조회",
+    )
+    state = repair_state(
+        plan=simple_plan(
+            required_columns=["orders.review_creation_date"],
+            required_aggregations=[],
+            dimensions=[],
+            target_metrics=["리뷰 생성일"],
+        ),
+        schema_text=json.dumps({
+            "orders": {"columns": [{"name": "review_creation_date", "type": "VARCHAR"}]},
+        }),
+        previous_sql_draft=broken,
+        error=f"(1292, Incorrect datetime value: '{invalid_value}')",
+        failed_statement_sql=broken["sql"],
+        execution_error_info={
+            "error_code": 1292,
+            "classification": "repairable_data",
+            "repair_strategy": "normalize_invalid_value",
+            "retryable": True,
+            "component": "main",
+            "column_name": "review_creation_date",
+            "invalid_value": invalid_value,
+            "message": f"Incorrect datetime value: '{invalid_value}' for column 'review_creation_date'",
+        },
+        classification="repairable_data",
+        repair_strategy="normalize_invalid_value",
+    )
+    state.update(overrides)
+    return state
+
+
+def _valid_datetime_repair():
+    invalid_value = "0000-00-00 00:00:00"
+    return sql_draft(
+        sql=f"""WITH cleaned AS (
+SELECT CASE
+    WHEN review_creation_date = '{invalid_value}' THEN NULL
+    ELSE CAST(review_creation_date AS DATETIME)
+END AS review_creation_date_clean
+FROM orders
+)
+SELECT review_creation_date_clean
+FROM cleaned
+ORDER BY review_creation_date_clean""",
+        source_column_refs=["orders.review_creation_date"],
+        derived_columns=["review_creation_date_clean"],
+        output_columns=["review_creation_date_clean"],
+        precheck_sql=(
+            "SELECT COUNT(*) AS invalid_value_count FROM orders "
+            f"WHERE review_creation_date = '{invalid_value}'"
+        ),
+        reasoning="비정상 리뷰 생성일을 NULL로 정규화",
+    )
+
+
+def test_datetime_value_repair_requires_normalization_and_precheck(monkeypatch):
+    repaired = _valid_datetime_repair()
+    monkeypatch.setattr(repair_node, "try_llm_json", lambda _: json.dumps(repaired, ensure_ascii=False))
+
+    result = repair_node.repair_sql(_datetime_repair_state())
+
+    assert result["generation_source"] == "repair"
+    assert result["repair_validation_result"]["result"] == "passed"
+    evidence = result["repair_validation_result"]["details"]["evidence"]
+    assert "정규화 표현식과 정제 alias 사용" in evidence
+    assert "오류 컬럼·값의 비정상 건수 precheck" in evidence
+
+
+@pytest.mark.parametrize("mutation", ["missing_precheck", "missing_null", "truncation", "row_filter"])
+def test_invalid_data_value_repair_is_blocked_before_execution(monkeypatch, mutation):
+    repaired = _valid_datetime_repair()
+    if mutation == "missing_precheck":
+        repaired["precheck_sql"] = None
+    elif mutation == "missing_null":
+        repaired["sql"] = repaired["sql"].replace("THEN NULL", "THEN CAST('1970-01-01' AS DATETIME)")
+    elif mutation == "truncation":
+        repaired["sql"] = repaired["sql"].replace(
+            "CAST(review_creation_date AS DATETIME)",
+            "CAST(LEFT(review_creation_date, 10) AS DATETIME)",
+        )
+    else:
+        repaired["sql"] = repaired["sql"].replace(
+            "FROM orders",
+            "FROM orders WHERE review_creation_date <> '0000-00-00 00:00:00'",
+        )
+    monkeypatch.setattr(repair_node, "try_llm_json", lambda _: json.dumps(repaired, ensure_ascii=False))
+
+    result = repair_node.repair_sql(_datetime_repair_state())
+
+    assert result["generation_source"] == "failed"
+    assert result["generation_failure_reason"] == "repair_strategy_validation_failed"
+    assert result["repair_validation_result"]["result"] == "failed"
+    assert result["retry_hint"]["retryable"] is False
 
 
 @pytest.mark.parametrize("response, failure_code", [
@@ -186,6 +378,108 @@ def test_execute_records_partial_success_and_repairable_main_error(monkeypatch):
     assert executed["execution_error_info"]["error_code"] == 1054
     assert validated["retry_hint"]["reason_code"] == "execution_error"
     assert validated["retry_hint"]["retryable"] is True
+
+
+@pytest.mark.parametrize("strategy, error, broken_sql, repaired_factory", [
+    (
+        "rewrite_syntax",
+        DriverError(1064, "You have an error in your SQL syntax"),
+        "SELECT order_id SUM(amount) AS revenue FROM orders GROUP BY order_id",
+        sql_draft,
+    ),
+    (
+        "rewrite_identifier",
+        DriverError(1054, "Unknown column 'total'"),
+        "SELECT order_id, SUM(total) AS revenue FROM orders GROUP BY order_id",
+        sql_draft,
+    ),
+    (
+        "rewrite_aggregation",
+        DriverError(1055, "Expression isn't in GROUP BY"),
+        "SELECT order_id, SUM(amount) AS revenue FROM orders",
+        sql_draft,
+    ),
+    (
+        "normalize_invalid_value",
+        DriverError(1292, "Incorrect datetime value: '0000-00-00 00:00:00' for column 'review_creation_date'"),
+        "SELECT CAST(review_creation_date AS DATETIME) AS review_creation_date FROM orders",
+        _valid_datetime_repair,
+    ),
+])
+def test_execution_failure_repair_prevalidation_and_reexecution_flow(
+    monkeypatch,
+    strategy,
+    error,
+    broken_sql,
+    repaired_factory,
+):
+    repaired = repaired_factory()
+    if strategy == "normalize_invalid_value":
+        state = _datetime_repair_state(
+            sql_draft=sql_draft(
+                sql=broken_sql,
+                source_column_refs=["orders.review_creation_date"],
+                derived_columns=["review_creation_date"],
+                output_columns=["review_creation_date"],
+            ),
+            previous_sql_draft={},
+            validation={},
+            validation_findings=[],
+            retry_hint={},
+            retry_count=0,
+            error="",
+            execution_error_info={},
+            classification="none",
+            repair_strategy="none",
+        )
+    else:
+        state = repair_state(
+            sql_draft=sql_draft(sql=broken_sql),
+            previous_sql_draft={},
+            validation={},
+            validation_findings=[],
+            retry_hint={},
+            retry_count=0,
+            error="",
+            execution_error_info={},
+            classification="none",
+            repair_strategy="none",
+        )
+
+    failed_once = {"value": False}
+
+    def fetch(sql):
+        if _normalize_for_test(sql) == _normalize_for_test(broken_sql) and not failed_once["value"]:
+            failed_once["value"] = True
+            raise error
+        return [("ok",)]
+
+    monkeypatch.setattr(execute_node, "can_use_live_db", lambda: True)
+    monkeypatch.setattr(execute_node, "validate_mysql_sql", lambda _: None)
+    monkeypatch.setattr(execute_node, "run_sql_fetchall", fetch)
+    monkeypatch.setattr(repair_node, "try_llm_json", lambda _: json.dumps(repaired, ensure_ascii=False))
+
+    first_execution = execute_node.execute_sql(state)
+    first_validation = validate_sql_and_result({**state, **first_execution})
+    retry_update = increase_retry({**state, **first_execution, **first_validation})
+    retry_state = {**state, **first_execution, **first_validation, **retry_update}
+    repair_result = repair_node.repair_sql(retry_state)
+    prevalidation = prevalidate_sql({**retry_state, **repair_result})
+    second_execution = execute_node.execute_sql({**retry_state, **repair_result, **prevalidation})
+    final_validation = validate_sql_and_result(
+        {**retry_state, **repair_result, **prevalidation, **second_execution}
+    )
+
+    assert first_execution["repair_strategy"] == strategy
+    assert first_validation["retry_hint"]["retryable"] is True
+    assert repair_result["repair_validation_result"]["result"] == "passed"
+    assert prevalidation["validation"]["result"] == "valid"
+    assert second_execution["error"] == ""
+    assert final_validation["validation"]["result"] == "valid"
+
+
+def _normalize_for_test(sql):
+    return " ".join(str(sql).split()).casefold().rstrip(";")
 
 
 @pytest.mark.parametrize("component, failing_sql", [
@@ -264,6 +558,43 @@ def test_database_missing_table_and_infrastructure_errors_are_terminal():
 
         assert result["retry_hint"]["retryable"] is False
         assert route_after_validation({**state, **result}) == "finalize"
+
+
+def test_retryable_flag_without_repair_strategy_does_not_enter_repair():
+    state = repair_state(
+        error="분류 계약이 없는 실행 오류",
+        execution_error_info={
+            "classification": "repairable_sql",
+            "repair_strategy": "none",
+            "retryable": True,
+            "message": "분류 계약이 없는 실행 오류",
+        },
+        validation={},
+        validation_findings=[],
+    )
+
+    result = validate_sql_and_result(state)
+
+    assert result["retry_hint"]["retryable"] is False
+    assert route_after_validation({**state, **result}) == "finalize"
+
+
+def test_same_error_after_repair_stops_at_default_retry_limit():
+    info = classify_execution_error(DriverError(1064, "You have an error in your SQL syntax"))
+    state = repair_state(
+        retry_count=1,
+        error=info["message"],
+        execution_error_info=info,
+        validation={},
+        validation_findings=[],
+        repair_attempted=True,
+        repair_validation_result={"result": "passed"},
+    )
+
+    result = validate_sql_and_result(state)
+
+    assert result["retry_hint"]["retryable"] is True
+    assert route_after_validation({**state, **result}) == "finalize"
 
 
 def test_comprehensive_ctas_repair_reenters_full_validation_and_execution(monkeypatch):

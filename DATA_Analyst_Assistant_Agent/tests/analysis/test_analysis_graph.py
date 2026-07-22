@@ -160,7 +160,7 @@ def test_graph_repeated_generation_parse_failure_is_labeled_generation_failed() 
     assert "[generate]" in execution_check.detail
 
 
-def test_graph_blocks_sql_datamart_with_incomplete_analysis_contract() -> None:
+def test_graph_warns_sql_datamart_with_incomplete_analysis_contract() -> None:
     state = _state()
     state.plan = AnalysisPlan(
         goal="seller monthly delivery trend",
@@ -173,21 +173,32 @@ def test_graph_blocks_sql_datamart_with_incomplete_analysis_contract() -> None:
             "derived_columns": [{"output_column": "month", "source_columns": ["order_purchase_timestamp"]}],
         },
     )
-    classify = _FakeModel([AssertionError("classify should not be called")])
+    classify = _FakeModel([AnalysisIntent(objective="seller monthly delivery trend", domain="operations")])
+    code = GeneratedAnalysisCode(
+        rationale="summarize delivery days",
+        code=(
+            "avg_days = float(df['avg_delivery_days'].mean())\n"
+            "result = {'summary': f'average delivery days {avg_days}', "
+            "'findings': [f'average delivery days {avg_days}'], "
+            "'statistics': {'avg_delivery_days': avg_days}, "
+            "'method_decision': {'selected_method': 'mean', 'rationale': 'Summarizes the available delivery metric.', 'assumptions_checked': [], 'fallbacks_considered': []}, "
+            "'limitations': []}\n"
+        ),
+    )
 
     result, checks, terminal = run_analysis_workflow(
         state,
         pd.DataFrame({"seller_id": ["s1"], "month": ["2024-01-01"], "avg_delivery_days": [3.0]}),
         [],
         planner_model=classify,
-        code_generator_model=_FakeModel([]),
-        critic_model=_FakeModel([]),
+        code_generator_model=_FakeModel([code]),
+        critic_model=_FakeModel([CodeCritique(verdict="pass")]),
     )
 
     parsed = AnalysisResult.model_validate(result)
-    assert terminal == "analysis_contract_invalid"
-    assert parsed.status == "failed"
-    assert any("row_grain" in limitation for limitation in parsed.limitations)
+    assert terminal == "validated_result"
+    assert parsed.status == "success"
+    assert any("row_grain" in note for note in parsed.method_notes)
 
 
 def test_generate_prompt_guards_entity_sample_filters() -> None:
@@ -229,10 +240,10 @@ def test_graph_repeated_execute_failure_is_labeled_execution_failed() -> None:
     assert "not allowed" in execution_check.detail
 
 
-def test_graph_repeated_result_contract_failure_is_labeled_result_contract_failed() -> None:
+def test_graph_result_contract_issues_become_method_notes() -> None:
     classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance")])
-    generate = _FakeModel([_BAD_CONTRACT_CODE, _BAD_CONTRACT_CODE])
-    critic = _FakeModel([])  # must never be reached
+    generate = _FakeModel([_BAD_CONTRACT_CODE])
+    critic = _FakeModel([CodeCritique(verdict="pass")])
 
     result, checks, terminal = run_analysis_workflow(
         _state(), _df(), [],
@@ -242,10 +253,9 @@ def test_graph_repeated_result_contract_failure_is_labeled_result_contract_faile
     )
 
     parsed = AnalysisResult.model_validate(result)
-    assert terminal == "result_contract_failed"
-    assert parsed.status == "failed"
-    assert parsed.error_history
-    assert parsed.error_history[-1]["stage"] == "result_contract"
+    assert terminal == "validated_result"
+    assert parsed.status == "success"
+    assert any("schema issues" in note for note in parsed.method_notes)
 
 
 def test_graph_produces_valid_analysis_result() -> None:
@@ -272,10 +282,10 @@ def test_graph_produces_valid_analysis_result() -> None:
     assert all(check.passed for check in checks)
 
 
-def test_graph_failed_review_marks_human_review() -> None:
+def test_graph_failed_review_becomes_warning_note() -> None:
     classify = _FakeModel([AnalysisIntent(objective="sum revenue", domain="finance")])
-    generate = _FakeModel([_GOOD_CODE, _GOOD_CODE, _GOOD_CODE])
-    critic = _FakeModel([CodeCritique(verdict="fail", feedback="wrong")] * 3)
+    generate = _FakeModel([_GOOD_CODE])
+    critic = _FakeModel([CodeCritique(verdict="fail", feedback="wrong")])
 
     result, checks, terminal = run_analysis_workflow(
         _state(), _df(), [],
@@ -285,9 +295,11 @@ def test_graph_failed_review_marks_human_review() -> None:
     )
 
     parsed = AnalysisResult.model_validate(result)
-    assert terminal == "method_review_failed"
-    assert parsed.human_review.required is True
-    assert any(not check.passed for check in checks)
+    assert terminal == "validated_result"
+    assert parsed.status == "success"
+    assert parsed.human_review.required is False
+    assert any("wrong" in note for note in parsed.method_notes)
+    assert all(check.passed for check in checks)
 
 
 def test_graph_review_required_is_validated_result_with_hypothesis_tests() -> None:

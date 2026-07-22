@@ -152,12 +152,18 @@ def build_result_from_outcome(
         method_notes=list(dict.fromkeys(method_notes)),
         method_decision=method_decision,
         intent=intent,
-        generated_code=(outcome.code.code if outcome.code else ""),
+        generated_code=str(result_payload.get("generated_code") or _generated_source(outcome)),
         code_critique=outcome.critique,
         codegen_attempts=outcome.attempts,
         error_history=list(outcome.error_history),
     )
     return result.model_dump(mode="json")
+
+
+def _generated_source(outcome: AnalysisOutcome) -> str:
+    if outcome.code is None:
+        return ""
+    return f"{outcome.code.imports}\n{outcome.code.code}" if outcome.code.imports else outcome.code.code
 
 
 def _review_request_from_payload(value: Any) -> ReviewRequest | None:

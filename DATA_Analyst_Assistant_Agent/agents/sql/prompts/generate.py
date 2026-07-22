@@ -17,7 +17,9 @@ def _integrity_rule(context: SimpleSQLGenerationContext | ComprehensiveSQLGenera
     if not context.integrity_failures:
         return ""
     return (
-        "\n- 관련 무결성 실패만 팬아웃 방지·중복 제거·타입 변환에 반영한다. "
+        "\n- integrity_failures는 필수 생성 계약이다. 관련 무결성 실패만 팬아웃 방지·중복 제거·타입 변환에 반드시 반영한다. "
+        "알려진 타입·값 오류는 최초 SQL의 정제 CTE에서 CASE, NULLIF, 명시적 CAST와 NULL로 정규화하고 "
+        "precheck_sql에서 비정상 값 건수를 센다. 원본 행 삭제, 임의 문자열 절단, 의미가 불명확한 값 조작은 금지한다. "
         "테이블/컬럼을 금지하거나 새 식별자를 만들지 않는다."
     )
 
@@ -40,7 +42,7 @@ MySQL 재사용 데이터마트 SQL을 작성한다.
 
 계약 우선순위
 1. mart_design(target_table, source_grains, final_grain, column_plan, metric_support, aggregation_policy)
-2. schema와 selected_tables
+2. schema와 selected_tables + integrity_failures
 3. user_question
 4. previous_feedback
 
@@ -53,6 +55,7 @@ MySQL 재사용 데이터마트 SQL을 작성한다.
 - final_grain을 보존하고 grain_columns가 행을 식별하게 한다.
 - 최종 컬럼은 column_plan.output_column의 순서·alias·계산 계약과 정확히 일치시킨다.
 - column_plan에 선언된 분석 필수 파생변수는 비율이어도 calculation_rule의 분자·분모·연산 순서와 0/NULL 처리 규칙대로 SQL에서 생성한다.
+- Supervisor가 required_derivations로 지시한 구조적 파생변수는 mart_design.column_plan의 alias와 정의를 그대로 구현한다. 분석 heuristic(threshold, bin, low-n cutoff, label)은 column_plan에 명시된 경우가 아니면 SQL 컬럼으로 새로 만들지 않는다.
 - metric_support.required_mart_columns를 보존하며 임의 컬럼·집계·필터를 추가하지 않는다.
 - source_column_refs는 실제 source table.column, derived_columns는 계산 alias, output_columns는 최종 컬럼만 기록한다.
 - DROP, ALTER, TRUNCATE와 column_plan에 없는 최종 표시용 비율·순위·판정 지표를 생성하지 않는다.
@@ -75,7 +78,7 @@ def generate_query_prompt(context: SimpleSQLGenerationContext) -> str:
 MySQL 조회 SQL을 작성한다.
 
 계약 우선순위
-1. schema와 selected_tables
+1. schema와 selected_tables + integrity_failures
 2. user_question
 3. previous_feedback
 

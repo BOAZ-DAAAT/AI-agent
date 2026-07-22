@@ -20,7 +20,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
-from DATA_Analyst_Assistant_Agent.shared.contracts import AgentStatus
+from DATA_Analyst_Assistant_Agent.shared.contracts import AgentStatus, LocalCheck
 
 
 class _Structured:
@@ -125,7 +125,7 @@ def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter
     assert parsed.answer_coverage.coverage_status == "full"
     assert parsed.answer_coverage.used_metrics == ["revenue"]
     assert parsed.answer_coverage.used_dimensions == ["category"]
-    assert parsed.generated_code == ""
+    assert "top = str(by_cat.index[0])" in parsed.generated_code
     assert parsed.code_critique is None
     assert parsed.debug_artifact_id is not None
     debug_payload = json.loads(adapter.read_artifact_text(parsed.debug_artifact_id))
@@ -275,7 +275,7 @@ def test_agent_reads_chart_when_numeric_summary_loses_shape_information(adapter:
     assert parsed.visual_evidence[0].status == "read_success"
 
 
-def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: BackendAdapter) -> None:
+def test_agent_preserves_method_review_failure_as_limitation(adapter: BackendAdapter) -> None:
     run = adapter.create_run()
     sql_ref = adapter.register_artifact(
         run.run_id,
@@ -307,25 +307,118 @@ def test_agent_routes_method_review_failure_to_retry_not_approval(adapter: Backe
     payload = json.loads(adapter.read_artifact_text(artifact.artifact_id))
     parsed = AnalysisResult.model_validate(payload)
 
-    assert parsed.human_review.required is True
-    assert envelope.status == AgentStatus.failed
+    assert parsed.human_review.required is False
+    assert parsed.status == "success"
+    assert envelope.status == AgentStatus.success
     assert envelope.approval.required is False
-    assert envelope.retry_hint.retryable is True
-    assert envelope.retry_hint.reason_code == "method_review_failed"
-    assert envelope.error == "wrong method"
-    assert "wrong method" in envelope.summary
+    assert envelope.retry_hint.retryable is False
+    assert envelope.retry_hint.suggested_action == "continue"
+    assert envelope.retry_hint.reason_code == "none"
+    assert envelope.error == ""
+    assert "Analysis result generated" in envelope.summary
+    assert any("wrong method" in note for note in parsed.method_notes)
     assert any(
-        finding.code == "method_review_failed"
-        and finding.disposition == "error"
-        and finding.retryable is True
+        finding.code == "analysis_method_note"
+        and finding.severity == "warning"
+        and finding.disposition == "limitation"
+        and finding.retryable is False
+        and "wrong method" in finding.message
         for finding in envelope.validation.findings
     )
-    assert envelope.retry_hint.details == {
-        "terminal_reason": "method_review_failed",
-        "failure_reason": "wrong method",
+    assert envelope.retry_hint.details == {}
+
+
+@pytest.mark.parametrize(
+    "terminal_reason",
+    [
+        "generation_failed",
+        "execution_failed",
+        "result_contract_failed",
+        "method_review_failed",
+        "analysis_contract_invalid",
+    ],
+)
+def test_agent_preserves_all_workflow_failures_as_warning_artifacts(
+    adapter: BackendAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_reason: str,
+) -> None:
+    run = adapter.create_run()
+    state = OrchestrationState(
+        run_id=run.run_id,
+        user_query="매출을 분석해줘",
+        goal="매출을 분석해줘",
+    )
+    failure_reason = f"{terminal_reason} 원인"
+    failed_result = {
+        "run_id": run.run_id,
+        "goal": state.goal,
+        "plan": {
+            "objective": state.goal,
+            "question_type": "descriptive",
+            "tool_names": [],
+            "requires_human_review": True,
+            "review_reason": failure_reason,
+        },
+        "method_summary": "분석이 완료되지 않았습니다.",
+        "key_findings": ["실패 전까지 생성된 결과입니다."],
+        "limitations": [failure_reason],
+        "method_notes": ["방법론 검토가 완료되지 않았습니다."],
+        "source_artifacts": {},
+        "human_review": {"required": True, "reason": failure_reason},
+        "status": "failed",
+        "generated_code": "result = {}",
+        "code_critique": {"verdict": "fail", "feedback": failure_reason},
         "codegen_attempts": 2,
-        "agent_retry_budget": 1,
+        "error_history": [{"stage": "execute", "error": failure_reason}],
     }
+    failed_checks = [
+        LocalCheck(
+            name="analysis_workflow_completed",
+            passed=False,
+            severity="error",
+            detail=failure_reason,
+        )
+    ]
+
+    monkeypatch.setattr(
+        "DATA_Analyst_Assistant_Agent.agents.analysis.agent.run_analysis_workflow",
+        lambda *_args, **_kwargs: (failed_result, failed_checks, terminal_reason),
+    )
+
+    envelope = AnalysisAgent().run(state, AgentRuntime(adapter))
+
+    public_id, debug_id = envelope.artifact_ids()
+    public_payload = json.loads(adapter.read_artifact_text(public_id))
+    debug_payload = json.loads(adapter.read_artifact_text(debug_id))
+    parsed = AnalysisResult.model_validate(public_payload)
+    assert envelope.status == AgentStatus.warning
+    assert envelope.approval.required is False
+    assert envelope.retry_hint.retryable is False
+    assert envelope.retry_hint.suggested_action == "continue"
+    assert envelope.retry_hint.details["terminal_reason"] == terminal_reason
+    assert envelope.retry_hint.details["failure_reason"] == failure_reason
+    assert envelope.error == ""
+    assert all(check.severity != "error" for check in envelope.validation.local_checks)
+    assert parsed.status == "failed"
+    assert parsed.debug_artifact_id == debug_id
+    assert debug_payload["terminal_reason"] == terminal_reason
+    assert debug_payload["generated_code"] == "result = {}"
+    assert any(
+        finding.code == terminal_reason
+        and finding.severity == "warning"
+        and finding.disposition == "limitation"
+        and finding.retryable is False
+        for finding in envelope.validation.findings
+    )
+    assert any(
+        finding.code == "analysis_method_note"
+        for finding in envelope.validation.findings
+    )
+    assert any(
+        finding.code == "analysis_limitation"
+        for finding in envelope.validation.findings
+    )
 
 
 def test_agent_review_required_registers_public_and_debug_artifacts(adapter: BackendAdapter) -> None:
@@ -366,7 +459,7 @@ def test_agent_review_required_registers_public_and_debug_artifacts(adapter: Bac
     assert parsed.review_request is not None
     assert parsed.human_review.reason == "Use the top revenue category as the follow-up segment?"
     assert parsed.debug_artifact_id == debug_id
-    assert parsed.generated_code == ""
+    assert "review_request" in parsed.generated_code
     assert debug_payload["generated_code"]
     assert debug_payload["code_critique"]["verdict"] == "review_required"
     artifact = adapter.get_artifact(public_id)
