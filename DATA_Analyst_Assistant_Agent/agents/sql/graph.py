@@ -17,6 +17,12 @@ def _max_retries(state: AgentState) -> int:
         return SQL_MAX_RETRIES
 
 
+def route_after_load_context(state: AgentState) -> str:
+    if state.get("sql_template_id"):
+        return "template"
+    return "semantic"
+
+
 def route_after_plan(state: AgentState):
     validation = state.get("validation") or {}
     if validation.get("result") != "invalid":
@@ -77,6 +83,9 @@ route_after_refresh_integrity_context = route_after_refresh_context
 def route_after_validation(state: AgentState):
     if state["validation"].get("result") == "valid":
         return "finalize"
+    # 결정론적 템플릿은 코드 경로이므로 실패 시 LLM으로 조용히 우회하지 않는다.
+    if state.get("sql_template_id"):
+        return "finalize"
     if not (state.get("retry_hint") or {}).get("retryable", True):
         return "finalize"
     if state["retry_count"] >= _max_retries(state):
@@ -118,6 +127,7 @@ def build_app():
     graph.add_node("finalize_table_plan", nodes.finalize_table_plan)
     graph.add_node("design_mart", nodes.design_mart)
     graph.add_node("generate_sql", nodes.generate_sql)
+    graph.add_node("build_olist_template_sql", nodes.build_olist_template_sql)
     graph.add_node("repair_sql", nodes.repair_sql)
     graph.add_node("prevalidate_sql", nodes.prevalidate_sql)
     graph.add_node("execute_sql", nodes.execute_sql)
@@ -126,7 +136,12 @@ def build_app():
     graph.add_node("finalize_answer", nodes.finalize_answer)
 
     graph.add_edge(START, "load_context")
-    graph.add_edge("load_context", "preplan_integrity_gate")
+    graph.add_conditional_edges(
+        "load_context",
+        route_after_load_context,
+        {"template": "build_olist_template_sql", "semantic": "preplan_integrity_gate"},
+    )
+    graph.add_edge("build_olist_template_sql", "prevalidate_sql")
     graph.add_edge("preplan_integrity_gate", "plan_question")
     graph.add_conditional_edges(
         "plan_question",

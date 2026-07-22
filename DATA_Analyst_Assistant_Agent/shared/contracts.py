@@ -3,7 +3,7 @@ from __future__ import annotations
 from data_agent_backend.models.common import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from data_agent_backend.models.artifacts import ArtifactRef
 
@@ -21,6 +21,14 @@ class SupervisorTerminalState(StrEnum):
     needs_clarification = "needs_clarification"
     failed_with_recoverable_context = "failed_with_recoverable_context"
     failed_terminal = "failed_terminal"
+
+
+class OlistTemplateId(StrEnum):
+    monthly_sales_orders = "monthly_sales_orders"
+    order_status_distribution = "order_status_distribution"
+    category_sales = "category_sales"
+    review_score_distribution = "review_score_distribution"
+    payment_method_summary = "payment_method_summary"
 
 
 class LocalCheck(BaseModel):
@@ -154,6 +162,8 @@ class AnalysisPlan(BaseModel):
     catalog_summary: dict[str, Any] | None = None
     retry_context: dict[str, Any] | None = None
     planner_mode: Literal["llm", "deterministic"] = "deterministic"
+    sql_generation_source: Literal["olist_template", "semantic_llm", "failed"] | None = None
+    sql_template_id: OlistTemplateId | None = None
     metric: str | None = None
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
@@ -173,6 +183,14 @@ class AnalysisPlan(BaseModel):
     business_grain: str | None = None
     mart_design: dict[str, Any] = Field(default_factory=dict)
     analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("sql_generation_source", mode="before")
+    @classmethod
+    def normalize_legacy_sql_generation_source(cls, value: Any) -> Any:
+        """이전 체크포인트의 llm/repair 값을 새 출처 이름으로 읽는다."""
+        if value in {"llm", "repair"}:
+            return "semantic_llm"
+        return value
 
 
 class OrchestrationState(BaseModel):

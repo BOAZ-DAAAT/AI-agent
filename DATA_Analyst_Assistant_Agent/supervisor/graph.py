@@ -65,6 +65,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.candidate import (
     commit_candidate,
     validate_candidate,
 )
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import match_olist_template
 
 
 
@@ -125,6 +126,58 @@ ANALYSIS_RULE_RETRIEVAL_GROUPS = (
     "analysis_foundation",
     "analysis_integrity_caution",
 )
+
+
+def make_match_olist_template_node():
+    def match_olist_template_node(state: SupervisorState) -> SupervisorState:
+        query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
+        existing_plan = dict(state.get("analysis_plan") or {})
+        match = match_olist_template(
+            query,
+            state.get("catalog_summary"),
+            metric=existing_plan.get("metric"),
+            dimension=existing_plan.get("dimension"),
+            filters=list(existing_plan.get("filters") or []),
+            query_rules=(
+                dict(state.get("analysis_rule_context") or {})
+                or dict(existing_plan.get("query_rules") or {})
+            ),
+        )
+        match_payload = {"status": "matched" if match.supported else "not_matched", **match.model_dump(mode="json")}
+        if not match.supported or match.template_id is None:
+            return {
+                "olist_template_match": match_payload,
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
+
+        template_id = match.template_id.value
+        return {
+            "olist_template_match": match_payload,
+            "clarified_query": query,
+            "analysis_plan": {
+                "goal": query,
+                "route_kind": "simple",
+                "planner_mode": "deterministic",
+                "steps": ["build_olist_sql", "prevalidate_sql", "execute_sql", "validate_sql_and_result"],
+                "metric": existing_plan.get("metric"),
+                "dimension": existing_plan.get("dimension"),
+                "filters": [],
+                "requires_mart_review": False,
+                "query_rules": dict(existing_plan.get("query_rules") or {}),
+                "sql_generation_source": "olist_template",
+                "sql_template_id": template_id,
+                "datasource_id": state.get("datasource_id"),
+                "catalog_summary": state.get("catalog_summary"),
+            },
+            "current_step": "match_olist_template",
+            "next_action": "call_sql_agent",
+            "terminal_state": "running",
+            "error_state": {},
+        }
+
+    return match_olist_template_node
 
 
 def make_rewrite_retrieval_query_node(model: Any | None):
@@ -848,6 +901,8 @@ def make_create_analysis_plan_node(model: Any | None):
             "goal": decision.goal,
             "route_kind": decision.route_kind,
             "planner_mode": "llm",
+            "sql_generation_source": "semantic_llm",
+            "sql_template_id": None,
             "steps": list(decision.steps),
             "metric": decision.metric,
             "dimension": decision.dimension,
@@ -1420,6 +1475,7 @@ def build_graph(
 
     graph = StateGraph(SupervisorState)
     backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
+    graph.add_node("match_olist_template", make_match_olist_template_node())
     graph.add_node(
         "rewrite_retrieval_query",
         make_rewrite_retrieval_query_node(model),
@@ -1445,7 +1501,12 @@ def build_graph(
     graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model, backend_adapter))
 
-    graph.add_edge(START, "rewrite_retrieval_query")
+    graph.add_edge(START, "match_olist_template")
+    graph.add_conditional_edges(
+        "match_olist_template",
+        _route_after_olist_template_match,
+        {"execute_subagent": "execute_subagent", "semantic_fallback": "rewrite_retrieval_query"},
+    )
     graph.add_edge("rewrite_retrieval_query", "retrieve_analysis_rules")
     graph.add_edge("retrieve_analysis_rules", "clarify_query")
     graph.add_conditional_edges(
@@ -1457,7 +1518,7 @@ def build_graph(
             "finalize": "finalize",
         },
     )
-    graph.add_edge("collect_clarification", "rewrite_retrieval_query")
+    graph.add_edge("collect_clarification", "match_olist_template")
     graph.add_edge("create_analysis_plan", "decide_next_action")
     graph.add_conditional_edges(
         "decide_next_action",
@@ -1479,6 +1540,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
+            "collect_clarification": "collect_clarification",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
@@ -1502,6 +1564,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
+            "collect_clarification": "collect_clarification",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
@@ -1628,6 +1691,13 @@ def _route_after_clarify(state: SupervisorState) -> str:
     return "create_analysis_plan"
 
 
+def _route_after_olist_template_match(state: SupervisorState) -> str:
+    match = state.get("olist_template_match") or {}
+    if match.get("status") == "matched" and state.get("next_action") == "call_sql_agent":
+        return "execute_subagent"
+    return "semantic_fallback"
+
+
 def _route_after_decide(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
@@ -1661,6 +1731,8 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
     next_action = state.get("next_action")
     if next_action == "collect_analysis_review":
         return "collect_analysis_review"
+    if next_action == "clarify":
+        return "collect_clarification"
     if next_action == "decide_next_action":
         return "decide_next_action"
     if next_action == "call_insight":

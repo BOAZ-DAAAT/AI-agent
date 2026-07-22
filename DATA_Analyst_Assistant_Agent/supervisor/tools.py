@@ -272,7 +272,7 @@ class SubAgentAdapter:
             "error_state": state.error_state,
         }
         if state.plan is not None:
-            updates["analysis_plan"] = {
+            plan_updates = {
                 "generated_sql": state.plan.generated_sql,
                 "source_sql": state.plan.source_sql,
                 "planner_mode": state.plan.planner_mode,
@@ -284,4 +284,9 @@ class SubAgentAdapter:
                 "mart_design": state.plan.mart_design,
                 "analysis_data_contract": state.plan.analysis_data_contract,
             }
+            if state.plan.sql_generation_source is not None:
+                plan_updates["sql_generation_source"] = state.plan.sql_generation_source
+            if state.plan.sql_template_id is not None:
+                plan_updates["sql_template_id"] = state.plan.sql_template_id.value
+            updates["analysis_plan"] = plan_updates
         return updates

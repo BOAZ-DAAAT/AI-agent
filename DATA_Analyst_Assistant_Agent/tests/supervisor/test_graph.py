@@ -782,6 +782,7 @@ def test_supervisor_graph_has_expected_nodes() -> None:
 
     assert set(graph.nodes) == {
         "__start__",
+        "match_olist_template",
         "rewrite_retrieval_query",
         "retrieve_analysis_rules",
         "clarify_query",

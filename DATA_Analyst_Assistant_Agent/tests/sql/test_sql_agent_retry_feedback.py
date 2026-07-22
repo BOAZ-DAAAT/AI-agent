@@ -9,7 +9,11 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OlistTemplateId, OrchestrationState
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    build_olist_sql_draft,
+    build_olist_validation_plan,
+)
 
 
 class _FakeApp:
@@ -37,6 +41,15 @@ class _ExplodingApp:
 class _FakeAdapter:
     def register_artifact(self, *args: Any, **kwargs: Any) -> ArtifactRef:
         return ArtifactRef(artifact_id="artifact_contract", type=ArtifactType.file)
+
+
+@dataclass
+class _CapturingAdapter:
+    calls: list[dict[str, Any]]
+
+    def register_artifact(self, *args: Any, **kwargs: Any) -> ArtifactRef:
+        self.calls.append(kwargs)
+        return ArtifactRef(artifact_id=f"artifact_{len(self.calls)}", type=ArtifactType.file)
 
 
 def test_sql_agent_uses_agent_feedback_when_present(monkeypatch) -> None:
@@ -123,6 +136,70 @@ def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monk
     reason = fake_app.invoked_with["planner_selection_reason"]
     payload = json.loads(reason.split("Supervisor analysis_plan:\n", 1)[1])
     assert payload["query_rules"] == state.plan.query_rules
+
+
+def test_sql_agent_passes_template_source_and_retry_limit_without_llm_planning(monkeypatch) -> None:
+    fake_app = _FakeApp()
+    _patch_build_app(monkeypatch, fake_app)
+    state = OrchestrationState(
+        run_id="run_olist",
+        user_query="월별 매출과 주문 수를 보여줘",
+        catalog_summary={"orders": {"columns": []}},
+        plan=AnalysisPlan(
+            goal="월별 매출과 주문 수",
+            planner_mode="deterministic",
+            sql_generation_source="olist_template",
+            sql_template_id=OlistTemplateId.monthly_sales_orders,
+        ),
+    )
+
+    SQLAgent()._run_main_sql_agent(state)
+
+    assert fake_app.invoked_with is not None
+    assert fake_app.invoked_with["sql_template_id"] == "monthly_sales_orders"
+    assert fake_app.invoked_with["generation_source"] == "olist_template"
+    assert fake_app.invoked_with["max_retries"] == 1
+
+
+def test_template_source_is_written_to_plan_result_artifact_metadata_and_preview() -> None:
+    template_id = OlistTemplateId.monthly_sales_orders
+    draft = build_olist_sql_draft(template_id).model_dump()
+    result = {
+        "plan": build_olist_validation_plan(template_id),
+        "sql_draft": draft,
+        "sql_result": [],
+        "row_count": 0,
+        "validation": {"result": "valid", "reason": "통과"},
+        "validation_findings": [],
+        "retry_hint": {"retryable": False, "reason_code": "none"},
+        "generation_source": "olist_template",
+        "sql_generation_source": "olist_template",
+        "sql_template_id": template_id.value,
+        "final_answer": "완료",
+    }
+    state = OrchestrationState(
+        run_id="run_template_artifacts",
+        user_query="월별 매출과 주문 수",
+        plan=AnalysisPlan(
+            goal="월별 매출과 주문 수",
+            planner_mode="deterministic",
+            sql_generation_source="olist_template",
+            sql_template_id=template_id,
+        ),
+    )
+    adapter = _CapturingAdapter(calls=[])
+
+    envelope = SQLAgent()._envelope_from_main_result(state, AgentRuntime(adapter=adapter), result)  # type: ignore[arg-type]
+
+    assert envelope.status.value == "success"
+    assert state.plan is not None
+    assert state.plan.sql_generation_source == "olist_template"
+    assert state.plan.sql_template_id == template_id
+    for call in adapter.calls:
+        assert call["metadata"]["sql_generation_source"] == "olist_template"
+        assert call["metadata"]["sql_template_id"] == template_id.value
+        assert call["preview"]["sql_generation_source"] == "olist_template"
+        assert call["preview"]["sql_template_id"] == template_id.value
 
 
 def test_sql_agent_contract_only_repairs_metadata_without_regenerating_sql(monkeypatch) -> None:

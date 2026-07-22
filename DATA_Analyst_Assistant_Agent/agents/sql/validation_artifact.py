@@ -12,7 +12,17 @@ def build_validation_summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "validation_findings": result.get("validation_findings") or [],
         "retry_hint": result.get("retry_hint") or {},
         "row_count": result.get("row_count", 0),
-        "generation_source": result.get("generation_source") or "llm",
+        "generation_source": (
+            result.get("sql_generation_source")
+            or ("semantic_llm" if result.get("generation_source") in {"llm", "repair"} else result.get("generation_source"))
+            or "semantic_llm"
+        ),
+        "sql_generation_source": (
+            result.get("sql_generation_source")
+            or ("semantic_llm" if result.get("generation_source") in {"llm", "repair"} else result.get("generation_source"))
+            or "semantic_llm"
+        ),
+        "sql_template_id": result.get("sql_template_id"),
         "generation_failure_reason": result.get("generation_failure_reason") or "",
         "failed_statement_index": result.get("failed_statement_index"),
         "failed_statement_sql": result.get("failed_statement_sql") or "",

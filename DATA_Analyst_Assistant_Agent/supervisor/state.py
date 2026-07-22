@@ -169,6 +169,8 @@ class SupervisorState(TypedDict, total=False):
     clarification_allow_free_text: bool
     analysis_rule_context: dict[str, Any] | None
     analysis_rule_retrieval: dict[str, Any]
+    olist_template_match: dict[str, Any]
+    sql_clarification_count: int
     analysis_plan: dict[str, Any]
     current_step: str
     next_action: NextAction
@@ -244,6 +246,8 @@ def empty_supervisor_state(
         "clarification_question": "",
         "analysis_rule_context": None,
         "analysis_rule_retrieval": {"status": "not_started"},
+        "olist_template_match": {"status": "not_started"},
+        "sql_clarification_count": 0,
         "analysis_plan": {},
         "current_step": "created",
         "next_action": "create_plan",
@@ -563,6 +567,13 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                 if schema_version >= 7
                 else {"status": "not_started"}
             ),
+            "olist_template_match": dict(
+                state.get("olist_template_match") or {"status": "not_started"}
+            ),
+            "sql_clarification_count": max(
+                int(state.get("sql_clarification_count", 0) or 0),
+                0,
+            ),
         }
         normalized.pop("validation_results", None)
         normalized.pop("evidence_validation_results", None)
@@ -601,6 +612,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "clarification_answers": [],
         "retrieval_query": "",
         "retrieval_query_generation": {"status": "not_started"},
+        "olist_template_match": {"status": "not_started"},
+        "sql_clarification_count": 0,
     }
     return _ensure_json_serializable(normalized)
 
@@ -1063,6 +1076,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             target_table=plan_payload.get("target_table") or None,
             source_tables=[str(t) for t in (plan_payload.get("source_tables") or []) if t],
             business_grain=plan_payload.get("business_grain") or None,
+            sql_generation_source=plan_payload.get("sql_generation_source"),
+            sql_template_id=plan_payload.get("sql_template_id"),
             mart_design=dict(plan_payload.get("mart_design") or {}),
             analysis_data_contract=dict(plan_payload.get("analysis_data_contract") or {}),
         )

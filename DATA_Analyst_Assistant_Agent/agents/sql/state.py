@@ -229,6 +229,8 @@ class AgentState(TypedDict):
     feedback: str
     error: str
     generation_source: str
+    sql_generation_source: str
+    sql_template_id: Optional[str]
     generation_failure_reason: str
     generation_context_diagnostics: List[Dict[str, Any]]
     failed_statement_index: Optional[int]

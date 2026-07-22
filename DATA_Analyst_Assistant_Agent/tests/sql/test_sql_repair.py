@@ -198,7 +198,7 @@ def test_repair_success_returns_valid_draft_and_clears_failure_context(monkeypat
 
     result = repair_node.repair_sql(state)
 
-    assert result["generation_source"] == "repair"
+    assert result["generation_source"] == "semantic_llm"
     assert result["sql_draft"]["sql"].rstrip(";") == repaired["sql"]
     assert result["validation_findings"] == []
     assert result["execution_error_info"] == {}
@@ -291,7 +291,7 @@ def test_datetime_value_repair_requires_normalization_and_precheck(monkeypatch):
 
     result = repair_node.repair_sql(_datetime_repair_state())
 
-    assert result["generation_source"] == "repair"
+    assert result["generation_source"] == "semantic_llm"
     assert result["repair_validation_result"]["result"] == "passed"
     evidence = result["repair_validation_result"]["details"]["evidence"]
     assert "정규화 표현식과 정제 alias 사용" in evidence
@@ -650,4 +650,4 @@ def test_comprehensive_ctas_repair_reenters_full_validation_and_execution(monkey
     assert prevalidation["validation"]["result"] == "valid"
     assert executed["error"] == ""
     assert validated["validation"]["result"] == "valid"
-    assert repair_result["generation_source"] == "repair"
+    assert repair_result["generation_source"] == "semantic_llm"
