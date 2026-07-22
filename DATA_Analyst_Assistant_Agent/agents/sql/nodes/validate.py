@@ -23,8 +23,9 @@ def validate_sql_and_result(state: AgentState):
         if statement_sql:
             detail += f" | 실패 SQL: {statement_sql}"
         classification = str(error_info.get("classification") or "unknown")
+        repair_strategy = str(error_info.get("repair_strategy") or "none")
         category = "missing_table" if classification == "missing_table" else "execution_error"
-        retryable = classification == "repairable_sql" and bool(error_info.get("retryable"))
+        retryable = bool(error_info.get("retryable")) and repair_strategy != "none"
         finding = {
             "category": category,
             "severity": "error",
@@ -38,7 +39,14 @@ def validate_sql_and_result(state: AgentState):
         summary = summarize_validation(findings)
         if not summary.get("feedback"):
             summary["feedback"] = f"실행 오류를 해결하도록 SQL을 다시 작성하세요. 실패 원인: {state['error']}."
-        return {"validation": summary, "validation_findings": findings, "retry_hint": summary.get("retry_hint", {}), "feedback": summary.get("feedback", "")}
+        return {
+            "validation": summary,
+            "validation_findings": findings,
+            "retry_hint": summary.get("retry_hint", {}),
+            "feedback": summary.get("feedback", ""),
+            "classification": classification,
+            "repair_strategy": repair_strategy,
+        }
     findings = list(existing_findings)
     findings.extend(
         validate_result_shape(

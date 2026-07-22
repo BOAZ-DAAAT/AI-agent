@@ -73,7 +73,6 @@ def test_validate_candidate_runs_all_checks_in_order_and_accepts() -> None:
         summary="분석 완료",
         artifact_ids=["analysis_001"],
     )
-
     updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
@@ -256,7 +255,6 @@ def test_semantic_warning_with_invalid_flag_is_accepted_with_limitations() -> No
         summary="분석 완료",
         artifact_ids=["analysis_001"],
     )
-
     updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
@@ -314,7 +312,7 @@ def test_semantic_warning_with_missing_evidence_is_accepted_with_limitations() -
     assert record["outcome"]["disposition"] == "accept_with_limitations"
 
 
-def test_semantic_info_with_invalid_flag_marks_candidate_for_recovery() -> None:
+def test_analysis_semantic_info_with_invalid_flag_is_accepted_with_limitations() -> None:
     model = SemanticModel(
         {
             **_semantic_success("call_sql_agent"),
@@ -332,12 +330,13 @@ def test_semantic_info_with_invalid_flag_marks_candidate_for_recovery() -> None:
     updates = make_validate_candidate_node(model)(_state(result))
 
     record = updates["pending_validation"]
-    assert record["checks"][-1]["passed"] is False
-    assert record["outcome"]["disposition"] == "recover"
-    assert record["outcome"]["recovery_action"] == "call_sql_agent"
+    assert record["checks"][-1]["passed"] is True
+    assert record["checks"][-1]["findings"][0]["disposition"] == "limitation"
+    assert record["outcome"]["disposition"] == "accept_with_limitations"
+    assert record["outcome"]["recovery_action"] is None
 
 
-def test_semantic_error_marks_candidate_for_recovery() -> None:
+def test_analysis_semantic_error_is_accepted_with_limitations() -> None:
     model = SemanticModel(
         {
             **_semantic_success("call_eda_agent"),
@@ -352,17 +351,23 @@ def test_semantic_error_marks_candidate_for_recovery() -> None:
         summary="분석 완료",
         artifact_ids=["analysis_001"],
     )
+    state = _state(result)
 
-    updates = make_validate_candidate_node(model)(_state(result))
+    updates = make_validate_candidate_node(model)(state)
 
     record = updates["pending_validation"]
-    assert record["checks"][-1]["passed"] is False
+    assert record["checks"][-1]["passed"] is True
+    assert record["checks"][-1]["findings"][0]["severity"] == "warning"
+    assert record["checks"][-1]["findings"][0]["disposition"] == "limitation"
     assert record["checks"][-1]["details"]["missing_evidence"] == ["segment_summary"]
-    assert record["outcome"]["disposition"] == "recover"
-    assert record["outcome"]["recovery_action"] == "call_eda_agent"
+    assert record["outcome"]["disposition"] == "accept_with_limitations"
+    assert record["outcome"]["recovery_action"] is None
+    committed = commit_candidate({**state, **updates}, None)
+    assert len(committed["agent_results"]) == 1
+    assert committed["rejected_results"] == []
 
 
-def test_semantic_model_failure_retries_once_then_rejects() -> None:
+def test_analysis_semantic_model_failure_retries_once_then_accepts_with_limitations() -> None:
     model = FailingSemanticModel()
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -370,21 +375,32 @@ def test_semantic_model_failure_retries_once_then_rejects() -> None:
         summary="분석 완료",
         artifact_ids=["analysis_001"],
     )
+    state = _state(result)
 
-    updates = make_validate_candidate_node(model)(_state(result))
+    updates = make_validate_candidate_node(model)(state)
 
     assert model.calls == 2
     assert updates["pending_validation"]["outcome"] == {
-        "disposition": "reject",
+        "disposition": "accept_with_limitations",
         "reason": "semantic validation 모델 호출에 반복 실패했습니다: semantic model unavailable",
         "reason_code": "semantic_model_failed",
         "retry_target": None,
         "recovery_action": None,
-        "terminal_state": "failed_with_recoverable_context",
+        "terminal_state": "running",
     }
+    semantic_check = updates["pending_validation"]["checks"][-1]
+    assert semantic_check["passed"] is True
+    assert semantic_check["findings"][0]["disposition"] == "limitation"
+    assert semantic_check["details"] == {
+        "attempts": 2,
+        "failure_reason": "semantic model unavailable",
+    }
+    committed = commit_candidate({**state, **updates}, None)
+    assert len(committed["agent_results"]) == 1
+    assert committed["rejected_results"] == []
 
 
-def test_semantic_create_plan_contract_violation_retries_then_rejects() -> None:
+def test_analysis_semantic_contract_violation_retries_then_accepts_with_limitations() -> None:
     model = SemanticModel(_semantic_success("create_plan"))
     result = AgentCompactResult(
         agent="analysis_agent",
@@ -396,8 +412,47 @@ def test_semantic_create_plan_contract_violation_retries_then_rejects() -> None:
     updates = make_validate_candidate_node(model)(_state(result))
 
     assert model.calls == 2
-    assert updates["pending_validation"]["outcome"]["disposition"] == "reject"
+    assert updates["pending_validation"]["outcome"]["disposition"] == "accept_with_limitations"
     assert updates["pending_validation"]["outcome"]["reason_code"] == "semantic_model_failed"
+
+
+def test_other_agent_semantic_error_still_recovers() -> None:
+    model = SemanticModel(
+        {
+            **_semantic_success("call_eda_agent"),
+            "severity": "error",
+            "reason": "필수 근거가 누락되었습니다.",
+        }
+    )
+    result = AgentCompactResult(
+        agent="sql_agent",
+        status="success",
+        summary="SQL 완료",
+        artifact_ids=["sql_001"],
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert record["checks"][-1]["passed"] is False
+    assert record["outcome"]["disposition"] == "recover"
+    assert record["outcome"]["recovery_action"] == "call_eda_agent"
+
+
+def test_other_agent_semantic_model_failure_still_rejects() -> None:
+    model = FailingSemanticModel()
+    result = AgentCompactResult(
+        agent="eda_agent",
+        status="success",
+        summary="EDA 완료",
+        artifact_ids=["eda_001"],
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    assert model.calls == 2
+    assert updates["pending_validation"]["outcome"]["disposition"] == "reject"
+    assert updates["pending_validation"]["checks"][-1]["passed"] is False
 
 
 def test_semantic_model_first_failure_retries_once_and_accepts() -> None:
