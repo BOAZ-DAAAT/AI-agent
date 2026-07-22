@@ -1043,7 +1043,10 @@ def test_selector_returns_captions_and_uses_hypotheses(monkeypatch, tmp_path):
         statistical_metadata={}, hypotheses="[가설 1] a는 그룹별로 다르다")
     names = [os.path.basename(p) for p in selected]
     assert "violin_b.png" not in names and "bar_top_a.png" in names
-    assert captions == {"bar_top_a.png": "a 순위 — 가설1 근거", "dist_b.png": "b 분포"}  # 생존 차트만
+    assert captions == {
+        "bar_top_a.png": "a 순위 — 가설1 근거 후속 Analysis 단계에서 별도 검증이 필요하다.",
+        "dist_b.png": "b 분포",
+    }  # 생존 차트만
     assert "[가설 1]" in seen_prompts[0]                 # 가설이 프롬프트에 들어감
     assert visual_debug["dropped"] == [] and visual_debug["check_failures"] == 0
 
