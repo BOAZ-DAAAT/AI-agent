@@ -249,6 +249,62 @@ def test_deterministic_precheck_is_recorded_as_warning_before_critic() -> None:
     assert outcome.result["statistics"]["sum_x"] == 6
 
 
+def test_contract_metric_support_failure_retries_generation() -> None:
+    wrong_code = GeneratedAnalysisCode(
+        rationale="row-level mean only",
+        code=(
+            "avg_days = float(df['delivery_days'].mean())\n"
+            "result = {'summary': 'avg delivery', 'findings': ['avg delivery'], "
+            "'statistics': {'avg_delivery_days': avg_days}, "
+            "'method_decision': {'selected_method': 'mean', 'rationale': 'fixture'}, "
+            "'limitations': []}\n"
+        ),
+    )
+    right_code = GeneratedAnalysisCode(
+        rationale="contract grain aggregation",
+        code=(
+            "seller_month = df.groupby(['seller_id', 'order_month'])['delivery_days'].mean().reset_index()\n"
+            "result = {'summary': 'seller month delivery', 'findings': ['seller month delivery'], "
+            "'statistics': {'seller_month_rows': int(len(seller_month))}, "
+            "'method_decision': {'selected_method': 'groupby seller_id order_month', 'rationale': 'Matches metric_support calculation_grain.'}, "
+            "'limitations': []}\n"
+        ),
+    )
+    intent = AnalysisIntent(objective="seller monthly delivery trend")
+    context = AnalysisContext(
+        user_question="seller monthly delivery trend",
+        goal="seller monthly delivery trend",
+        route_kind="comprehensive",
+        columns=["seller_id", "order_id", "order_month", "delivery_days"],
+        analysis_data_contract={
+            "row_grain": "seller_id x order_id",
+            "grain_columns": ["seller_id", "order_id"],
+            "metric_support": [{
+                "metric_name": "monthly_avg_delivery_days",
+                "calculation_grain": ["seller_id", "order_month"],
+                "required_mart_columns": ["seller_id", "order_month", "delivery_days"],
+                "downstream_calculation": "Group by seller_id and order_month before averaging delivery_days.",
+            }],
+        },
+    )
+    df = pd.DataFrame({
+        "seller_id": ["s1", "s1", "s2"],
+        "order_id": ["o1", "o2", "o3"],
+        "order_month": ["2024-01", "2024-02", "2024-01"],
+        "delivery_days": [3, 5, 7],
+    })
+    gen = _FakeModel([wrong_code, right_code])
+    crit = _FakeModel([CodeCritique(verdict="pass")])
+
+    outcome = run_analysis(intent, context, df, code_generator_model=gen, critic_model=crit)
+
+    assert outcome.status == "passed"
+    assert outcome.attempts == 2
+    assert outcome.error_history[0]["stage"] == "critic"
+    assert "contract_metric_support:monthly_avg_delivery_days" in outcome.error_history[0]["error"]
+    assert outcome.result["statistics"]["seller_month_rows"] == 3
+
+
 def test_partial_time_coverage_becomes_method_note_not_precheck_failure() -> None:
     intent = AnalysisIntent(
         objective="monthly revenue by category",

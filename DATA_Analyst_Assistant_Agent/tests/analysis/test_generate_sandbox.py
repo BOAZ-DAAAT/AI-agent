@@ -403,6 +403,33 @@ def test_generate_prompt_includes_free_text_selection_as_a_binding_constraint() 
     assert "Compare medians, not totals." in model.messages[1].content
 
 
+def test_generate_prompt_includes_analysis_data_contract() -> None:
+    context = AnalysisContext(
+        user_question="analyze mart",
+        goal="analyze mart",
+        route_kind="comprehensive",
+        columns=["seller_id", "order_id", "order_month", "delivery_days"],
+        analysis_data_contract={
+            "row_grain": "seller_id x order_id",
+            "grain_columns": ["seller_id", "order_id"],
+            "metric_support": [{
+                "metric_name": "monthly_avg_delivery_days",
+                "calculation_grain": ["seller_id", "order_month"],
+                "required_mart_columns": ["seller_id", "order_month", "delivery_days"],
+                "downstream_calculation": "Group by seller_id and order_month before averaging delivery_days.",
+            }],
+        },
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="analyze mart"), context, model=model)
+
+    prompt = model.messages[1].content
+    assert "Declared upstream SQL/datamart analysis contract" in prompt
+    assert "monthly_avg_delivery_days" in prompt
+    assert "Group by seller_id and order_month" in prompt
+
+
 def test_generate_prompt_includes_full_selected_option_as_binding_constraint() -> None:
     request = ReviewRequest.model_validate(
         {
