@@ -20,7 +20,10 @@ from data_agent_backend.models.runs import RunRecord, RunStatus
 
 from .event_stream import EVENT_STREAM_POLL_INTERVAL_SECONDS, stream_run_events
 from .schemas import (
+    AgentNodeReportResponse,
     AgentNodeSummaryResponse,
+    AgentReportListItem,
+    AgentReportListResponse,
     AgentRunBranchRequest,
     AgentRunBranchResponse,
     AgentRunCreateRequest,
@@ -31,10 +34,13 @@ from .schemas import (
 )
 from .service import (
     BranchPlanError,
+    NodeReportGenerationError,
     NodeSummaryNotFoundError,
     RunDeletionConflictError,
     delete_terminal_run_data,
     get_node_summary,
+    generate_node_report,
+    list_session_reports,
     launch_agent_run,
     new_thread_id,
     prepare_branch_plan,
@@ -61,6 +67,30 @@ def _branch_root_id(services, run: RunRecord) -> str:
             current = services.run_service.get_run(parent_run_id)
         except BackendError:
             return current.run_id
+
+
+@router.get("/reports", response_model=AgentReportListResponse)
+def list_agent_reports(
+    request: Request,
+    session_id: str = Query(...),
+    user: dict = Depends(get_current_user),
+) -> AgentReportListResponse:
+    get_owned_session(session_id, str(user["sub"]))
+    reports = list_session_reports(
+        services=request.app.state.services,
+        session_id=session_id,
+    )
+    return AgentReportListResponse(
+        reports=[
+            AgentReportListItem(
+                run_id=item.run_id,
+                report_artifact_id=item.report_artifact_id,
+                created_at=item.created_at,
+                report=item.report,
+            )
+            for item in reports
+        ]
+    )
 
 
 @router.delete("/{run_id}", response_model=AgentRunDeleteResponse)
@@ -122,6 +152,43 @@ def read_agent_node_summary(
         agent_name=result.agent_name,
         summary_artifact_id=result.summary_artifact_id,
         summary=result.summary,
+    )
+
+
+@router.post(
+    "/{run_id}/nodes/{node_id}/report",
+    response_model=AgentNodeReportResponse,
+)
+def create_agent_node_report(
+    run_id: str,
+    node_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentNodeReportResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    try:
+        result = generate_node_report(services=services, run_id=run_id, node_id=node_id)
+    except NodeSummaryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except NodeReportGenerationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return AgentNodeReportResponse(
+        run_id=run_id,
+        node_id=result.node_id,
+        report_artifact_id=result.report_artifact_id,
+        created_at=result.created_at,
+        report=result.report,
     )
 
 

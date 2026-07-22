@@ -21,6 +21,8 @@ from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
+from DATA_Analyst_Assistant_Agent.supervisor.report.generator import generate_report
+from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
 from DATA_Analyst_Assistant_Agent.supervisor.summary.generator import generate_node_summary
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
@@ -31,6 +33,10 @@ _SESSION_ENV_LOCK = threading.Lock()
 
 class NodeSummaryNotFoundError(Exception):
     """완료 노드 또는 해당 노드의 상세 서머리를 찾지 못했을 때."""
+
+
+class NodeReportGenerationError(Exception):
+    """선택한 노드로 리포트를 생성할 수 없을 때."""
 
 
 class RunDeletionConflictError(Exception):
@@ -133,6 +139,22 @@ class NodeSummaryLookup:
     summary: NodeSummaryResult
 
 
+@dataclass(frozen=True)
+class NodeReportLookup:
+    node_id: str
+    report_artifact_id: str
+    created_at: str
+    report: ReportResult
+
+
+@dataclass(frozen=True)
+class StoredReportLookup:
+    run_id: str
+    report_artifact_id: str
+    created_at: str
+    report: ReportResult
+
+
 def _completed_node_event(*, services: BackendServices, run_id: str, node_id: str):
     completed_event = next(
         (
@@ -225,6 +247,127 @@ def regenerate_node_summary(
     runtime = AgentRuntime(adapter=BackendAdapter(services=services))
     generate_node_summary(source_ids, runtime, force_regenerate=True)
     return get_node_summary(services=services, run_id=run_id, node_id=node_id)
+
+
+def _report_source_artifact_ids(
+    *,
+    services: BackendServices,
+    run_id: str,
+    completed_event,
+) -> list[str]:
+    summary_metadata = completed_event.metadata.get("summary")
+    summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
+    direct_ids = _summary_source_ids(completed_event, summary_metadata)
+    if not direct_ids:
+        raise NodeReportGenerationError("리포트를 생성할 Insight artifact가 없습니다.")
+
+    records = []
+    for artifact_id in direct_ids:
+        try:
+            records.append(services.artifact_registry.get_artifact(artifact_id))
+        except BackendError:
+            continue
+
+    anchor = next(
+        (
+            record
+            for record in records
+            if record.run_id == run_id and record.metadata.get("kind") == "insight_payload"
+        ),
+        next((record for record in records if record.run_id == run_id), None),
+    )
+    if anchor is None:
+        raise NodeReportGenerationError("선택한 Insight 실행에 속한 artifact를 찾을 수 없습니다.")
+
+    ordered_ids = [anchor.artifact_id]
+    seen = set(ordered_ids)
+    pending = [
+        artifact_id
+        for record in records
+        for artifact_id in record.parent_ids
+    ]
+    pending.extend(
+        artifact_id for artifact_id in direct_ids if artifact_id != anchor.artifact_id
+    )
+
+    while pending:
+        artifact_id = pending.pop(0)
+        if artifact_id in seen:
+            continue
+        try:
+            artifact = services.artifact_registry.get_artifact(artifact_id)
+        except BackendError:
+            continue
+        seen.add(artifact_id)
+        ordered_ids.append(artifact_id)
+        pending.extend(artifact.parent_ids)
+
+    return ordered_ids
+
+
+def generate_node_report(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeReportLookup:
+    completed_event = _completed_node_event(services=services, run_id=run_id, node_id=node_id)
+    agent_name = str(completed_event.metadata.get("agent_name") or completed_event.node_name or "")
+    if agent_name != "insight":
+        raise NodeReportGenerationError("완료된 Insight 노드에서만 리포트를 생성할 수 있습니다.")
+
+    source_ids = _report_source_artifact_ids(
+        services=services,
+        run_id=run_id,
+        completed_event=completed_event,
+    )
+    runtime = AgentRuntime(adapter=BackendAdapter(services=services))
+    try:
+        report_ref = generate_report(source_ids, runtime)
+        artifact = services.artifact_registry.get_artifact(report_ref.artifact_id)
+        payload = json.loads(services.artifact_store.read_text(report_ref.artifact_id))
+        report = ReportResult.model_validate(payload)
+    except NodeReportGenerationError:
+        raise
+    except Exception as exc:
+        raise NodeReportGenerationError("리포트 생성 결과를 저장하거나 읽지 못했습니다.") from exc
+
+    if artifact.run_id != run_id or artifact.metadata.get("kind") != "report":
+        raise NodeReportGenerationError("선택한 실행에 속한 리포트 artifact가 아닙니다.")
+
+    return NodeReportLookup(
+        node_id=node_id,
+        report_artifact_id=artifact.artifact_id,
+        created_at=artifact.created_at,
+        report=report,
+    )
+
+
+def list_session_reports(
+    *,
+    services: BackendServices,
+    session_id: str,
+) -> list[StoredReportLookup]:
+    reports: list[StoredReportLookup] = []
+    runs = services.run_service.list_runs(project_id=session_id)
+    for run in runs:
+        for artifact in services.artifact_registry.list_artifacts(run_id=run.run_id, type="file"):
+            if artifact.metadata.get("kind") != "report":
+                continue
+            try:
+                payload = json.loads(services.artifact_store.read_text(artifact.artifact_id))
+                report = ReportResult.model_validate(payload)
+            except Exception:
+                continue
+            reports.append(
+                StoredReportLookup(
+                    run_id=run.run_id,
+                    report_artifact_id=artifact.artifact_id,
+                    created_at=artifact.created_at,
+                    report=report,
+                )
+            )
+    return sorted(reports, key=lambda item: item.created_at, reverse=True)
 
 
 def new_thread_id() -> str:
