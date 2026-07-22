@@ -137,11 +137,40 @@ def test_progress_callback_reports_completed_stages() -> None:
     assert events == [
         ("generate", "started", 1),
         ("generate", "completed", 1),
+        ("execute.preflight", "started", 1),
+        ("execute.preflight", "completed", 1),
         ("execute", "started", 1),
+        ("contract_check", "started", 1),
+        ("contract_check", "completed", 1),
         ("execute", "completed", 1),
         ("critic", "started", 1),
         ("critic", "completed", 1),
     ]
+
+
+def test_manual_run_recommended_returns_generated_code_without_exec() -> None:
+    code = GeneratedAnalysisCode(
+        rationale="long running",
+        code=(
+            "while True:\n"
+            "    pass\n"
+        ),
+    )
+    events: list[tuple[str, str, int]] = []
+    outcome = run_analysis(
+        _intent(),
+        _context(),
+        _df(),
+        code_generator_model=_FakeModel([code]),
+        critic_model=_FakeModel([]),
+        progress_callback=lambda stage, status, attempt: events.append((stage, status, attempt)),
+    )
+
+    assert outcome.status == "passed"
+    assert outcome.early_stop_reason == "manual_run_recommended"
+    assert outcome.result["statistics"]["execution_decision"] == "manual_run_recommended"
+    assert "while True" in outcome.result["generated_code"]
+    assert ("execute", "skipped_manual_run", 1) in events
 
 
 def test_review_required_preserves_result_without_retry() -> None:

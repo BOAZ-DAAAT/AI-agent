@@ -125,12 +125,31 @@ def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter
     assert parsed.answer_coverage.coverage_status == "full"
     assert parsed.answer_coverage.used_metrics == ["revenue"]
     assert parsed.answer_coverage.used_dimensions == ["category"]
-    assert parsed.generated_code == ""
+    assert "top = str(by_cat.index[0])" in parsed.generated_code
     assert parsed.code_critique is None
     assert parsed.debug_artifact_id is not None
     debug_payload = json.loads(adapter.read_artifact_text(parsed.debug_artifact_id))
     assert "top = str(by_cat.index[0])" in debug_payload["generated_code"]
     assert debug_payload["code_critique"]["verdict"] == "pass"
+    generated_code_artifacts = [
+        item
+        for item in adapter.list_artifacts(run_id=run.run_id, artifact_type=ArtifactType.file)
+        if item.metadata.get("kind") == "analysis_generated_code"
+    ]
+    assert len(generated_code_artifacts) == 1
+    generated_code_artifact = generated_code_artifacts[0]
+    assert generated_code_artifact.parent_ids == [sql_ref.artifact_id]
+    assert str(generated_code_artifact.local_path).endswith("analysis_generated_code_attempt_1.py")
+    assert "top = str(by_cat.index[0])" in adapter.read_artifact_text(generated_code_artifact.artifact_id)
+    progress_events = adapter.services.run_service.list_events(run.run_id)
+    generate_completed = next(
+        event
+        for event in progress_events
+        if event.event_type == "analysis.progress"
+        and event.metadata.get("stage") == "generate"
+        and event.metadata.get("status") == "completed"
+    )
+    assert generate_completed.metadata["generated_code_artifact_id"] == generated_code_artifact.artifact_id
     assert all(check.passed for check in envelope.validation.local_checks)
 
 
@@ -363,7 +382,7 @@ def test_agent_review_required_registers_public_and_debug_artifacts(adapter: Bac
     assert parsed.review_request is not None
     assert parsed.human_review.reason == "Use the top revenue category as the follow-up segment?"
     assert parsed.debug_artifact_id == debug_id
-    assert parsed.generated_code == ""
+    assert "review_request" in parsed.generated_code
     assert debug_payload["generated_code"]
     assert debug_payload["code_critique"]["verdict"] == "review_required"
     artifact = adapter.get_artifact(public_id)

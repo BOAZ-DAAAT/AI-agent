@@ -11,6 +11,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     _extract_json_object,
     execute_generated_code,
     generate_analysis_code,
+    inspect_generated_code,
 )
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes import generate as generate_module
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
@@ -159,6 +160,105 @@ def test_primitives_namespace_is_available() -> None:
     out = execute_generated_code(_code(body), _frame())
     assert "analyze_survival" in out["findings"]
     assert out["statistics"]["n"] >= 1
+
+
+def test_preflight_allows_simple_groupby() -> None:
+    code = _code(
+        "summary = df.groupby('category')['value'].sum().to_dict()\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': summary, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"category": ["a", "a", "b"], "value": [1, 2, 3]})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+    assert plan.risk_level == "low"
+
+
+def test_preflight_allows_small_statsmodels_ols() -> None:
+    code = _code(
+        "model = sm.OLS(df['y'], sm.add_constant(df[['x']])).fit()\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}",
+        imports="import statsmodels.api as sm",
+    )
+    frame = pd.DataFrame({"x": range(50), "y": range(50)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_allows_small_kmeans_or_pca() -> None:
+    code = _code(
+        "labels = KMeans(n_clusters=2, random_state=0).fit_predict(df[['x', 'y']])\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': int(len(labels))}, 'limitations': []}",
+        imports="from sklearn.cluster import KMeans",
+    )
+    frame = pd.DataFrame({"x": range(100), "y": range(100)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_flags_grid_search() -> None:
+    code = _code(
+        "search = GridSearchCV(model, {'n_estimators': [10, 100]}).fit(X, y)\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}",
+        imports="from sklearn.model_selection import GridSearchCV",
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("search" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_large_fit() -> None:
+    code = _code(
+        "model = SomeEstimator().fit(df[['x']], df['y'])\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(100_001), "y": range(100_001)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("large" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_while_loop() -> None:
+    code = _code(
+        "while True:\n"
+        "    break\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}"
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("while" in reason for reason in plan.reasons)
+
+
+def test_execute_generated_code_subprocess_success() -> None:
+    out = execute_generated_code(
+        _code("result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}"),
+        _frame(),
+        isolated=True,
+        timeout_seconds=30,
+    )
+
+    assert out["statistics"]["n"] == len(_frame())
+
+
+def test_execute_generated_code_subprocess_timeout() -> None:
+    with pytest.raises(AnalysisCodeError, match="exceeded execution timeout"):
+        execute_generated_code(
+            _code("while True:\n    pass"),
+            _frame(),
+            isolated=True,
+            timeout_seconds=0.5,
+        )
 
 
 def test_records_are_materialized_only_when_a_primitive_is_called(monkeypatch) -> None:

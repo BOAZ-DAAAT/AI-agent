@@ -46,7 +46,7 @@ class AnalysisWorkflowState(TypedDict, total=False):
     classify_model: Any | None
     code_generator_model: Any | None
     critic_model: Any | None
-    progress_callback: Callable[[str, str, int], None] | None
+    progress_callback: Callable[..., None] | None
     chart_artifact_loader: Any | None
     chart_reader: Any | None
     analysis_context: AnalysisContext
@@ -264,7 +264,7 @@ def run_analysis_workflow(
     chart_reader: Any | None = None,
     code_generator_model: Any | None = None,
     critic_model: Any | None = None,
-    progress_callback: Callable[[str, str, int], None] | None = None,
+    progress_callback: Callable[..., None] | None = None,
 ) -> tuple[dict[str, Any], list[LocalCheck], str]:
     """Run the analysis graph. `planner_model` maps to the classify step."""
 

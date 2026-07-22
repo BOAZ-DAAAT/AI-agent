@@ -66,8 +66,8 @@ class AnalysisAgent:
             critic_model=critic_model,
             chart_artifact_loader=chart_artifact_loader,
             chart_reader=chart_reader,
-            progress_callback=lambda stage, status, attempt: _emit_progress(
-                runtime, state, stage, status, attempt
+            progress_callback=lambda stage, status, attempt, metadata=None: _emit_progress(
+                runtime, state, stage, status, attempt, metadata
             ),
         )
         _emit_progress(runtime, state, "workflow", "completed", int(result.get("codegen_attempts") or 0))
@@ -271,30 +271,98 @@ def _emit_progress(
     stage: str,
     status: str,
     attempt: int,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     messages = {
         ("workflow", "started"): "analysis_agent execution started",
         ("inputs", "loaded"): "analysis input artifacts loaded",
         ("generate", "started"): "analysis code generation started",
         ("generate", "completed"): "analysis code generation completed",
+        ("execute.preflight", "started"): "analysis generated code preflight started",
+        ("execute.preflight", "completed"): "analysis generated code preflight completed",
         ("execute", "started"): "generated analysis code execution started",
         ("execute", "completed"): "generated analysis code execution completed",
+        ("execute", "skipped_manual_run"): "generated analysis code execution skipped for manual run",
+        ("contract_check", "started"): "analysis result contract check started",
+        ("contract_check", "completed"): "analysis result contract check completed",
         ("critic", "started"): "analysis method review started",
         ("critic", "completed"): "analysis method review completed",
+        ("critic", "skipped_precheck"): "analysis method review skipped by deterministic precheck",
         ("workflow", "completed"): "analysis workflow completed",
     }
     message = messages.get((stage, status), f"analysis {stage}: {status}")
+    event_metadata = {
+        "stage": stage,
+        "status": status,
+        "attempt": attempt,
+        **_progress_metadata(runtime, state, stage, status, attempt, metadata or {}),
+    }
     try:
         runtime.adapter.append_run_event(
             state.run_id,
             "analysis.progress",
             message,
             node_name="analysis_agent",
-            metadata={"stage": stage, "status": status, "attempt": attempt},
+            metadata=event_metadata,
         )
     except Exception:
         # Telemetry is auxiliary. Do not fail a completed analysis when event storage is unavailable.
         pass
+
+
+def _progress_metadata(
+    runtime: AgentRuntime,
+    state: OrchestrationState,
+    stage: str,
+    status: str,
+    attempt: int,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    if stage == "generate" and status == "completed" and metadata.get("generated_code"):
+        artifact_id = _save_generated_code_artifact(runtime, state, attempt, metadata)
+        return {
+            "generated_code_artifact_id": artifact_id,
+            "generated_code_length": len(str(metadata.get("generated_code") or "")),
+        } if artifact_id else {"generated_code_length": len(str(metadata.get("generated_code") or ""))}
+    return dict(metadata)
+
+
+def _save_generated_code_artifact(
+    runtime: AgentRuntime,
+    state: OrchestrationState,
+    attempt: int,
+    metadata: dict[str, Any],
+) -> str:
+    code = str(metadata.get("generated_code") or "")
+    imports = str(metadata.get("generated_imports") or "")
+    source = f"{imports}\n{code}" if imports else code
+    if not source.strip():
+        return ""
+    try:
+        context = runtime.context(state, node_name="analysis_agent", tool_name="analysis_agent.generated_code")
+        ref = runtime.adapter.register_artifact(
+            state.run_id,
+            ArtifactType.file,
+            content_text=source,
+            filename=f"analysis_generated_code_attempt_{attempt}.py",
+            created_by_tool="DATA_Analyst_Assistant_Agent.analysis.generated_code",
+            context=context,
+            parent_ids=state.artifact_ids.get("sql_agent", []) + state.artifact_ids.get("eda_agent", []),
+            lineage_edge_type="derived_from",
+            metadata={
+                "kind": "analysis_generated_code",
+                "attempt": attempt,
+                "rationale": str(metadata.get("generated_rationale") or ""),
+            },
+            preview={
+                "attempt": attempt,
+                "code_length": len(source),
+                "rationale": str(metadata.get("generated_rationale") or "")[:500],
+            },
+        )
+    except Exception:
+        return ""
+    return ref.artifact_id
 
 
 def _is_json_profile_artifact(runtime: AgentRuntime, artifact_id: str) -> bool:
@@ -338,7 +406,6 @@ def _debug_payload(result: dict[str, Any], terminal_reason: str) -> dict[str, An
 def _public_result_payload(result: dict[str, Any], debug_artifact_id: str) -> dict[str, Any]:
     payload = dict(result)
     payload["debug_artifact_id"] = debug_artifact_id
-    payload["generated_code"] = ""
     payload["code_critique"] = None
     payload["error_history"] = []
     return payload

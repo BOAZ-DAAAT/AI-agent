@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import builtins
 import json
+import multiprocessing as mp
+import os
+import queue
 import re
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import pandas as pd
@@ -34,6 +38,24 @@ from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 class AnalysisCodeError(RuntimeError):
     """Raised when generated code fails to produce a valid result dict."""
+
+
+@dataclass(frozen=True)
+class CodeExecutionPlan:
+    decision: str
+    risk_level: str
+    reasons: list[str] = field(default_factory=list)
+    row_count: int = 0
+    column_count: int = 0
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "risk_level": self.risk_level,
+            "reasons": list(self.reasons),
+            "row_count": self.row_count,
+            "column_count": self.column_count,
+        }
 
 
 # Vetted heavy methods generated code may call instead of reimplementing.
@@ -66,6 +88,9 @@ _SAFE_BUILTIN_NAMES = (
 
 
 REQUIRED_RESULT_KEYS = ("summary", "findings", "statistics", "limitations")
+DEFAULT_CODE_EXEC_TIMEOUT_SECONDS = 600.0
+SMALL_MODELING_ROW_LIMIT = 10_000
+LARGE_MODELING_ROW_LIMIT = 100_000
 
 
 GENERATE_SYSTEM_PROMPT = """You write one small, auditable Python analysis script.
@@ -387,10 +412,97 @@ def generate_analysis_code(
     return result if isinstance(result, GeneratedAnalysisCode) else GeneratedAnalysisCode.model_validate(result)
 
 
+def inspect_generated_code(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+) -> CodeExecutionPlan:
+    source = _source_for_code(code)
+    lowered = source.lower()
+    row_count = int(len(dataframe))
+    column_count = int(len(dataframe.columns))
+    reasons: list[str] = []
+
+    blocked_patterns = (
+        ("file/network/process access is not allowed", r"\b(open|eval|exec|compile)\s*\("),
+        (
+            "filesystem/network/process module usage is not allowed",
+            r"(^|\n)\s*(import|from)\s+(os|sys|subprocess|socket|pathlib|requests|urllib)\b|\b(os|sys|subprocess|socket|pathlib|requests|urllib)\s*\.",
+        ),
+    )
+    for reason, pattern in blocked_patterns:
+        if re.search(pattern, lowered):
+            return CodeExecutionPlan(
+                decision="blocked_unsafe",
+                risk_level="high",
+                reasons=[reason],
+                row_count=row_count,
+                column_count=column_count,
+            )
+
+    if re.search(r"\bwhile\b", lowered):
+        reasons.append("while loop may run indefinitely")
+    if re.search(r"\b(gridsearchcv|randomizedsearchcv|cross_val_score|cross_validate)\b", lowered):
+        reasons.append("cross-validation or hyperparameter search can be long-running")
+    if re.search(r"\b(randomforest|gradientboosting|xgboost|xgb|lightgbm|catboost)\b", lowered):
+        reasons.append("tree ensemble training can be long-running")
+    if re.search(r"\b(bootstrap|permutation|simulation|monte.?carlo)\b", lowered) and re.search(r"\bfor\b|\brange\s*\(", lowered):
+        reasons.append("simulation or resampling loop detected")
+    nested_loop_count = len(re.findall(r"\bfor\b", lowered))
+    if nested_loop_count >= 2 and row_count > SMALL_MODELING_ROW_LIMIT:
+        reasons.append("multiple loops on a non-small dataframe may be expensive")
+
+    fitting_detected = bool(re.search(r"\.fit(_predict|_transform)?\s*\(", lowered))
+    simple_modeling = bool(re.search(r"\b(ols|glm|logit|kmeans|pca)\b", lowered))
+    if fitting_detected:
+        if row_count > LARGE_MODELING_ROW_LIMIT:
+            reasons.append("model fitting on a large dataframe")
+        elif row_count > SMALL_MODELING_ROW_LIMIT and not simple_modeling:
+            reasons.append("model fitting on a medium dataframe without an explicitly lightweight method")
+
+    if reasons:
+        return CodeExecutionPlan(
+            decision="manual_run_recommended",
+            risk_level="high" if any("large" in reason or "indefinitely" in reason for reason in reasons) else "medium",
+            reasons=reasons,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    return CodeExecutionPlan(
+        decision="auto_run",
+        risk_level="low",
+        reasons=["code passed preflight for automatic execution"],
+        row_count=row_count,
+        column_count=column_count,
+    )
+
+
 def execute_generated_code(
-    code: GeneratedAnalysisCode, dataframe: pd.DataFrame
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+    *,
+    isolated: bool = False,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run generated code in the opened sandbox and return its `result` dict."""
+
+    if isolated:
+        return _execute_generated_code_isolated(
+            code,
+            dataframe,
+            timeout_seconds=_code_exec_timeout_seconds(timeout_seconds),
+        )
+    return _execute_generated_code_inline(code, dataframe)
+
+
+def _source_for_code(code: GeneratedAnalysisCode) -> str:
+    return f"{code.imports}\n{code.code}" if code.imports else code.code
+
+
+def _execute_generated_code_inline(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+) -> dict[str, Any]:
+    """Run generated code in-process. Tests and the subprocess worker use this."""
 
     import math
     import numpy as np
@@ -404,7 +516,7 @@ def execute_generated_code(
         "df": dataframe.copy(),
         "result": None,
     }
-    source = f"{code.imports}\n{code.code}" if code.imports else code.code
+    source = _source_for_code(code)
     try:
         # Use a single namespace so comprehensions/generators can resolve
         # top-level variables created by generated code.
@@ -419,3 +531,51 @@ def execute_generated_code(
     if missing:
         raise AnalysisCodeError(f"result dict is missing required keys: {missing}")
     return result
+
+
+def _code_exec_timeout_seconds(value: float | None) -> float:
+    if value is not None:
+        return float(value)
+    return float(os.getenv("ANALYSIS_CODE_EXEC_TIMEOUT_SECONDS", str(DEFAULT_CODE_EXEC_TIMEOUT_SECONDS)))
+
+
+def _execute_generated_code_isolated(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=_execute_generated_code_worker,
+        args=(code.model_dump(mode="json"), dataframe, result_queue),
+    )
+    process.start()
+    process.join(timeout_seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        raise AnalysisCodeError(f"generated code exceeded execution timeout: {timeout_seconds:g} seconds")
+    try:
+        payload = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise AnalysisCodeError("generated code worker exited without returning a result.") from exc
+    if not payload.get("ok"):
+        raise AnalysisCodeError(str(payload.get("error") or "generated code failed in isolated worker."))
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise AnalysisCodeError("generated code worker returned an invalid result payload.")
+    return result
+
+
+def _execute_generated_code_worker(
+    code_payload: dict[str, Any],
+    dataframe: pd.DataFrame,
+    result_queue: Any,
+) -> None:
+    try:
+        code = GeneratedAnalysisCode.model_validate(code_payload)
+        result_queue.put({"ok": True, "result": _execute_generated_code_inline(code, dataframe)})
+    except Exception as exc:  # noqa: BLE001
+        result_queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
