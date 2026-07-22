@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from typing import Any
 
@@ -15,7 +16,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     make_decide_next_action_node,
     make_execute_subagent_node,
     make_finalize_node,
+    make_rewrite_retrieval_query_node,
     make_retrieve_analysis_rules_node,
+    _retrieve_diverse_analysis_hits,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
 from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
@@ -36,6 +39,13 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import ReviewRequest
 
 
+@pytest.fixture(autouse=True)
+def _disable_remote_rule_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    import DATA_Analyst_Assistant_Agent.supervisor.graph as graph_module
+
+    monkeypatch.setattr(graph_module, "_default_analysis_rule_search", lambda *_args, **_kwargs: [])
+
+
 class FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
@@ -48,6 +58,18 @@ class SequencedDecisionModel:
 
     def invoke(self, messages: list[dict[str, str]]) -> FakeMessage:
         self.messages.append(messages)
+        if "semantic search 검색문 생성기" in messages[0]["content"]:
+            payload = json.loads(messages[1]["content"])
+            query = payload.get("clarified_query") or payload.get("original_query") or ""
+            answers = payload.get("clarification_answers") or []
+            if answers:
+                query = f"{payload.get('original_query', '')} {' '.join(answers)}".strip()
+            return FakeMessage(
+                json.dumps(
+                    {"retrieval_query": query, "reason": "테스트 검색문 생성"},
+                    ensure_ascii=False,
+                )
+            )
         decision = self.decisions.pop(0)
         return FakeMessage(json.dumps(decision, ensure_ascii=False))
 
@@ -292,6 +314,8 @@ def test_retrieve_analysis_rules_uses_llm_to_select_only_query_relevant_rules() 
             "document_id": "purchase_frequency",
             "doc_type": "analysis_query_rule",
             "score": 0.94,
+            "dense_score": 0.94,
+            "rerank_score": None,
             "sections": ["metric_definitions"],
             "record_count": 1,
         }
@@ -364,7 +388,7 @@ def test_retrieve_analysis_rules_reserves_context_for_foundation_documents() -> 
         "analysis_foundation",
         "analysis_foundation",
     ]
-    assert updates["analysis_rule_retrieval"]["hit_count"] == 4
+    assert updates["analysis_rule_retrieval"]["hit_count"] == 5
     assert updates["analysis_rule_retrieval"]["unique_document_count"] == 4
 
 
@@ -381,6 +405,96 @@ def test_retrieve_analysis_rules_fails_open_when_search_errors() -> None:
     assert updates["current_step"] == "retrieve_analysis_rules"
     assert updates["terminal_state"] == "running"
     assert "pinecone unavailable" in updates["limitations"][-1]
+
+
+def test_rewrite_retrieval_query_falls_back_to_original_query() -> None:
+    class FailingModel:
+        def invoke(self, _messages):
+            raise RuntimeError("rewrite unavailable")
+
+    state = _state("원본 매출 질문")
+    state["clarified_query"] = "변경된 분석 질문"
+    updates = make_rewrite_retrieval_query_node(FailingModel())(state)
+
+    assert updates["retrieval_query"] == "원본 매출 질문"
+    assert updates["retrieval_query_generation"]["status"] == "fallback"
+    assert updates["terminal_state"] == "running"
+
+
+def test_rerank_selection_limits_chunks_and_guarantees_required_types() -> None:
+    def hit(record_id: str, document_id: str, doc_type: str, score: float) -> CompanyContextHit:
+        return CompanyContextHit(
+            record_id=record_id,
+            score=score,
+            text=record_id,
+            document_id=document_id,
+            title=document_id,
+            metadata={"doc_type": doc_type, "record_type": "rule_atom"},
+        )
+
+    groups = {
+        "analysis_query_rule": [
+            hit(f"query-{index}", "query-doc", "analysis_query_rule", 1 - index / 100)
+            for index in range(5)
+        ],
+        "analysis_foundation": [
+            hit("foundation-1", "foundation-doc", "analysis_foundation", 0.3)
+        ],
+        "analysis_integrity_caution": [
+            hit("integrity-1", "integrity-doc", "analysis_integrity_caution", 0.2)
+        ],
+    }
+
+    def fake_search(_query: str, **kwargs: Any) -> list[CompanyContextHit]:
+        return groups[kwargs["metadata_filter"]["doc_type"]]
+
+    def fake_rerank(_query: str, hits: list[CompanyContextHit]) -> list[CompanyContextHit]:
+        return [replace(hit, rerank_score=1 - index / 100) for index, hit in enumerate(hits)]
+
+    selected, trace = _retrieve_diverse_analysis_hits(
+        fake_search,
+        "고객 매출",
+        rerank=fake_rerank,
+    )
+
+    assert trace["status"] == "success"
+    assert sum(hit.document_id == "query-doc" for hit in selected) == 2
+    assert {hit.metadata["doc_type"] for hit in selected} >= {
+        "analysis_query_rule",
+        "analysis_foundation",
+    }
+    assert len(selected) <= 12
+
+
+def test_rerank_failure_keeps_dense_order_and_records_limitation() -> None:
+    def fake_search(_query: str, **kwargs: Any) -> list[CompanyContextHit]:
+        doc_type = kwargs["metadata_filter"]["doc_type"]
+        if doc_type != "analysis_query_rule":
+            return []
+        return [
+            CompanyContextHit(
+                record_id="dense-first",
+                score=0.9,
+                text="매출",
+                document_id="sales-orders",
+                title="매출",
+                metadata={"doc_type": doc_type, "record_type": "rule_atom"},
+            )
+        ]
+
+    def failing_rerank(_query: str, _hits: list[CompanyContextHit]) -> list[CompanyContextHit]:
+        raise RuntimeError("reranker down")
+
+    model = SequencedDecisionModel(
+        [{"applicable": True, "rules": ["매출 규칙"], "reason": "관련 규칙"}]
+    )
+    updates = make_retrieve_analysis_rules_node(fake_search, model, failing_rerank)(
+        _state("매출")
+    )
+
+    assert updates["analysis_rule_retrieval"]["rerank"]["status"] == "failed"
+    assert "reranker down" in updates["limitations"][-1]
+    assert updates["analysis_rule_retrieval"]["retrieved_documents"][0]["dense_score"] == 0.9
 
 
 class RecordingBackendAdapter:
@@ -524,6 +638,7 @@ def test_supervisor_graph_runs_all_llm_nodes_and_finalizes() -> None:
     ]
     assert result["final_answer"] == "분석이 완료되었습니다."
     assert [entry["node"] for entry in result["llm_decisions"]] == [
+        "rewrite_retrieval_query",
         "clarify_query",
         "create_analysis_plan",
         "decide_next_action",
@@ -667,6 +782,7 @@ def test_supervisor_graph_has_expected_nodes() -> None:
 
     assert set(graph.nodes) == {
         "__start__",
+        "rewrite_retrieval_query",
         "retrieve_analysis_rules",
         "clarify_query",
         "collect_clarification",
@@ -997,6 +1113,12 @@ def test_clarification_interrupt_returns_payload_and_skips_subagents() -> None:
 
 def test_clarification_resume_continues_from_create_analysis_plan() -> None:
     adapter = FakeSubAgentAdapter()
+    search_queries: list[str] = []
+
+    def fake_search(query: str, **_kwargs: Any) -> list[Any]:
+        search_queries.append(query)
+        return []
+
     graph = build_graph(
         subagent_adapter=adapter,
         model=SequencedDecisionModel(
@@ -1006,12 +1128,14 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
                     clarified_query="매출",
                     clarification_question="어떤 기간과 단위로 매출을 분석할까요?",
                 ),
+                _clarify_decision(clarified_query="최근 6개월 월별 매출"),
                 _plan_decision(),
                 _next_action_decision("finalize"),
                 _final_decision(),
             ]
         ),
         checkpointer=InMemorySaver(),
+        analysis_rule_search=fake_search,
     )
     config = {"configurable": {"thread_id": "thread_clarify_001"}}
 
@@ -1024,7 +1148,11 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
     assert resumed["analysis_plan"]["goal"] == "월별 매출 추이 분석"
     assert resumed["clarified_query"] == "최근 6개월 월별 매출"
     assert "추가 답변:" not in resumed["clarified_query"]
+    assert search_queries == ["매출"] * 3 + ["매출 최근 6개월 월별 매출"] * 3
     assert [entry["node"] for entry in resumed["llm_decisions"]] == [
+        "rewrite_retrieval_query",
+        "clarify_query",
+        "rewrite_retrieval_query",
         "clarify_query",
         "create_analysis_plan",
         "decide_next_action",
@@ -1708,5 +1836,5 @@ def test_invalid_llm_json_becomes_terminal_failure_without_fallback() -> None:
     result = graph.invoke(_state(), {"configurable": {"thread_id": "thread_sales_001"}})
 
     assert result["terminal_state"] == "failed_terminal"
-    assert result["decision_errors"][0]["node"] == "clarify_query"
+    assert any(error["node"] == "clarify_query" for error in result["decision_errors"])
     assert result["completed_agents"] == []

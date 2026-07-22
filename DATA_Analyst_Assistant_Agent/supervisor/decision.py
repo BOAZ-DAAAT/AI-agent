@@ -58,6 +58,11 @@ class ClarificationDecision(BaseModel):
     reason: str = ""
 
 
+class RetrievalQueryDecision(BaseModel):
+    retrieval_query: str
+    reason: str = ""
+
+
 class AnalysisPlanDecision(BaseModel):
     goal: str
     route_kind: RouteKind = "simple"

@@ -1,0 +1,22 @@
+[
+  {"id":"sales_orders_01","query":"월별 주문 매출이 최근 1년 동안 어떻게 변했는지 보고 싶어","primary_document_id":"sales-orders","required_document_ids":["sales-orders","time-status-population-rules"]},
+  {"id":"sales_orders_02","query":"취소 주문을 제외한 분기별 매출과 주문 수 추이를 비교해줘","primary_document_id":"sales-orders","required_document_ids":["sales-orders","sales-order-metrics"]},
+  {"id":"purchase_frequency_01","query":"한 번만 산 고객과 반복 구매 고객의 비중을 알고 싶어","primary_document_id":"purchase-frequency","required_document_ids":["purchase-frequency","customer-metrics"]},
+  {"id":"purchase_frequency_02","query":"고객별 재구매 횟수를 계산해서 자주 사는 고객을 찾아줘","primary_document_id":"purchase-frequency","required_document_ids":["purchase-frequency","customer-metrics"]},
+  {"id":"customer_value_01","query":"고객별 누적 구매금액으로 고가치 고객군을 나눠줘","primary_document_id":"customer-value","required_document_ids":["customer-value","metric-definitions"]},
+  {"id":"customer_value_02","query":"최근성·구매빈도·구매금액을 이용해 고객 가치를 분석해줘","primary_document_id":"customer-value","required_document_ids":["customer-value","customer-metrics"]},
+  {"id":"delivery_delay_01","query":"예정일보다 늦게 도착한 주문의 지연 일수를 분석해줘","primary_document_id":"delivery-delay","required_document_ids":["delivery-delay","metric-definitions"]},
+  {"id":"delivery_delay_02","query":"배송 지연율이 높은 달과 상품군을 찾아 원인을 살펴봐줘","primary_document_id":"delivery-delay","required_document_ids":["delivery-delay","delivery-metrics"]},
+  {"id":"product_category_01","query":"상품 카테고리별 매출과 판매 수량 순위를 보여줘","primary_document_id":"product-category","required_document_ids":["product-category","metric-definitions"]},
+  {"id":"product_category_02","query":"카테고리마다 평균 주문금액과 주문 건수가 어떻게 다른지 비교해줘","primary_document_id":"product-category","required_document_ids":["product-category","metric-definitions"]},
+  {"id":"seller_performance_01","query":"판매자별 매출과 주문 처리 성과를 비교해서 상위 판매자를 찾아줘","primary_document_id":"seller-performance","required_document_ids":["seller-performance","sales-order-metrics"]},
+  {"id":"seller_performance_02","query":"배송 지연과 낮은 리뷰가 많은 판매자를 점검해줘","primary_document_id":"seller-performance","required_document_ids":["seller-performance","delivery-metrics"]},
+  {"id":"review_satisfaction_01","query":"리뷰 점수 분포와 평균 만족도가 월별로 어떻게 달라졌어?","primary_document_id":"review-satisfaction","required_document_ids":["review-satisfaction","review-metrics"]},
+  {"id":"review_satisfaction_02","query":"낮은 별점을 받은 주문의 배송 특성을 분석해줘","primary_document_id":"review-satisfaction","required_document_ids":["review-satisfaction","metric-definitions"]},
+  {"id":"payment_behavior_01","query":"고객들이 어떤 결제 수단을 가장 많이 쓰는지 금액과 건수로 비교해줘","primary_document_id":"payment-behavior","required_document_ids":["payment-behavior","sales-order-metrics"]},
+  {"id":"payment_behavior_02","query":"할부 개월 수에 따라 주문금액과 구매 패턴이 달라지는지 보고 싶어","primary_document_id":"payment-behavior","required_document_ids":["payment-behavior","table-order-payments"]},
+  {"id":"regional_analysis_01","query":"주별 고객 수와 매출을 비교해서 핵심 지역을 찾아줘","primary_document_id":"regional-analysis","required_document_ids":["regional-analysis","sales-order-metrics"]},
+  {"id":"regional_analysis_02","query":"판매자 지역과 고객 지역 사이의 배송거리별 지연 차이를 분석해줘","primary_document_id":"regional-analysis","required_document_ids":["regional-analysis","delivery-metrics"]},
+  {"id":"combined_value_frequency","query":"구매 빈도와 누적 구매금액을 함께 봐서 충성 고객을 찾아줘","primary_document_id":"customer-value","required_document_ids":["customer-value","purchase-frequency","customer-metrics"]},
+  {"id":"combined_sales_payment","query":"월별 매출 추이와 결제수단별 매출 기여도를 같이 분석해줘","primary_document_id":"sales-orders","required_document_ids":["sales-orders","payment-behavior","sales-order-metrics"]}
+]

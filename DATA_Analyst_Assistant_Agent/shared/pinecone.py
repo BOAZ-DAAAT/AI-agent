@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Iterable, Mapping
 
@@ -41,6 +41,7 @@ DEFAULT_RETURN_FIELDS = (
     "rule",
     "rule_name",
     "rule_metadata",
+    "source_text",
 )
 MAX_UPSERT_RECORDS_PER_BATCH = 96
 
@@ -57,6 +58,10 @@ class PineconeUpsertError(RuntimeError):
     """Raised when Pinecone rejects or cannot complete a context upsert."""
 
 
+class PineconeRerankError(RuntimeError):
+    """Pinecone reranker 호출이 실패했을 때 발생합니다."""
+
+
 @dataclass(frozen=True)
 class PineconeSettings:
     api_key: str = field(repr=False)
@@ -65,6 +70,8 @@ class PineconeSettings:
     text_field: str = "text"
     top_k: int = 5
     timeout_seconds: float = 10.0
+    rerank_enabled: bool = True
+    rerank_model: str = "bge-reranker-v2-m3"
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -80,6 +87,8 @@ class PineconeSettings:
             raise PineconeConfigurationError("PINECONE_TOP_K는 1 이상이어야 합니다.")
         if self.timeout_seconds <= 0:
             raise PineconeConfigurationError("PINECONE_TIMEOUT_SECONDS는 0보다 커야 합니다.")
+        if self.rerank_enabled and not self.rerank_model.strip():
+            raise PineconeConfigurationError("PINECONE_RERANK_MODEL은 비어 있을 수 없습니다.")
 
     @classmethod
     def from_env(cls) -> "PineconeSettings":
@@ -97,6 +106,8 @@ class PineconeSettings:
             text_field=os.getenv("PINECONE_TEXT_FIELD", "text"),
             top_k=top_k,
             timeout_seconds=timeout_seconds,
+            rerank_enabled=_environment_boolean("PINECONE_RERANK_ENABLED", True),
+            rerank_model=os.getenv("PINECONE_RERANK_MODEL", "bge-reranker-v2-m3"),
         )
 
 
@@ -108,6 +119,7 @@ class CompanyContextHit:
     document_id: str
     title: str
     metadata: dict[str, Any]
+    rerank_score: float | None = None
 
 
 CompanyContextRecord = dict[str, Any]
@@ -123,6 +135,47 @@ def get_pinecone_index(settings: PineconeSettings | None = None) -> Any:
 
     resolved = settings or PineconeSettings.from_env()
     return _get_cached_index(resolved.api_key, resolved.index_name)
+
+
+def rerank_company_context(
+    query: str,
+    hits: Iterable[CompanyContextHit],
+    *,
+    settings: PineconeSettings | None = None,
+    client: Any | None = None,
+) -> list[CompanyContextHit]:
+    """dense 검색 후보를 Pinecone 다국어 reranker로 한 번에 재정렬합니다."""
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("Pinecone rerank 검색어는 비어 있을 수 없습니다.")
+
+    candidates = _unique_hits_by_record_id(hits)
+    if not candidates:
+        return []
+
+    resolved = settings or PineconeSettings.from_env()
+    if not resolved.rerank_enabled:
+        return candidates
+
+    inference_client = client or Pinecone(api_key=resolved.api_key)
+    documents = [
+        {"id": hit.record_id, "text": hit.text}
+        for hit in candidates
+    ]
+    try:
+        response = inference_client.inference.rerank(
+            model=resolved.rerank_model,
+            query=normalized_query,
+            documents=documents,
+            rank_fields=["text"],
+            return_documents=False,
+            top_n=len(documents),
+        )
+        reranked = _map_rerank_results(response, candidates)
+    except Exception as exc:
+        raise PineconeRerankError(f"Pinecone 문맥 rerank에 실패했습니다: {exc}") from exc
+    return reranked
 
 
 def search_company_context(
@@ -221,6 +274,40 @@ def _normalize_hit(hit: Any, text_field: str) -> CompanyContextHit:
     )
 
 
+def _unique_hits_by_record_id(
+    hits: Iterable[CompanyContextHit],
+) -> list[CompanyContextHit]:
+    unique: dict[str, CompanyContextHit] = {}
+    for hit in hits:
+        key = hit.record_id or f"{hit.document_id}:{len(unique)}"
+        current = unique.get(key)
+        if current is None or hit.score > current.score:
+            unique[key] = hit
+    return sorted(unique.values(), key=lambda hit: hit.score, reverse=True)
+
+
+def _map_rerank_results(
+    response: Any,
+    candidates: list[CompanyContextHit],
+) -> list[CompanyContextHit]:
+    data = list(_read_value(response, "data", []) or [])
+    mapped: list[CompanyContextHit] = []
+    used_indexes: set[int] = set()
+    for item in data:
+        index = int(_read_value(item, "index", -1))
+        if index < 0 or index >= len(candidates) or index in used_indexes:
+            continue
+        score = float(_read_value(item, "score", 0.0) or 0.0)
+        mapped.append(replace(candidates[index], rerank_score=score))
+        used_indexes.add(index)
+    mapped.extend(
+        candidate
+        for index, candidate in enumerate(candidates)
+        if index not in used_indexes
+    )
+    return mapped
+
+
 def _normalize_upsert_record(record: Mapping[str, Any], text_field: str) -> CompanyContextRecord:
     raw = _as_dict(record)
     if not raw:
@@ -297,3 +384,15 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "to_dict"):
         return dict(value.to_dict())
     return {}
+
+
+def _environment_boolean(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise PineconeConfigurationError(f"{name}은 true 또는 false여야 합니다.")

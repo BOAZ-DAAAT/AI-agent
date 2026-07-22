@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
     FinalizationDecision,
     SemanticValidationAdvisoryDecision,
     SupervisorDecision,
+    RetrievalQueryDecision,
     build_clarification_context,
     build_finalization_context,
     build_next_action_context,
@@ -37,6 +39,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     DECIDE_NEXT_ACTION_PROMPT,
     FINALIZE_DECISION_PROMPT,
     PLAN_DECISION_PROMPT,
+    REWRITE_RETRIEVAL_QUERY_PROMPT,
     SEMANTIC_VALIDATION_ADVISORY_PROMPT,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -108,20 +111,89 @@ def _default_analysis_rule_search(query: str, **kwargs: Any) -> list[Any]:
     return search_company_context(query, **kwargs)
 
 
+def _default_analysis_rule_rerank(query: str, hits: list[Any]) -> list[Any]:
+    from DATA_Analyst_Assistant_Agent.shared.pinecone import rerank_company_context
+
+    return rerank_company_context(query, hits)
+
+
 ANALYSIS_RULE_CONTEXT_LIMIT = 12
 ANALYSIS_RULE_CANDIDATE_LIMIT = 24
+ANALYSIS_RULE_MAX_CHUNKS_PER_DOCUMENT = 2
 ANALYSIS_RULE_RETRIEVAL_GROUPS = (
-    ("analysis_query_rule", 5),
-    ("analysis_foundation", 6),
-    ("analysis_integrity_caution", 1),
+    "analysis_query_rule",
+    "analysis_foundation",
+    "analysis_integrity_caution",
 )
 
 
-def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | None = None):
+def make_rewrite_retrieval_query_node(model: Any | None):
+    def rewrite_retrieval_query_node(state: SupervisorState) -> SupervisorState:
+        original_query = str(state.get("latest_user_query") or "").strip()
+        try:
+            decision = invoke_supervisor_decision(
+                state,
+                model,
+                REWRITE_RETRIEVAL_QUERY_PROMPT,
+                RetrievalQueryDecision,
+                extra={
+                    "original_query": original_query,
+                    "clarified_query": str(state.get("clarified_query") or ""),
+                    "clarification_answers": list(state.get("clarification_answers", [])),
+                },
+            )
+            retrieval_query = decision.retrieval_query.strip() or original_query
+            return {
+                "retrieval_query": retrieval_query,
+                "retrieval_query_generation": {
+                    "status": "success",
+                    "reason": decision.reason,
+                },
+                "current_step": "rewrite_retrieval_query",
+                "terminal_state": "running",
+                "llm_decisions": _append_llm_decision(
+                    state, "rewrite_retrieval_query", decision
+                ),
+            }
+        except Exception as exc:
+            errors = [
+                *state.get("decision_errors", []),
+                {
+                    "node": "rewrite_retrieval_query",
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+            ]
+            return {
+                "retrieval_query": original_query,
+                "retrieval_query_generation": {
+                    "status": "fallback",
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+                "decision_errors": errors,
+                "current_step": "rewrite_retrieval_query",
+                "terminal_state": "running",
+            }
+
+    return rewrite_retrieval_query_node
+
+
+def make_retrieve_analysis_rules_node(
+    search: Any | None = None,
+    model: Any | None = None,
+    rerank: Any | None = None,
+):
     rule_search = search or _default_analysis_rule_search
+    rule_rerank = rerank if rerank is not None else (
+        _default_analysis_rule_rerank if search is None else None
+    )
 
     def retrieve_analysis_rules_node(state: SupervisorState) -> SupervisorState:
-        query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
+        query = str(state.get("retrieval_query") or state.get("latest_user_query") or "").strip()
+        analysis_query = str(
+            state.get("clarified_query") or state.get("latest_user_query") or ""
+        ).strip()
         base_updates: SupervisorState = {
             "analysis_rule_context": None,
             "current_step": "retrieve_analysis_rules",
@@ -134,7 +206,11 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
             }
 
         try:
-            hits = _retrieve_diverse_analysis_hits(rule_search, query)
+            hits, rerank_trace = _retrieve_diverse_analysis_hits(
+                rule_search,
+                query,
+                rerank=rule_rerank,
+            )
         except Exception as exc:
             status = (
                 "disabled"
@@ -149,17 +225,26 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                     "error_type": exc.__class__.__name__,
                     "message": str(exc),
                 },
-                "limitations": [*state.get("limitations", []), limitation],
+                "limitations": [
+                    *base_updates.get("limitations", state.get("limitations", [])),
+                    limitation,
+                ],
                 "run_events": [
                     *state.get("run_events", []),
                     {"type": "analysis_rule_retrieval", "status": status},
                 ],
             }
 
+        if rerank_trace.get("status") == "failed":
+            base_updates["limitations"] = [
+                *state.get("limitations", []),
+                f"분석 규칙 rerank를 적용하지 못해 dense 검색 순서를 사용했습니다: {rerank_trace['message']}",
+            ]
+
         if not hits:
             return {
                 **base_updates,
-                "analysis_rule_retrieval": {"status": "empty"},
+                "analysis_rule_retrieval": {"status": "empty", "rerank": rerank_trace},
                 "run_events": [
                     *state.get("run_events", []),
                     {"type": "analysis_rule_retrieval", "status": "empty"},
@@ -173,7 +258,7 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 ANALYSIS_RULE_EXTRACTION_PROMPT,
                 AnalysisRuleExtractionDecision,
                 extra={
-                    "user_query": query,
+                    "user_query": analysis_query,
                     "document": _rule_document_payload(hits[0]),
                     "documents": [_rule_document_payload(hit) for hit in hits],
                 },
@@ -186,8 +271,13 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                     "status": "extraction_failed",
                     "error_type": exc.__class__.__name__,
                     "message": str(exc),
+                    "rerank": rerank_trace,
+                    "retrieved_hits": _retrieved_hit_summaries(hits),
                 },
-                "limitations": [*state.get("limitations", []), limitation],
+                "limitations": [
+                    *base_updates.get("limitations", state.get("limitations", [])),
+                    limitation,
+                ],
                 "run_events": [
                     *state.get("run_events", []),
                     {"type": "analysis_rule_retrieval", "status": "extraction_failed"},
@@ -201,6 +291,8 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                     "status": "not_applicable",
                     "document_id": str(_hit_value(hits[0], "document_id", "")),
                     "reason": extraction.reason,
+                    "rerank": rerank_trace,
+                    "retrieved_hits": _retrieved_hit_summaries(hits),
                 },
                 "run_events": [
                     *state.get("run_events", []),
@@ -222,7 +314,9 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
                 "unique_document_count": len(retrieved_documents),
                 "score": float(_hit_value(hits[0], "score", 0.0) or 0.0),
                 "retrieved_documents": retrieved_documents,
+                "retrieved_hits": _retrieved_hit_summaries(hits),
                 "reason": extraction.reason,
+                "rerank": rerank_trace,
             },
             "run_events": [
                 *state.get("run_events", []),
@@ -238,49 +332,102 @@ def make_retrieve_analysis_rules_node(search: Any | None = None, model: Any | No
     return retrieve_analysis_rules_node
 
 
-def _retrieve_diverse_analysis_hits(search: Any, query: str) -> list[Any]:
-    """Reserve final planning context for both intent rules and schema-grounded foundations."""
-    selected: list[Any] = []
-    seen_document_ids: set[str] = set()
+def _retrieve_diverse_analysis_hits(
+    search: Any,
+    query: str,
+    *,
+    rerank: Any | None = None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """문서 유형별 dense 후보를 모아 rerank하고 최종 계획 문맥을 선택합니다."""
     candidates: list[Any] = []
 
-    for doc_type, quota in ANALYSIS_RULE_RETRIEVAL_GROUPS:
+    for doc_type in ANALYSIS_RULE_RETRIEVAL_GROUPS:
         group_hits = search(
             query,
             top_k=ANALYSIS_RULE_CANDIDATE_LIMIT,
             metadata_filter={"doc_type": doc_type},
         )
         candidates.extend(group_hits)
-        for hit in _best_hit_per_document(group_hits):
-            document_id = str(_hit_value(hit, "document_id", "")).strip()
-            if document_id in seen_document_ids:
-                continue
-            selected.append(hit)
-            seen_document_ids.add(document_id)
-            if sum(1 for item in selected if _hit_metadata(item).get("doc_type") == doc_type) >= quota:
-                break
 
-    for hit in _best_hit_per_document(candidates):
-        if len(selected) >= ANALYSIS_RULE_CONTEXT_LIMIT:
-            break
-        document_id = str(_hit_value(hit, "document_id", "")).strip()
-        if document_id in seen_document_ids:
-            continue
-        selected.append(hit)
-        seen_document_ids.add(document_id)
+    deduplicated = _best_hit_per_record(candidates)
+    rerank_trace: dict[str, Any] = {
+        "status": "disabled",
+        "candidate_count": len(deduplicated),
+    }
+    ranked = deduplicated
+    if rerank is not None and deduplicated:
+        try:
+            reranked = list(rerank(query, deduplicated))
+            if any(_hit_value(hit, "rerank_score", None) is not None for hit in reranked):
+                ranked = reranked
+                rerank_trace = {
+                    "status": "success",
+                    "model": os.getenv("PINECONE_RERANK_MODEL", "bge-reranker-v2-m3"),
+                    "candidate_count": len(deduplicated),
+                    "result_count": len(reranked),
+                }
+        except Exception as exc:
+            rerank_trace = {
+                "status": "failed",
+                "model": os.getenv("PINECONE_RERANK_MODEL", "bge-reranker-v2-m3"),
+                "candidate_count": len(deduplicated),
+                "error_type": exc.__class__.__name__,
+                "message": str(exc),
+            }
 
-    return selected[:ANALYSIS_RULE_CONTEXT_LIMIT]
+    if rerank_trace["status"] != "success":
+        ranked = sorted(deduplicated, key=_planning_hit_rank, reverse=True)
+    return _select_analysis_context_hits(ranked), rerank_trace
 
 
-def _best_hit_per_document(hits: list[Any]) -> list[Any]:
+def _best_hit_per_record(hits: list[Any]) -> list[Any]:
     best_hits: dict[str, Any] = {}
     for hit in hits:
+        record_id = str(_hit_value(hit, "record_id", "")).strip()
+        key = record_id or f"{_hit_value(hit, 'document_id', '')}:{len(best_hits)}"
+        current = best_hits.get(key)
+        if current is None or float(_hit_value(hit, "score", 0.0) or 0.0) > float(
+            _hit_value(current, "score", 0.0) or 0.0
+        ):
+            best_hits[key] = hit
+    return sorted(best_hits.values(), key=lambda hit: float(_hit_value(hit, "score", 0.0) or 0.0), reverse=True)
+
+
+def _select_analysis_context_hits(ranked: list[Any]) -> list[Any]:
+    eligible: list[Any] = []
+    per_document: dict[str, int] = {}
+    for hit in ranked:
         document_id = str(_hit_value(hit, "document_id", "")).strip()
         key = document_id or str(_hit_value(hit, "record_id", ""))
-        current = best_hits.get(key)
-        if current is None or _planning_hit_rank(hit) > _planning_hit_rank(current):
-            best_hits[key] = hit
-    return sorted(best_hits.values(), key=_planning_hit_rank, reverse=True)
+        if per_document.get(key, 0) >= ANALYSIS_RULE_MAX_CHUNKS_PER_DOCUMENT:
+            continue
+        per_document[key] = per_document.get(key, 0) + 1
+        eligible.append(hit)
+
+    selected = eligible[:ANALYSIS_RULE_CONTEXT_LIMIT]
+    for required_type in ("analysis_query_rule", "analysis_foundation"):
+        if any(_hit_metadata(hit).get("doc_type") == required_type for hit in selected):
+            continue
+        replacement = next(
+            (hit for hit in eligible if _hit_metadata(hit).get("doc_type") == required_type),
+            None,
+        )
+        if replacement is None:
+            continue
+        replace_index = next(
+            (
+                index
+                for index in range(len(selected) - 1, -1, -1)
+                if _hit_metadata(selected[index]).get("doc_type") not in {
+                    "analysis_query_rule",
+                    "analysis_foundation",
+                }
+            ),
+            len(selected) - 1,
+        )
+        if replace_index >= 0:
+            selected[replace_index] = replacement
+    return selected
 
 
 def _planning_hit_rank(hit: Any) -> tuple[float, int]:
@@ -350,13 +497,15 @@ def _analysis_rule_context(
 
 
 def _rule_document_payload(hit: Any) -> dict[str, Any]:
+    metadata = _hit_metadata(hit)
     return {
         "document_id": _hit_value(hit, "document_id", ""),
         "title": _hit_value(hit, "title", ""),
         "record_id": _hit_value(hit, "record_id", ""),
         "score": _hit_value(hit, "score", 0.0),
-        "metadata": _hit_value(hit, "metadata", {}),
-        "content": _hit_value(hit, "text", ""),
+        "rerank_score": _hit_value(hit, "rerank_score", None),
+        "metadata": metadata,
+        "content": metadata.get("source_text") or _hit_value(hit, "text", ""),
     }
 
 
@@ -373,6 +522,12 @@ def _retrieved_document_summaries(hits: list[Any]) -> list[dict[str, Any]]:
                 "document_id": document_id,
                 "doc_type": str(metadata.get("doc_type") or ""),
                 "score": round(float(_hit_value(hit, "score", 0.0) or 0.0), 6),
+                "dense_score": round(float(_hit_value(hit, "score", 0.0) or 0.0), 6),
+                "rerank_score": (
+                    round(float(_hit_value(hit, "rerank_score", 0.0) or 0.0), 6)
+                    if _hit_value(hit, "rerank_score", None) is not None
+                    else None
+                ),
                 "sections": [],
                 "record_count": 0,
             },
@@ -382,6 +537,23 @@ def _retrieved_document_summaries(hits: list[Any]) -> list[dict[str, Any]]:
             summary["sections"].append(section)
         summary["record_count"] += 1
     return list(summaries.values())
+
+
+def _retrieved_hit_summaries(hits: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "record_id": str(_hit_value(hit, "record_id", "")),
+            "document_id": str(_hit_value(hit, "document_id", "")),
+            "doc_type": str(_hit_metadata(hit).get("doc_type") or ""),
+            "dense_score": round(float(_hit_value(hit, "score", 0.0) or 0.0), 6),
+            "rerank_score": (
+                round(float(_hit_value(hit, "rerank_score", 0.0) or 0.0), 6)
+                if _hit_value(hit, "rerank_score", None) is not None
+                else None
+            ),
+        }
+        for hit in hits[:ANALYSIS_RULE_CONTEXT_LIMIT]
+    ]
 
 
 def _hit_value(hit: Any, key: str, default: Any) -> Any:
@@ -470,6 +642,10 @@ def make_collect_clarification_node():
         clarified_query = _clarified_query_from_answer(base_query, answer)
         return {
             "clarified_query": clarified_query,
+            "clarification_answers": [
+                *state.get("clarification_answers", []),
+                answer,
+            ],
             "needs_clarification": False,
             "clarification_question": "",
             "terminal_state": "running",
@@ -1231,6 +1407,7 @@ def build_graph(
     *,
     insight_generator: Any | None = None,
     analysis_rule_search: Any | None = None,
+    analysis_rule_reranker: Any | None = None,
 ):
     if insight_generator is None:
         if hasattr(subagent_adapter, "generate_insight"):
@@ -1244,8 +1421,16 @@ def build_graph(
     graph = StateGraph(SupervisorState)
     backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
     graph.add_node(
+        "rewrite_retrieval_query",
+        make_rewrite_retrieval_query_node(model),
+    )
+    graph.add_node(
         "retrieve_analysis_rules",
-        make_retrieve_analysis_rules_node(analysis_rule_search, model),
+        make_retrieve_analysis_rules_node(
+            analysis_rule_search,
+            model,
+            analysis_rule_reranker,
+        ),
     )
     graph.add_node("clarify_query", make_clarify_query_node(model))
     graph.add_node("collect_clarification", make_collect_clarification_node())
@@ -1260,7 +1445,8 @@ def build_graph(
     graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
     graph.add_node("finalize", make_finalize_node(model, backend_adapter))
 
-    graph.add_edge(START, "retrieve_analysis_rules")
+    graph.add_edge(START, "rewrite_retrieval_query")
+    graph.add_edge("rewrite_retrieval_query", "retrieve_analysis_rules")
     graph.add_edge("retrieve_analysis_rules", "clarify_query")
     graph.add_conditional_edges(
         "clarify_query",
@@ -1271,7 +1457,7 @@ def build_graph(
             "finalize": "finalize",
         },
     )
-    graph.add_edge("collect_clarification", "create_analysis_plan")
+    graph.add_edge("collect_clarification", "rewrite_retrieval_query")
     graph.add_edge("create_analysis_plan", "decide_next_action")
     graph.add_conditional_edges(
         "decide_next_action",
