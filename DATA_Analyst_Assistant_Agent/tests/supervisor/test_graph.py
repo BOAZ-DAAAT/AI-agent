@@ -12,6 +12,7 @@ from langgraph.types import Command
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     _route_after_decide,
     build_graph,
+    make_clarify_query_node,
     make_create_analysis_plan_node,
     make_decide_next_action_node,
     make_execute_subagent_node,
@@ -682,12 +683,11 @@ def test_semantic_recovery_routes_analysis_candidate_to_sql_then_finalizes() -> 
 
     assert adapter.calls == ["analysis_agent", "sql_agent"]
     assert adapter.insight_calls == 1
-    assert result["semantic_recovery_attempts"] == {"sql_agent": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight"]
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["completed_agents"] == ["analysis_agent", "sql_agent", "insight"]
     assert result["failed_agents"] == []
-    assert result["accepted_evidence"].keys() == {"sql_agent", "insight"}
-    assert len(result["rejected_results"]) == 1
-    assert result["rejected_results"][0]["result"]["agent"] == "analysis_agent"
+    assert result["accepted_evidence"].keys() == {"analysis_agent", "sql_agent", "insight"}
+    assert result["rejected_results"] == []
     assert result["terminal_state"] == "completed"
 
 
@@ -736,6 +736,7 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
             _semantic_decision(),
             _next_action_decision("call_analysis_agent"),
             _semantic_decision(semantic_valid=False, severity="error"),
+            _next_action_decision("finalize"),
             # analysis 실패 → 복구 권고가 없고 근거는 있어 제한적 인사이트 폴백이
             # insight를 직접 스케줄한다(completion_guard가 아니라 semantic recovery).
             _semantic_decision(),
@@ -751,14 +752,10 @@ def test_semantic_recovery_without_recommendation_generates_limited_insight_from
 
     assert adapter.calls == ["sql_agent", "analysis_agent"]
     assert adapter.insight_calls == 1
-    assert result["semantic_recovery_attempts"] == {"insight": 1}
-    assert result["completed_agents"] == ["sql_agent", "insight"]
-    assert "analysis_agent" not in result["accepted_evidence"]
-    assert any("제한적 인사이트" in item for item in result["limitations"])
-    assert any(
-        event["type"] == "semantic_recovery.limited_insight"
-        for event in result["run_events"]
-    )
+    assert result["semantic_recovery_attempts"] == {}
+    assert result["completed_agents"] == ["sql_agent", "analysis_agent", "insight"]
+    assert result["accepted_evidence"].keys() == {"sql_agent", "analysis_agent", "insight"}
+    assert result["rejected_results"] == []
     assert result["terminal_state"] == "completed"
 
 
@@ -1128,7 +1125,6 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
                     clarified_query="매출",
                     clarification_question="어떤 기간과 단위로 매출을 분석할까요?",
                 ),
-                _clarify_decision(clarified_query="최근 6개월 월별 매출"),
                 _plan_decision(),
                 _next_action_decision("finalize"),
                 _final_decision(),
@@ -1159,6 +1155,27 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
         "finalize",
     ]
     assert adapter.calls == []
+
+
+def test_clarify_query_does_not_reask_after_user_answer() -> None:
+    state = _state("seller별 리뷰와 배송 관계 분석")
+    state["clarified_query"] = "seller별 리뷰와 배송 관계 분석 추가 답변: 단일 판매자 기준으로 해줘"
+    state["clarification_answers"] = ["단일 판매자 기준으로 해줘"]
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(
+                needs_clarification=True,
+                clarification_question="다시 물어보면 안 됩니다.",
+            )
+        ]
+    )
+
+    result = make_clarify_query_node(model)(state)
+
+    assert result["needs_clarification"] is False
+    assert result["next_action"] == "create_plan"
+    assert result["clarification_question"] == ""
+    assert model.decisions
 
 
 def test_finalize_llm_can_fail_without_insight_evidence() -> None:
@@ -1198,6 +1215,41 @@ def test_plan_node_records_llm_planner_mode() -> None:
     assert result["analysis_plan"]["planner_mode"] == "llm"
     assert result["analysis_plan"]["query_rules"] == state["analysis_rule_context"]
     assert result["llm_decisions"][0]["node"] == "create_analysis_plan"
+
+
+def test_plan_node_records_required_derivations_and_heuristics_separately() -> None:
+    decision = _plan_decision(route_kind="comprehensive")
+    decision["required_derivations"] = [{
+        "name": "seller_sample_order_count",
+        "entity": "seller_id",
+        "grain": "seller_id",
+        "source_columns": ["orders.order_id"],
+        "definition": "COUNT(DISTINCT order_id) per seller_id",
+        "preferred_name": "seller_sample_order_count",
+    }]
+    decision["analysis_heuristics"] = [{
+        "name": "low_n_threshold",
+        "default_policy": "n < 30 is a limitation, not a SQL filter unless requested",
+        "must_record": True,
+    }]
+    node = make_create_analysis_plan_node(SequencedDecisionModel([decision]))
+
+    result = node(_state())
+
+    assert result["analysis_plan"]["required_derivations"][0]["preferred_name"] == "seller_sample_order_count"
+    assert result["analysis_plan"]["analysis_heuristics"][0]["name"] == "low_n_threshold"
+
+
+def test_plan_node_recovers_missing_goal_with_fallback_plan() -> None:
+    node = make_create_analysis_plan_node(SequencedDecisionModel([{"route_kind": "trend"}]))
+    state = _state("seller delivery and review analysis")
+
+    result = node(state)
+
+    assert "terminal_state" not in result
+    assert result["analysis_plan"]["goal"] == "seller delivery and review analysis"
+    assert result["analysis_plan"]["planner_mode"] == "fallback"
+    assert result["decision_errors"][0]["recovered"] is True
 
 
 def test_execute_subagent_runs_only_the_registered_action() -> None:

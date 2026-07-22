@@ -47,6 +47,7 @@ def build_answer_coverage(
             missing.append(f"dimension:{dimension}")
     if intent.is_time_based and intent.time_column and not used_time_column:
         missing.append(f"time_column:{intent.time_column}")
+    missing.extend(_missing_contract_metric_support(context, searchable))
 
     requested_count = len(requested_metrics) + len(requested_dimensions)
     if intent.is_time_based and intent.time_column:
@@ -113,6 +114,52 @@ def _first_mentioned(candidates: list[str], searchable: str) -> str | None:
         if _mentions(searchable, candidate):
             return candidate
     return None
+
+
+def _missing_contract_metric_support(context: AnalysisContext, searchable: str) -> list[str]:
+    contract = context.analysis_data_contract or {}
+    row_grain = {str(item).strip() for item in contract.get("grain_columns") or [] if str(item).strip()}
+    if not row_grain:
+        return []
+    metric_support = [
+        item for item in contract.get("metric_support") or []
+        if isinstance(item, dict)
+    ]
+    missing: list[str] = []
+    for item in metric_support:
+        metric_name = str(item.get("metric_name") or "").strip() or "unnamed_metric"
+        calculation_grain = [
+            str(column).strip()
+            for column in item.get("calculation_grain") or []
+            if str(column).strip()
+        ]
+        if not calculation_grain:
+            continue
+        grain_set = set(calculation_grain)
+        if grain_set == row_grain:
+            continue
+        if not all(_mentions(searchable, column) for column in calculation_grain):
+            missing.append(
+                f"contract_metric_support:{metric_name}:missing_calculation_grain:{','.join(calculation_grain)}"
+            )
+            continue
+        if not _mentions_downstream_aggregation(searchable):
+            missing.append(
+                f"contract_metric_support:{metric_name}:missing_downstream_aggregation:{','.join(calculation_grain)}"
+            )
+    return missing
+
+
+def _mentions_downstream_aggregation(searchable: str) -> bool:
+    markers = (
+        "groupby",
+        "pivot_table",
+        "resample",
+        ".agg",
+        "aggregate",
+        "aggregation",
+    )
+    return any(marker in searchable for marker in markers)
 
 
 def _mentions(searchable: str, needle: str) -> bool:

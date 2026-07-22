@@ -30,6 +30,10 @@ class EvidencePack:
     table_summary: dict[str, Any] = field(default_factory=dict)
     eda: dict[str, Any] = field(default_factory=dict)
     analysis: dict[str, Any] = field(default_factory=dict)
+    eda_raw: dict[str, Any] = field(default_factory=dict)
+    analysis_raw: dict[str, Any] = field(default_factory=dict)
+    analysis_debug: dict[str, Any] = field(default_factory=dict)
+    raw_artifact_ids: dict[str, str] = field(default_factory=dict)
     source_artifact_ids: list[str] = field(default_factory=list)
     source_labels: dict[str, str] = field(default_factory=dict)   # artifact_id → 사람이 읽는 라벨
 
@@ -41,8 +45,9 @@ def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> Evi
     source_ids = [c.artifact_id for c in csvs if c.error is None]
     labels = {c.artifact_id: "SQL 결과 테이블" for c in csvs if c.error is None}
 
-    eda = _read_first_json(state, runtime, "eda_agent", source_ids)
-    analysis = _read_first_json(state, runtime, "analysis_agent", source_ids)
+    eda_id, eda = _read_first_json_artifact(state, runtime, "eda_agent", source_ids)
+    analysis_id, analysis = _read_first_json_artifact(state, runtime, "analysis_agent", source_ids)
+    analysis_debug_id, analysis_debug = _read_analysis_debug_artifact(state, runtime, analysis, source_ids)
     for aid in source_ids:                             # 사람이 읽는 출처 라벨 (리포트용)
         labels.setdefault(aid, "EDA 분석 요약" if aid in (state.artifact_ids.get("eda_agent") or [])
                           else "분석 결과" if aid in (state.artifact_ids.get("analysis_agent") or [])
@@ -56,6 +61,16 @@ def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> Evi
         table_summary=_summarize_table(df),
         eda=_slim_eda(eda),
         analysis=_slim_analysis(analysis),
+        eda_raw=eda,
+        analysis_raw=analysis,
+        analysis_debug=analysis_debug,
+        raw_artifact_ids={
+            key: value for key, value in {
+                "eda": eda_id,
+                "analysis": analysis_id,
+                "analysis_debug": analysis_debug_id,
+            }.items() if value
+        },
         source_artifact_ids=source_ids,
         source_labels=labels,
     )
@@ -73,6 +88,20 @@ def _best_dataframe(csvs) -> pd.DataFrame:
     return max(frames, key=len)
 
 
+def _read_first_json_artifact(state: OrchestrationState, runtime: AgentRuntime,
+                              agent_name: str, source_ids: list[str]) -> tuple[str, dict[str, Any]]:
+    """Return the first readable JSON payload for an agent plus its artifact id."""
+    for artifact_id in state.artifact_ids.get(agent_name, []) or []:
+        try:
+            payload = read_json_artifact(runtime, artifact_id)
+        except Exception:  # noqa: BLE001
+            continue
+        if payload:
+            source_ids.append(artifact_id)
+            return artifact_id, payload
+    return "", {}
+
+
 def _read_first_json(state: OrchestrationState, runtime: AgentRuntime,
                      agent_name: str, source_ids: list[str]) -> dict[str, Any]:
     """해당 에이전트의 첫 JSON 아티팩트를 읽는다. 읽기 실패는 빈 dict(파이프라인 안 막음)."""
@@ -85,6 +114,42 @@ def _read_first_json(state: OrchestrationState, runtime: AgentRuntime,
             source_ids.append(artifact_id)
             return payload
     return {}
+
+
+def _read_analysis_debug_artifact(
+    state: OrchestrationState,
+    runtime: AgentRuntime,
+    analysis_payload: dict[str, Any],
+    source_ids: list[str],
+) -> tuple[str, dict[str, Any]]:
+    """Read analysis_debug so insight can inspect raw code/statistics on demand."""
+    candidate_ids: list[str] = []
+    debug_id = str(analysis_payload.get("debug_artifact_id") or "").strip()
+    if debug_id:
+        candidate_ids.append(debug_id)
+    candidate_ids.extend(str(aid) for aid in state.artifact_ids.get("analysis_agent", []) or [])
+
+    seen: set[str] = set()
+    for artifact_id in candidate_ids:
+        if not artifact_id or artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        try:
+            payload = read_json_artifact(runtime, artifact_id)
+        except Exception:  # noqa: BLE001
+            continue
+        if not payload:
+            continue
+        try:
+            record = runtime.adapter.get_artifact(artifact_id)
+            kind = str(getattr(record, "metadata", {}).get("kind") or "")
+        except Exception:  # noqa: BLE001
+            kind = ""
+        if artifact_id == debug_id or kind == "analysis_debug" or "raw_statistics" in payload:
+            if artifact_id not in source_ids:
+                source_ids.append(artifact_id)
+            return artifact_id, payload
+    return "", {}
 
 
 def _summarize_table(df: pd.DataFrame) -> dict[str, Any]:
@@ -118,7 +183,6 @@ def _slim_eda(payload: dict[str, Any]) -> dict[str, Any]:
         "hypotheses": payload.get("hypotheses", ""),
         "cautions": payload.get("cautions", []),
         "data_level": payload.get("data_level", {}),
-        "out_of_domain": payload.get("out_of_domain"),
         "statistical_metadata": payload.get("statistical_metadata", {}),
         "key_charts": payload.get("key_charts", []),
     }

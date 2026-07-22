@@ -297,6 +297,17 @@ def _call_llm_remove(
 
 {extra_instruction}
 
+[EDA role boundary for captions]
+- Captions are exploratory EDA notes, not final analysis conclusions.
+- Do not write "direct evidence", "proved", "verified", "confirmed", "supported", "rejected",
+  "adopted", "caused", "impact", "p-value", "effect size", or any final decision wording.
+- Prefer wording like "observed signal", "candidate basis", "helps inspect", "suggests",
+  "requires follow-up Analysis validation", and "should be interpreted with caution".
+- If a hypothesis is mentioned, call the chart a "candidate basis for follow-up Analysis",
+  not direct evidence for accepting the hypothesis.
+- If a correlation or trend is mentioned, describe it as an observed relationship only and add
+  that causal or statistical judgment belongs to the Analysis stage.
+
 ── 이상적 차트 구성 가이드 (유지) ──
 - **질문에 직답하는 차트가 최우선이다** — 예: 질문이 특정 target(재구매 여부 등)의 차이를 물으면
   distbytarget_*(target별 분포 비교)가 그 직답 차트다. 종합 차트보다 먼저 유지하라.
@@ -350,6 +361,46 @@ JSON의 키도 반드시 이 순서로 써라(keep_captions를 먼저 확정한 
         return json.loads(response)
     except Exception:
         return {"remove": [], "reason": {}}
+
+
+_CAPTION_REPLACEMENTS = (
+    ("가설 1의 직접 근거", "후속 Analysis 후보의 참고 근거"),
+    ("가설 2의 직접 근거", "후속 Analysis 후보의 참고 근거"),
+    ("가설 3의 직접 근거", "후속 Analysis 후보의 참고 근거"),
+    ("가설 4의 직접 근거", "후속 Analysis 후보의 참고 근거"),
+    ("직접 근거", "참고 근거"),
+    ("구체적 결론", "관찰 신호"),
+    ("최종 결론", "관찰 신호"),
+    ("결론", "관찰 신호"),
+    ("확인 가능하다", "관찰할 수 있다"),
+    ("확인 가능하였다", "관찰할 수 있었다"),
+    ("확인 가능했다", "관찰할 수 있었다"),
+    ("확인되며", "관찰되며"),
+    ("확인된다", "관찰된다"),
+    ("확인됐다", "관찰됐다"),
+    ("검증되며", "관찰되며"),
+    ("검증된다", "관찰된다"),
+    ("검증됐다", "관찰됐다"),
+    ("입증되며", "관찰되며"),
+    ("입증된다", "관찰된다"),
+    ("입증됐다", "관찰됐다"),
+    ("채택", "후속 검토"),
+    ("기각", "후속 검토"),
+)
+
+
+def _normalize_eda_caption(caption: str) -> str:
+    """Keep chart captions aligned with EDA's exploratory role."""
+    text = str(caption or "").strip()
+    if not text:
+        return ""
+    for source, target in _CAPTION_REPLACEMENTS:
+        text = text.replace(source, target)
+    if any(token in text for token in ("가설", "상관", "추세", "관계", "차이")) and not any(
+        token in text for token in ("별도 검증", "후속 검증", "후속 분석에서 검증")
+    ):
+        text = f"{text.rstrip()} 후속 Analysis 단계에서 별도 검증이 필요하다."
+    return text
 
 
 def run_chart_selector_skill(
@@ -415,7 +466,7 @@ def run_chart_selector_skill(
         hypotheses=hypotheses,
     )
 
-    captions = {k: str(v) for k, v in (result.get("keep_captions") or {}).items()}
+    captions = {k: _normalize_eda_caption(str(v)) for k, v in (result.get("keep_captions") or {}).items()}
     # LLM이 같은 응답 안에서 remove와 keep_captions에 같은 파일명을 동시에 넣는
     # 자기모순을 낼 때가 있다(run-019f7700 실사례) — 캡션을 쓴 파일은 remove보다 우선해 보존한다.
     to_remove = set(result.get("remove", [])) - set(captions)
@@ -440,7 +491,7 @@ def run_chart_selector_skill(
             hypotheses=hypotheses,
         )
 
-        new_captions = {k: str(v) for k, v in (result2.get("keep_captions") or {}).items()}
+        new_captions = {k: _normalize_eda_caption(str(v)) for k, v in (result2.get("keep_captions") or {}).items()}
         captions.update(new_captions)
         to_remove2 = set(result2.get("remove", [])) - set(new_captions)
         filtered = [p for p in filtered if os.path.basename(p) not in to_remove2]

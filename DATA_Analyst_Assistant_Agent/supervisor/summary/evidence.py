@@ -162,9 +162,7 @@ def _read_eda_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvidence:
         "derived_group_comparison": statistical_metadata.get("derived_group_comparison") or {},
         "statistical_metadata": payload.get("statistical_metadata", {}),   # Codex 리뷰: 빠져있었음
     }
-    # adhoc_analysis에 코드가 있으면 발췌(없으면 빈 문자열 — 억지로 만들지 않음)
-    adhoc = (payload.get("statistical_metadata") or {}).get("adhoc_analysis") or {}
-    code_used = str(adhoc.get("code") or "")
+    code_used = ""
 
     # 차트는 eda_summary의 자식이 아니라 형제(둘 다 SQL 결과물 아래 나란히 걸림,
     # agents/eda/agent.py의 register_key_chart_artifacts(..., source_ids, ...) 확인).

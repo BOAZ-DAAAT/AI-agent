@@ -13,7 +13,6 @@ from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.derived_group import (
     build_derived_group_frame,
-    compute_derived_group_comparison,
 )
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
@@ -63,6 +62,15 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
     return entries, refs
 
 
+def _extract_branch_instruction(user_query: str) -> str:
+    """Return only the follow-up branch instruction, not the original query."""
+    markers = ("[추가 지시사항]", "[異붽? 吏?쒖궗??]")
+    for marker in markers:
+        if marker in user_query:
+            return user_query.split(marker, 1)[1].strip()
+    return ""
+
+
 class EDAAgent:
     name = "eda_agent"
 
@@ -84,11 +92,7 @@ class EDAAgent:
 
         # codegen 탈출구가 도메인 밖으로 판정하면 top-level 플래그로 정직하게 노출한다
         # (성공 결과는 statistical_metadata.adhoc_analysis에 편입됨). 분석 에이전트가 라우팅에 씀.
-        codegen = eda_result.get("codegen", {}) or {}
-        derived_group_comparison = (
-            (eda_result.get("statistical_metadata") or {}).get("derived_group_comparison")
-            or self._derive_group_comparison(csvs, state)
-        )
+        derived_group_comparison = (eda_result.get("statistical_metadata") or {}).get("derived_group_comparison")
         if derived_group_comparison:
             statistical_metadata = dict(eda_result.get("statistical_metadata", {}) or {})
             statistical_metadata["derived_group_comparison"] = derived_group_comparison
@@ -99,11 +103,6 @@ class EDAAgent:
                     derived_group_comparison,
                 )
         effective_profile = eda_result.get("profile_override") or profile
-        out_of_domain = (
-            {"reason": codegen.get("reason", ""), "user_question": codegen.get("user_question", "")}
-            if codegen.get("status") == "out_of_domain" else None
-        )
-
         payload = {
             "run_id": state.run_id,
             "source_artifacts": source_ids,
@@ -118,9 +117,12 @@ class EDAAgent:
             "data_level": eda_result.get("data_level", {}),
             "cautions": eda_result.get("cautions", []),
             "analysis_constraints": eda_result.get("analysis_constraints", []),
+            "analysis_data_contract": eda_result.get(
+                "analysis_data_contract",
+                (state.plan.analysis_data_contract if state.plan else {}),
+            ),
             "statistical_metadata": eda_result.get("statistical_metadata", {}),
             "key_charts": key_chart_entries,
-            "out_of_domain": out_of_domain,
             "error_log": eda_result.get("error_log", []),
         }
         ref = runtime.adapter.register_artifact(
@@ -165,7 +167,9 @@ class EDAAgent:
         main = max(frames, key=len)
         same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
         df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
-        derived_input = build_derived_group_frame(df, state.user_query or "")
+        branch_instruction = _extract_branch_instruction(state.user_query or "")
+        derived_question = f"[異붽? 吏?쒖궗??] {branch_instruction}" if branch_instruction else ""
+        derived_input = build_derived_group_frame(df, derived_question)
         graph_df = derived_input["dataframe"] if derived_input else df
         graph_mart_design = derived_input.get("mart_design", {}) if derived_input else {}
         graph_question = state.user_query or ""
@@ -198,6 +202,7 @@ class EDAAgent:
         # GE 정합성 스코핑용 원천 테이블 + grain 교차검증용 선언 grain(있으면 줍고 없으면 폴백).
         plan_source_tables = list(plan.source_tables) if plan and plan.source_tables else []
         plan_business_grain = (plan.business_grain if plan and plan.business_grain else "") or ""
+        analysis_data_contract = dict(plan.analysis_data_contract) if plan and plan.analysis_data_contract else {}
         # 수퍼바이저가 직전 시도를 부실 판정했으면(semantic/hard 실패), EDA 자체 재시도 루프
         # (validator.py → validation_feedback)가 읽는 자리에 초기값으로 심어 재사용한다.
         retry_context = plan.retry_context if plan and plan.retry_context else {}
@@ -222,6 +227,7 @@ class EDAAgent:
                     "plan_dimension": plan_dimension,
                     "plan_source_tables": plan_source_tables,
                     "plan_business_grain": plan_business_grain,
+                    "analysis_data_contract": analysis_data_contract,
                     "validation_feedback": initial_validation_feedback,
                     "error_log": [],
                 }
@@ -236,15 +242,6 @@ class EDAAgent:
                 CsvArtifactData(artifact_id="derived_group", text="", dataframe=graph_df)
             ])
         return result
-
-    @staticmethod
-    def _derive_group_comparison(csvs: list[CsvArtifactData], state: OrchestrationState) -> dict[str, Any] | None:
-        frames = [csv.dataframe for csv in csvs if csv.error is None and not csv.dataframe.empty]
-        if not frames:
-            return None
-        main = max(frames, key=len)
-        return compute_derived_group_comparison(main, state.user_query or "")
-
 
 # ─────────────────────────────
 # 백엔드 핸드오프 헬퍼 (구 profiler.py / self_check.py 통합)

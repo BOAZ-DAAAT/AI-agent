@@ -258,6 +258,10 @@ def _contract_from_mart_design(mart_design: dict[str, Any], plan: Any, generated
         "target_table": getattr(plan, "target_table", None) or mart_design.get("mart_name"),
         "row_grain": mart_design.get("grain") or getattr(plan, "business_grain", None) or "",
         "grain_columns": grain_columns,
+        "metric_support": [
+            dict(item) for item in (mart_design.get("metric_support") or [])
+            if isinstance(item, dict)
+        ],
         "entity_keys": [column for column in grain_columns if not _looks_temporal_column(column)],
         "time_basis": [
             item for item in column_plan

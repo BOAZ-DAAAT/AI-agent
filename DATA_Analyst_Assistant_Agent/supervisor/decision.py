@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
@@ -19,7 +19,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 from DATA_Analyst_Assistant_Agent.supervisor.validation import ResultValidationDecision
 
 
-_SNAPSHOT_MAX_TEXT = 400
+_SNAPSHOT_MAX_TEXT = 380
 _SNAPSHOT_MAX_ITEMS = 8
 _SNAPSHOT_MAX_DEPTH = 4
 
@@ -71,7 +71,46 @@ class AnalysisPlanDecision(BaseModel):
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
+    required_derivations: list[dict[str, Any]] = Field(default_factory=list)
+    analysis_heuristics: list[dict[str, Any]] = Field(default_factory=list)
     reason: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def recover_missing_goal(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("goal"):
+            return value
+
+        recovered = dict(value)
+        fallback_goal = (
+            recovered.get("objective")
+            or recovered.get("purpose")
+            or recovered.get("reason")
+            or recovered.get("name")
+        )
+        if fallback_goal:
+            recovered["goal"] = str(fallback_goal)
+
+        derivation_keys = {
+            "name",
+            "purpose",
+            "entity",
+            "grain",
+            "source_columns",
+            "definition",
+            "preferred_name",
+            "safe_for",
+            "not_for",
+        }
+        looks_like_derivation = "name" in recovered and any(
+            key in recovered for key in derivation_keys - {"name"}
+        )
+        if looks_like_derivation and not recovered.get("required_derivations"):
+            recovered["required_derivations"] = [
+                {key: recovered[key] for key in derivation_keys if key in recovered}
+            ]
+
+        return recovered
 
 
 class AnalysisRuleExtractionDecision(BaseModel):
@@ -153,6 +192,7 @@ def build_clarification_context(state: SupervisorState) -> dict[str, Any]:
         {
             "latest_user_query": state.get("latest_user_query", ""),
             "clarified_query": state.get("clarified_query", ""),
+            "clarification_answers": list(state.get("clarification_answers", []))[-3:],
             "user_turns": list(state.get("user_turns", []))[-3:],
             "datasource_id": state.get("datasource_id"),
             "catalog_summary": state.get("catalog_summary"),
@@ -214,7 +254,7 @@ def build_next_action_context(state: SupervisorState) -> dict[str, Any]:
     )
     context["agent_capabilities"] = _bounded_value(
         agent_capabilities_context(),
-        max_text=130,
+        max_text=120,
         max_items=8,
         depth=3,
     )

@@ -10,6 +10,7 @@ from DATA_Analyst_Assistant_Agent.agents.eda.tools.run_distribution import run_d
 from DATA_Analyst_Assistant_Agent.agents.eda.tools.run_comparison import run_comparison
 from DATA_Analyst_Assistant_Agent.agents.eda.tools.run_relationship import run_relationship
 from DATA_Analyst_Assistant_Agent.agents.eda.tools.run_time import run_time
+from DATA_Analyst_Assistant_Agent.agents.eda.tools.run_clustering import run_clustering
 
 # ─────────────────────────────
 # 노드별 툴 그룹 (노드가 mini-ReAct에 넘기는 단위)
@@ -20,6 +21,7 @@ DISTRIBUTION_TOOLS = [run_distribution]
 COMPARISON_TOOLS   = [run_comparison]
 RELATIONSHIP_TOOLS = [run_relationship]
 TIME_TOOLS         = [run_time]
+CLUSTERING_TOOLS   = [run_clustering]
 
 __all__ = [
     "profile_data",
@@ -28,10 +30,12 @@ __all__ = [
     "run_comparison",
     "run_relationship",
     "run_time",
+    "run_clustering",
     "INSPECT_TOOLS",
     "QUALITY_TOOLS",
     "DISTRIBUTION_TOOLS",
     "COMPARISON_TOOLS",
     "RELATIONSHIP_TOOLS",
     "TIME_TOOLS",
+    "CLUSTERING_TOOLS",
 ]

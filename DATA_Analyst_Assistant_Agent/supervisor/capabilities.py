@@ -67,13 +67,15 @@ DEFAULT_AGENT_CAPABILITIES: list[AgentCapability] = [
         description=(
             "SQL 결과를 읽어 데이터의 상태와 관찰 가능한 신호를 정리합니다. "
             "분포, 결측, 이상치, 기본 통계, 그룹별 요약, 차트 패턴, 단순 관계와 추세를 확인하고, "
-            "이를 토대로 analysis_agent가 검토할 근거와 후보 가설을 만듭니다."
+            "이를 토대로 analysis_agent가 검토할 탐색 근거와 후보 가설을 만듭니다. "
+            "파생 지표 계산, 통계 검정, 회귀/모델링, 가설 채택·기각은 수행하지 않습니다."
         ),
         when_to_use=(
             "SQL 결과가 준비된 뒤 데이터 특성, 관찰 가능한 신호, 이상 징후, 후보 가설, "
             "분석 방향을 탐색해야 할 때 사용합니다. EDA 산출물은 최종 결론이 아니라 분석 판단의 재료입니다. "
             "관찰된 신호가 사용자 질문의 결론으로 사용될 수 있다면 수치, 시각적 근거, 한계, 후보 가설을 "
-            "analysis_agent가 이어받을 수 있게 남깁니다."
+            "analysis_agent가 이어받을 수 있게 남깁니다. 질문의 핵심 답변에 p-value, 효과크기, 회귀, ANOVA, "
+            "조건부 파생 지표 계산이 필요하면 EDA 이후 analysis_agent를 고려합니다."
         ),
         requires_artifacts_from=["sql_agent"],
         produces_artifacts=["data_profile", "quality_summary", "eda_summary"],
@@ -86,11 +88,14 @@ DEFAULT_AGENT_CAPABILITIES: list[AgentCapability] = [
         action="call_analysis_agent",
         description=(
             "SQL과 EDA가 만든 데이터 근거를 바탕으로, 관찰된 신호가 사용자 질문에 대한 답으로 "
-            "얼마나 타당한지 검토하고 분석 결론의 강도와 한계를 정합니다."
+            "얼마나 타당한지 검토하고 분석 결론의 강도와 한계를 정합니다. "
+            "질문 맞춤 파생 지표 계산과 통계 분석 실행은 이 에이전트의 책임입니다."
         ),
         when_to_use=(
             "관찰된 관계, 추세, 차이, 이상치, 후보 가설을 그대로 결론으로 쓰지 않고, "
             "표본 크기, 집계 단위, 효과 크기, 민감도, 대안 설명, 데이터 한계를 함께 검토해야 할 때 사용합니다. "
+            "EDA의 insight_result, hypotheses, final_summary는 후보 신호로만 참고하고, 최종 계수, p-value, "
+            "검정 결과, 효과크기, 해석은 analysis_agent가 재계산한 evidence만 사용합니다. "
             "데이터에 직접 존재하지 않는 개념을 기준값, 등급, 세그먼트, 라벨, 상태 구분 등으로 "
             "분석 안에서 정의해야 할 수 있습니다. 먼저 데이터 분포, 결과 변수와의 관계, 표본 수, 민감도 등을 확인해 "
             "방어 가능한 기준이나 분석 방법을 찾고, 그 정의나 방법 선택이 결과 해석에 실질적인 영향을 주며 "

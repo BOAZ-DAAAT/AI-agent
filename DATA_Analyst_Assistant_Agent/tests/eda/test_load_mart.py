@@ -111,6 +111,37 @@ def test_load_mart_never_selects_datetime_column_as_count_column() -> None:
     assert result["count_column"] != "review_creation_date"
 
 
+def test_load_mart_uses_analysis_data_contract_when_mart_design_is_empty() -> None:
+    df = pd.DataFrame(
+        {
+            "seller_id": ["s1", "s2", "s1"],
+            "month": ["2018-01", "2018-01", "2018-02"],
+            "avg_delivery_days": [3.0, 5.0, 4.0],
+            "seller_sample_order_count": [10, 20, 12],
+        }
+    )
+    set_context(EdaContext(df=df, question_type="mart"))
+
+    result = load_mart_node({
+        "question_type": "mart",
+        "mart_design": {},
+        "analysis_data_contract": {
+            "grain_columns": ["seller_id", "month"],
+            "derived_columns": [
+                {"output_column": "seller_id", "role": "dimension"},
+                {"output_column": "avg_delivery_days", "role": "measure"},
+                {
+                    "output_column": "seller_sample_order_count",
+                    "role": "measure",
+                    "required_by_supervisor": True,
+                },
+            ],
+        },
+    })
+
+    assert result["count_column"] == "seller_sample_order_count"
+
+
 def test_load_mart_continues_without_time_columns_when_detection_errors(monkeypatch) -> None:
     df = pd.DataFrame(
         {

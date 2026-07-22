@@ -1,6 +1,6 @@
 pydantic
-pandas>=2.3.3,<3
-numpy
+pandas==2.3.3
+numpy==2.4.6
 duckdb
 sqlglot
 pymysql
@@ -16,8 +16,10 @@ langchain-google-genai
 pinecone
 matplotlib
 seaborn
-scikit-learn
-statsmodels
+scikit-learn==1.9.0
+scipy==1.15.3; python_version < "3.13"
+scipy==1.18.0; python_version >= "3.13"
+statsmodels==0.14.6
 pymc-marketing==0.19.3
 geopandas
 libpysal

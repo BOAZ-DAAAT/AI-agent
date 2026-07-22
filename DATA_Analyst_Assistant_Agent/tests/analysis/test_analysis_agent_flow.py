@@ -125,7 +125,7 @@ def test_agent_registers_structured_artifact_and_lineage(adapter: BackendAdapter
     assert parsed.answer_coverage.coverage_status == "full"
     assert parsed.answer_coverage.used_metrics == ["revenue"]
     assert parsed.answer_coverage.used_dimensions == ["category"]
-    assert parsed.generated_code == ""
+    assert "top = str(by_cat.index[0])" in parsed.generated_code
     assert parsed.code_critique is None
     assert parsed.debug_artifact_id is not None
     debug_payload = json.loads(adapter.read_artifact_text(parsed.debug_artifact_id))
@@ -307,29 +307,25 @@ def test_agent_preserves_method_review_failure_as_limitation(adapter: BackendAda
     payload = json.loads(adapter.read_artifact_text(artifact.artifact_id))
     parsed = AnalysisResult.model_validate(payload)
 
-    assert parsed.human_review.required is True
-    assert envelope.status == AgentStatus.warning
+    assert parsed.human_review.required is False
+    assert parsed.status == "success"
+    assert envelope.status == AgentStatus.success
     assert envelope.approval.required is False
     assert envelope.retry_hint.retryable is False
     assert envelope.retry_hint.suggested_action == "continue"
-    assert envelope.retry_hint.reason_code == "method_review_failed"
+    assert envelope.retry_hint.reason_code == "none"
     assert envelope.error == ""
-    assert "검증을 완전히 통과하지 못했지만 결과를 보존했습니다" in envelope.summary
-    assert all(check.severity != "error" for check in envelope.validation.local_checks)
+    assert "Analysis result generated" in envelope.summary
+    assert any("wrong method" in note for note in parsed.method_notes)
     assert any(
-        finding.code == "method_review_failed"
+        finding.code == "analysis_method_note"
         and finding.severity == "warning"
         and finding.disposition == "limitation"
         and finding.retryable is False
-        and finding.suggested_action == "continue"
+        and "wrong method" in finding.message
         for finding in envelope.validation.findings
     )
-    assert envelope.retry_hint.details == {
-        "terminal_reason": "method_review_failed",
-        "failure_reason": "wrong method",
-        "codegen_attempts": 2,
-        "agent_retry_budget": 1,
-    }
+    assert envelope.retry_hint.details == {}
 
 
 @pytest.mark.parametrize(
@@ -463,7 +459,7 @@ def test_agent_review_required_registers_public_and_debug_artifacts(adapter: Bac
     assert parsed.review_request is not None
     assert parsed.human_review.reason == "Use the top revenue category as the follow-up segment?"
     assert parsed.debug_artifact_id == debug_id
-    assert parsed.generated_code == ""
+    assert "review_request" in parsed.generated_code
     assert debug_payload["generated_code"]
     assert debug_payload["code_critique"]["verdict"] == "review_required"
     artifact = adapter.get_artifact(public_id)

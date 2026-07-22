@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.frame import frame_from_records
 from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.bayesian import posterior_mean
+from DATA_Analyst_Assistant_Agent.agents.analysis.tools.lib.datetime import safe_datetime_series
 
 @tool
 def estimate_probabilistic_clv(
@@ -34,7 +35,7 @@ def estimate_probabilistic_clv(
     if any(column not in df.columns for column in required):
         raise ValueError("CLV requires customer ID, transaction time, and monetary value columns.")
     transactions = df[required].copy()
-    transactions[datetime_column] = pd.to_datetime(transactions[datetime_column], errors="coerce")
+    transactions[datetime_column] = safe_datetime_series(transactions[datetime_column])
     transactions[monetary_value_column] = pd.to_numeric(transactions[monetary_value_column], errors="coerce")
     transactions = transactions.dropna()
     if transactions[customer_id_column].nunique() < 20:

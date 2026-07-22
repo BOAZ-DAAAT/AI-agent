@@ -116,6 +116,7 @@ class MartDesign(BaseModel):
     deduplication_keys: List[str] = Field(min_length=1)
     column_plan: List[MartColumnPlan] = Field(min_length=1)
     metric_support: List[MetricSupport] = Field(min_length=1)
+    unimplemented_derivations: List[Dict[str, Any]] = Field(default_factory=list)
     aggregation_policy: Literal["preserve_common_grain", "aggregate_to_common_grain"]
     source_tables: List[str] = Field(min_length=1)
     incremental_column: Optional[str] = None

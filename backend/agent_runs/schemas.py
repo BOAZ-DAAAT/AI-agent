@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
+from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult
 
 
 class AgentRunCreateRequest(BaseModel):
@@ -29,6 +30,25 @@ class AgentNodeSummaryResponse(BaseModel):
     agent_name: str
     summary_artifact_id: str
     summary: NodeSummaryResult
+
+
+class AgentNodeReportResponse(BaseModel):
+    run_id: str
+    node_id: str
+    report_artifact_id: str
+    created_at: str
+    report: ReportResult
+
+
+class AgentReportListItem(BaseModel):
+    run_id: str
+    report_artifact_id: str
+    created_at: str
+    report: ReportResult
+
+
+class AgentReportListResponse(BaseModel):
+    reports: list[AgentReportListItem]
 
 
 class AgentRunDeleteResponse(BaseModel):

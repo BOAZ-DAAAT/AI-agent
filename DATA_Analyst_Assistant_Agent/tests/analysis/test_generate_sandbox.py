@@ -11,6 +11,7 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import (
     _extract_json_object,
     execute_generated_code,
     generate_analysis_code,
+    inspect_generated_code,
 )
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes import generate as generate_module
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
@@ -161,6 +162,162 @@ def test_primitives_namespace_is_available() -> None:
     assert out["statistics"]["n"] >= 1
 
 
+def test_preflight_allows_simple_groupby() -> None:
+    code = _code(
+        "summary = df.groupby('category')['value'].sum().to_dict()\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': summary, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"category": ["a", "a", "b"], "value": [1, 2, 3]})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+    assert plan.risk_level == "low"
+
+
+def test_preflight_allows_small_statsmodels_ols() -> None:
+    code = _code(
+        "model = sm.OLS(df['y'], sm.add_constant(df[['x']])).fit()\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}",
+        imports="import statsmodels.api as sm",
+    )
+    frame = pd.DataFrame({"x": range(50), "y": range(50)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_allows_small_kmeans_or_pca() -> None:
+    code = _code(
+        "labels = KMeans(n_clusters=2, random_state=0).fit_predict(df[['x', 'y']])\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': int(len(labels))}, 'limitations': []}",
+        imports="from sklearn.cluster import KMeans",
+    )
+    frame = pd.DataFrame({"x": range(100), "y": range(100)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_flags_grid_search() -> None:
+    code = _code(
+        "search = GridSearchCV(model, {'n_estimators': [10, 100]}).fit(X, y)\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}",
+        imports="from sklearn.model_selection import GridSearchCV",
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("search" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_large_fit() -> None:
+    code = _code(
+        "model = SomeEstimator().fit(df[['x']], df['y'])\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(100_001), "y": range(100_001)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("large" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_while_loop() -> None:
+    code = _code(
+        "while True:\n"
+        "    break\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {}, 'limitations': []}"
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("while" in reason for reason in plan.reasons)
+
+
+def test_preflight_allows_independent_comprehensions_on_non_small_dataframe() -> None:
+    code = _code(
+        "top_x = [str(value) for value in df['x'].head(5)]\n"
+        "top_y = [str(value) for value in df['y'].head(5)]\n"
+        "result = {'summary': 'ok', 'findings': top_x + top_y, 'statistics': {'n': len(df)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_does_not_count_for_in_strings_or_comments() -> None:
+    code = _code(
+        "# for seller in sellers; for month in months\n"
+        "note = 'for display only, not a loop for execution'\n"
+        "result = {'summary': note, 'findings': [note], 'statistics': {'n': len(df)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_flags_actual_nested_loop_on_non_small_dataframe() -> None:
+    code = _code(
+        "pairs = []\n"
+        "for seller in df['x'].head(10):\n"
+        "    for month in df['y'].head(10):\n"
+        "        pairs.append((seller, month))\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(pairs)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("nested loop" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_dataframe_row_iteration_on_non_small_dataframe() -> None:
+    code = _code(
+        "total = 0\n"
+        "for _, row in df.iterrows():\n"
+        "    total += row['x']\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'total': int(total)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("row iteration" in reason for reason in plan.reasons)
+
+
+def test_execute_generated_code_subprocess_success() -> None:
+    out = execute_generated_code(
+        _code("result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}"),
+        _frame(),
+        isolated=True,
+        timeout_seconds=30,
+    )
+
+    assert out["statistics"]["n"] == len(_frame())
+
+
+def test_execute_generated_code_subprocess_timeout() -> None:
+    with pytest.raises(AnalysisCodeError, match="exceeded execution timeout"):
+        execute_generated_code(
+            _code("while True:\n    pass"),
+            _frame(),
+            isolated=True,
+            timeout_seconds=0.5,
+        )
+
+
 def test_records_are_materialized_only_when_a_primitive_is_called(monkeypatch) -> None:
     calls = 0
 
@@ -244,6 +401,33 @@ def test_generate_prompt_includes_free_text_selection_as_a_binding_constraint() 
 
     assert "binding constraint" in model.messages[1].content
     assert "Compare medians, not totals." in model.messages[1].content
+
+
+def test_generate_prompt_includes_analysis_data_contract() -> None:
+    context = AnalysisContext(
+        user_question="analyze mart",
+        goal="analyze mart",
+        route_kind="comprehensive",
+        columns=["seller_id", "order_id", "order_month", "delivery_days"],
+        analysis_data_contract={
+            "row_grain": "seller_id x order_id",
+            "grain_columns": ["seller_id", "order_id"],
+            "metric_support": [{
+                "metric_name": "monthly_avg_delivery_days",
+                "calculation_grain": ["seller_id", "order_month"],
+                "required_mart_columns": ["seller_id", "order_month", "delivery_days"],
+                "downstream_calculation": "Group by seller_id and order_month before averaging delivery_days.",
+            }],
+        },
+    )
+    model = _CapturingCodeModel()
+
+    generate_analysis_code(AnalysisIntent(objective="analyze mart"), context, model=model)
+
+    prompt = model.messages[1].content
+    assert "Declared upstream SQL/datamart analysis contract" in prompt
+    assert "monthly_avg_delivery_days" in prompt
+    assert "Group by seller_id and order_month" in prompt
 
 
 def test_generate_prompt_includes_full_selected_option_as_binding_constraint() -> None:
