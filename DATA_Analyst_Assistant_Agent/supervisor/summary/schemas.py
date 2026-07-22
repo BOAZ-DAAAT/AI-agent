@@ -101,6 +101,8 @@ class InsightSummaryDetail(BaseModel):
     kind: Literal["insight"] = "insight"
     evidence_synthesis: str = ""                        # 어떤 상류 근거가 결론을 지지하는지
     answer: str = ""
+    as_is: str = ""                                      # 현재 근거가 보여주는 상태
+    to_be: str = ""                                      # 지향해야 할 운영 방향
     key_insights: list[str] = Field(default_factory=list)
     action_plan: list[str] = Field(default_factory=list)
     evidence_sources: list[str] = Field(default_factory=list)   # 사람이 읽는 출처 라벨(근거 그대로)

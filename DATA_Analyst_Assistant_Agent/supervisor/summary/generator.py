@@ -41,7 +41,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
 )
 
 _TOOL_NAME = "supervisor.summary.generator"
-_SUMMARY_VERSION = 18                                  # v18: Analysis 본 분석 카드 구조(analysis_items) 추가
+_SUMMARY_VERSION = 19                                  # v19: Insight AS-IS/TO-BE/ACTION 구조 추가
                                                         # (v13: SQL 핵심 어구 강조 문법 반영)
                                                         # (v12: SQL 화면 구조/10행 데이터마트 미리보기 반영)
                                                         # (v11: SQL 요약 톤/중복 SQL 노출 정리)
@@ -682,6 +682,21 @@ def _analysis_item_title(raw: dict[str, Any], generated: FindingSection | None, 
     ).strip()
 
 
+def _analysis_item_purpose(raw: dict[str, Any], generated: FindingSection | None, index: int) -> str:
+    if generated and generated.rationale.strip():
+        return generated.rationale.strip()
+
+    title = _analysis_item_title(raw, generated, index)
+    method = str(raw.get("test_name") or "").strip()
+    if method and title:
+        return f"이 항목은 {title} 항목의 판단 근거를 {method} 방법으로 확인했습니다."
+    if title:
+        return f"이 항목은 {title} 항목의 판단 근거를 확인하기 위해 분석했습니다."
+    if method:
+        return f"{method}을 사용해 핵심 관계와 판정 근거를 확인했습니다."
+    return "이 분석 항목의 방향성과 판단 근거를 확인했습니다."
+
+
 def _analysis_items_from_tests(
     *,
     raw_tests: Any,
@@ -696,10 +711,10 @@ def _analysis_items_from_tests(
             item = AnalysisItem(
                 title=_analysis_item_title(raw, generated, index),
                 method=str(raw.get("test_name") or "").strip(),
-                purpose=(generated.rationale if generated else "").strip(),
+                purpose=_analysis_item_purpose(raw, generated, index),
                 result=_analysis_result_sentence(raw),
                 key_numbers=_analysis_key_numbers(raw),
-                interpretation=(generated.body if generated else "").strip(),
+                interpretation="",
                 caution=_analysis_caution(raw),
                 decision=str(raw.get("decision") or "").strip(),
             )
@@ -717,6 +732,57 @@ def _analysis_items_from_tests(
         )
         for section in generated_sections
     ]
+
+
+def _ensure_insight_sentence(text: str) -> str:
+    value = text.strip()
+    if not value:
+        return ""
+    value = (
+        value
+        .replace("보여준다.", "보여줍니다.")
+        .replace("나타난다.", "나타납니다.")
+        .replace("보인다.", "보입니다.")
+        .replace("시사한다.", "시사합니다.")
+        .replace("지지한다.", "지지합니다.")
+        .replace("맞다.", "맞습니다.")
+        .replace("했다.", "했습니다.")
+        .replace("한다.", "합니다.")
+        .replace("이다.", "입니다.")
+    )
+    if re.search(r"(습니다|됩니다|하였습니다|입니다|였습니다)\.$", value):
+        return value
+    if value.endswith("됨"):
+        return f"{value[:-1]}됩니다."
+    if re.search(r"[.!?]$", value):
+        return value
+    return f"{value}입니다."
+
+
+def _build_insight_to_be(parsed: dict[str, Any]) -> str:
+    to_be = str(parsed.get("to_be") or "").strip()
+    if len([part for part in re.split(r"(?<=[.!?。])\s+", to_be) if part.strip()]) >= 3:
+        return to_be
+
+    action_plan = _extract_str_list(parsed.get("action_plan"))
+    seeds = [to_be]
+    if action_plan:
+        seeds.append(action_plan[0])
+    seeds.extend([
+        "우선 점검 대상과 추적 지표를 분리해 운영 변화가 실제로 유지되는지 확인해야 합니다.",
+        "결과 해석은 상관 수준의 근거로 제한하고, 후속 검증에서 같은 방향이 유지되는지 확인해야 합니다.",
+    ])
+
+    sentences: list[str] = []
+    for seed in seeds:
+        text = _ensure_insight_sentence(seed.strip())
+        if not text:
+            continue
+        if text not in sentences:
+            sentences.append(text)
+        if len(sentences) >= 3:
+            break
+    return " ".join(sentences)
 
 
 def _emphasize_sections(sections: list[FindingSection]) -> list[FindingSection]:
@@ -804,18 +870,21 @@ def _infer_analysis_method_decision(facts: dict[str, Any]) -> dict[str, Any]:
 def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
     facts_text, charts_text, feedback_section = _prompt_common_parts(evidence, feedback)
     return f"""
-너는 상류 분석 근거를 사용자 의미로 연결하는 데이터 분석가다. 최종 보고서를 되풀이하거나
-결과를 목록으로 나열하지 말고, 어떤 근거들이 서로 일치해 결론을 지지하는지와 그 결론을
-어디까지 활용할 수 있는지를 설명하라. 새로운 계산·추측이나 근거 없는 숫자는 만들지 마라.
+너는 상류 분석 근거를 사용자 의사결정으로 압축하는 데이터 분석가다. SQL/EDA/분석 내용을
+다시 길게 요약하지 말고, 사용자 질문에 대한 최종 답과 현재 상태(AS-IS), 지향 방향(TO-BE),
+실행 제안(ACTION)을 짧고 구체적으로 정리하라. 새로운 계산·추측이나 근거 없는 숫자는 만들지 마라.
+화면에는 AS-IS/TO-BE/ACTION이 같은 위계로 표시된다. answer와 as_is를 같은 말로 반복하지 말고,
+as_is는 현재 상태, to_be는 관리 방향, action_plan은 그 방향으로 가기 위한 행동만 담아라.
+TO-BE는 단순히 "관리해야 한다"로 끝내지 말고, AS-IS에서 확인된 문제를 어떤 운영 상태로 바꾸어야
+하는지 3~4문장으로 구체화하라.
 
 [근거 종류] {evidence.source_kind}
 [근거 내용] {facts_text}
 [사용 가능한 차트] {charts_text}
 {feedback_section}
-[문체] "인사이트 에이전트가 ~했습니다"를 반복하지 마라. 근거와 분석 내용을 주어로 삼고,
-근거 연결 → 의미 → 활용 방향 → 해석 범위가 자연스럽게 이어지게 작성하라. 모든 문장은
-보고서 톤의 존댓말 "~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은
-평서체는 쓰지 마라.
+[문체] "인사이트 에이전트가 ~했습니다"를 반복하지 마라. 모든 문장은 보고서 톤의 존댓말
+"~습니다/~됩니다/~하였습니다"로 끝내라. "~한다/~했다/~이다" 같은 평서체는 쓰지 마라.
+인사이트는 최종 압축 단계이므로 같은 근거를 evidence_synthesis, answer, conclusion에서 반복하지 마라.
 
 이 단계는 인사이트 에이전트의 결과다 — 고유 역할은 상류 근거(SQL/EDA/분석)를 종합해 사용자
 질문에 직접 답하는 것이다. 근거 출처(evidence_sources)는 이미 구조화된 근거로 별도 제공되니
@@ -823,14 +892,18 @@ def _build_insight_prompt(evidence: NodeEvidence, feedback: str) -> str:
 
 [구조 — 반드시 이 필드로 JSON 출력]
 - title: 이 답변을 나타내는 구체적인 제목(짧게)
-- subtitle: 제목 아래 붙는 한 줄 태그라인
+- subtitle: 제목 아래 붙는 한 줄 태그라인. 반드시 "~습니다/~됩니다" 존댓말 문장으로 쓴다.
 - background: 사용자가 무엇을 물었는지(질문 배경)만. 1문단, 최대 2문장.
-- evidence_synthesis: 어떤 상류 근거들이 서로 일치하거나 보완되어 결론을 지지하는지. 1문단, 최대 3문장.
-- answer: 사용자 질문에 대한 직접적인 답변. 1문단, 최대 3문장.
-- key_insights: 핵심 통찰 리스트
-- action_plan: 실행 제안 리스트
-- limitations: 한계 리스트
-- conclusion: 이 단계에서 얻은 결론. 1문단, 최대 2문장.
+- evidence_synthesis: 내부 근거 요약이다. 결론을 지지하는 핵심 근거만 1문장으로 압축한다. 숫자는 가장 중요한 1~3개만 쓴다.
+- answer: 사용자 질문에 대한 직접적인 답변이다. 최대 1문장. 화면의 AS-IS와 같은 문장을 반복하지 마라.
+- as_is: AS-IS. "분석으로 확인한 현재 상태"만 1~2문장으로 쓴다. 핵심 수치가 있으면 여기만 넣는다.
+- to_be: TO-BE. "이 결과가 가리키는 지향 방향"을 3~4문장으로 쓴다. 반드시 채워라.
+  첫 문장은 지향 상태, 둘째 문장은 우선 관리 대상, 셋째 문장은 모니터링/검증 방향을 설명한다.
+  근거에 없는 목표 숫자는 만들지 마라.
+- key_insights: 핵심 통찰 리스트. 최대 2개.
+- action_plan: ACTION. TO-BE를 달성하기 위한 실행 제안 리스트. 최대 3개. 각 항목은 구체적 행동 동사로 시작한다.
+- limitations: 주의사항 리스트. 최대 2개.
+- conclusion: answer와 반복하지 말고 최종 활용 경계만 1문장으로 쓴다.
 - key_finding: 위 전체를 압축한 한 문장
 
 근거에 등장한 숫자만 인용하라.
@@ -848,6 +921,8 @@ def _to_insight_result(parsed: dict[str, Any], evidence: NodeEvidence, known_cha
     detail = InsightSummaryDetail(
         evidence_synthesis=str(parsed.get("evidence_synthesis") or "").strip(),
         answer=answer,
+        as_is=str(parsed.get("as_is") or parsed.get("evidence_synthesis") or "").strip(),
+        to_be=_build_insight_to_be(parsed),
         key_insights=_extract_str_list(parsed.get("key_insights")),
         action_plan=_extract_str_list(parsed.get("action_plan")),
         evidence_sources=[str(x) for x in (evidence.facts.get("evidence_labels") or [])],   # 근거 그대로
@@ -914,8 +989,11 @@ def _fallback_result(evidence: NodeEvidence) -> NodeSummaryResult:
             limitations=[str(x) for x in (evidence.facts.get("limitations") or [])],
         )
     elif detail_kind == "insight":
+        answer = str(evidence.facts.get("answer") or "자동 요약 생성에 실패했습니다.")
         detail = InsightSummaryDetail(
-            answer=str(evidence.facts.get("answer") or "자동 요약 생성에 실패했습니다."),
+            answer=answer,
+            as_is=answer,
+            to_be="근거가 보강된 뒤 실행 방향을 판단해야 합니다.",
             key_insights=[str(x) for x in (evidence.facts.get("key_insights") or [])],
             action_plan=[str(x) for x in (evidence.facts.get("action_plan") or [])],
             evidence_sources=[str(x) for x in (evidence.facts.get("evidence_labels") or [])],
