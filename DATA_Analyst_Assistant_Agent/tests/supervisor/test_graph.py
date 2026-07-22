@@ -12,6 +12,7 @@ from langgraph.types import Command
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     _route_after_decide,
     build_graph,
+    make_clarify_query_node,
     make_create_analysis_plan_node,
     make_decide_next_action_node,
     make_execute_subagent_node,
@@ -1124,7 +1125,6 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
                     clarified_query="매출",
                     clarification_question="어떤 기간과 단위로 매출을 분석할까요?",
                 ),
-                _clarify_decision(clarified_query="최근 6개월 월별 매출"),
                 _plan_decision(),
                 _next_action_decision("finalize"),
                 _final_decision(),
@@ -1155,6 +1155,27 @@ def test_clarification_resume_continues_from_create_analysis_plan() -> None:
         "finalize",
     ]
     assert adapter.calls == []
+
+
+def test_clarify_query_does_not_reask_after_user_answer() -> None:
+    state = _state("seller별 리뷰와 배송 관계 분석")
+    state["clarified_query"] = "seller별 리뷰와 배송 관계 분석 추가 답변: 단일 판매자 기준으로 해줘"
+    state["clarification_answers"] = ["단일 판매자 기준으로 해줘"]
+    model = SequencedDecisionModel(
+        [
+            _clarify_decision(
+                needs_clarification=True,
+                clarification_question="다시 물어보면 안 됩니다.",
+            )
+        ]
+    )
+
+    result = make_clarify_query_node(model)(state)
+
+    assert result["needs_clarification"] is False
+    assert result["next_action"] == "create_plan"
+    assert result["clarification_question"] == ""
+    assert model.decisions
 
 
 def test_finalize_llm_can_fail_without_insight_evidence() -> None:

@@ -192,6 +192,7 @@ def build_clarification_context(state: SupervisorState) -> dict[str, Any]:
         {
             "latest_user_query": state.get("latest_user_query", ""),
             "clarified_query": state.get("clarified_query", ""),
+            "clarification_answers": list(state.get("clarification_answers", []))[-3:],
             "user_turns": list(state.get("user_turns", []))[-3:],
             "datasource_id": state.get("datasource_id"),
             "catalog_summary": state.get("catalog_summary"),

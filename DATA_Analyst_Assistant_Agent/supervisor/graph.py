@@ -589,6 +589,30 @@ def _as_list(value: Any) -> list[Any]:
 def make_clarify_query_node(model: Any | None):
     def clarify_query_node(state: SupervisorState) -> SupervisorState:
         latest_query = str(state.get("clarified_query") or state.get("latest_user_query") or "")
+        prior_answers = [
+            str(answer).strip()
+            for answer in state.get("clarification_answers", [])
+            if str(answer).strip()
+        ]
+        if prior_answers and latest_query.strip():
+            decision = ClarificationDecision(
+                needs_clarification=False,
+                clarified_query=latest_query.strip(),
+                clarification_question="",
+                reason="User clarification has already been collected; proceed without asking again.",
+            )
+            return {
+                "clarified_query": decision.clarified_query,
+                "needs_clarification": False,
+                "clarification_question": "",
+                "clarification_input_mode": decision.input_mode,
+                "clarification_options": decision.options,
+                "clarification_allow_free_text": decision.allow_free_text,
+                "terminal_state": "running",
+                "next_action": "create_plan",
+                "current_step": "clarify_query",
+                "llm_decisions": _append_llm_decision(state, "clarify_query", decision),
+            }
         try:
             decision = invoke_supervisor_decision(
                 state,
