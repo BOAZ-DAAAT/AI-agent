@@ -87,6 +87,35 @@ def test_eda_evidence_includes_primary_hypothesis(adapter, runtime):
     }
 
 
+def test_eda_evidence_includes_derived_group_comparison(adapter, runtime):
+    run = adapter.create_run(thread_id="thread_eda_derived_ev")
+    derived = {
+        "status": "success",
+        "kind": "entity_group_comparison",
+        "entity_col": "seller_id",
+        "metric_col": "delivery_days",
+        "target_col": "review_score",
+        "eligible_entities": 12,
+        "findings": ["seller_id 기준 임시 집계표를 만들었습니다."],
+    }
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {
+            "final_summary": "분기 요청에 맞춰 seller_id 기준 임시 집계표를 만들었습니다.",
+            "hypotheses": [],
+            "primary_hypothesis": {},
+            "cautions": [],
+            "data_level": {},
+            "statistical_metadata": {"derived_group_comparison": derived},
+        },
+        kind="eda_summary", filename="eda_summary.json",
+    )
+
+    evidence = read_node_evidence([artifact_id], runtime)
+
+    assert evidence.facts["derived_group_comparison"] == derived
+
+
 def test_analysis_evidence_includes_method_decision_and_hypothesis_tests(adapter, runtime):
     run = adapter.create_run(thread_id="thread_analysis_ev")
     artifact_id = _register(
