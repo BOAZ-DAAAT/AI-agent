@@ -144,3 +144,43 @@ def test_context_builder_exposes_eda_candidates_as_optional_hints() -> None:
         "Category B revenue is higher than category A.",
         "Weekend orders may differ from weekdays.",
     ]
+
+
+def test_context_builder_exposes_eda_derived_group_results() -> None:
+    state = OrchestrationState(
+        run_id="run_eda_derived_group",
+        user_query="seller groups",
+    )
+    dataframe = pd.DataFrame({
+        "seller_id": ["slow", "fast"],
+        "delivery_days": [20, 5],
+        "review_score": [2, 5],
+    })
+    context = build_analysis_context(
+        state,
+        dataframe,
+        [{
+            "statistical_metadata": {
+                "derived_group_comparison": {
+                    "status": "success",
+                    "kind": "entity_group_comparison",
+                    "entity_col": "seller_id",
+                    "metric_col": "delivery_days",
+                    "target_col": "review_score",
+                    "eligible_entities": 2,
+                    "findings": ["seller_id 기준 임시 집계표를 만들었습니다."],
+                    "top_entities_by_metric": [{"seller_id": "slow"}],
+                },
+            },
+        }],
+    )
+
+    assert context.eda_derived_group_results == [{
+        "status": "success",
+        "kind": "entity_group_comparison",
+        "entity_col": "seller_id",
+        "metric_col": "delivery_days",
+        "target_col": "review_score",
+        "eligible_entities": 2,
+        "findings": ["seller_id 기준 임시 집계표를 만들었습니다."],
+    }]

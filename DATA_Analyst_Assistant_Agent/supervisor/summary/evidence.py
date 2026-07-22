@@ -152,12 +152,14 @@ def _read_sql_evidence_merged(sql_ids: list[str], kinds: dict[str, str], runtime
 
 def _read_eda_evidence(artifact_id: str, runtime: AgentRuntime) -> NodeEvidence:
     payload = read_json_artifact(runtime, artifact_id)
+    statistical_metadata = payload.get("statistical_metadata", {}) or {}
     facts = {
         "final_summary": payload.get("final_summary", ""),
         "hypotheses": payload.get("hypotheses", ""),
         "primary_hypothesis": payload.get("primary_hypothesis", {}),
         "cautions": payload.get("cautions", []),
         "data_level": payload.get("data_level", {}),
+        "derived_group_comparison": statistical_metadata.get("derived_group_comparison") or {},
         "statistical_metadata": payload.get("statistical_metadata", {}),   # Codex 리뷰: 빠져있었음
     }
     code_used = ""

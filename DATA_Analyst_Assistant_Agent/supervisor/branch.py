@@ -119,7 +119,7 @@ def branch_from(
         state = OrchestrationState(
             run_id=run_id,
             thread_id=thread_id,
-            user_query=original_question,
+            user_query=goal,
             goal=goal,
             route_kind=route_kind,
             generated_sql=plan_context.generated_sql,

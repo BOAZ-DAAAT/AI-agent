@@ -41,6 +41,73 @@ def _truncate(text: str, limit: int = _ANALYSIS_RESULT_CHAR_LIMIT) -> str:
     return (text[:limit] + "...") if isinstance(text, str) and len(text) > limit else text
 
 
+def _is_branch_instruction(question: str) -> bool:
+    return "[추가 지시사항]" in (question or "")
+
+
+def _explicit_boxplot_requested(question: str) -> bool:
+    q = (question or "").lower()
+    return (
+        "boxplot" in q
+        or "box plot" in q
+        or "박스플롯" in q
+        or "박스 플롯" in q
+        or "상자그림" in q
+    )
+
+
+def _requested_boxplot_tokens(question: str) -> list[str]:
+    q = (question or "").lower()
+    tokens: list[str] = []
+    if "review_score" in q or "리뷰" in q or "평점" in q:
+        tokens.append("review_score")
+    if "delivery_days" in q or "배송 소요일" in q or "배송소요일" in q:
+        tokens.append("delivery_days")
+    if "delivery_delay_days" in q or "지연일" in q:
+        tokens.append("delivery_delay_days")
+    return tokens
+
+
+def _requested_boxplot_prefer_grouped(question: str) -> bool:
+    q = (question or "").lower()
+    return any(token in q for token in ("초과", "지연 여부", "지연여부", "is_delivery_delayed", "그룹", "군별", "별로"))
+
+
+def _requested_boxplot_caption(path: str) -> str:
+    name = os.path.basename(path)
+    if name.startswith("groupedbox_"):
+        return "사용자가 분기 지시에서 요청한 박스플롯입니다. 그룹별 리뷰 점수 분포 차이를 확인하기 위해 key chart에 포함했습니다."
+    return "사용자가 분기 지시에서 요청한 박스플롯입니다. 리뷰 점수의 중앙값, 사분위 범위, 이상치 분포를 확인하기 위해 key chart에 포함했습니다."
+
+
+def _requested_key_charts(all_charts: list[str], question: str) -> tuple[list[str], dict[str, str]]:
+    if not (_is_branch_instruction(question) and _explicit_boxplot_requested(question)):
+        return [], {}
+
+    tokens = _requested_boxplot_tokens(question)
+    candidates = [p for p in all_charts if "box" in os.path.basename(p).lower()]
+    if tokens:
+        candidates = [
+            p for p in candidates
+            if any(token in os.path.basename(p).lower() for token in tokens)
+        ]
+    if not candidates:
+        return [], {}
+
+    prefer_grouped = _requested_boxplot_prefer_grouped(question)
+
+    def _rank(path: str) -> tuple[int, str]:
+        name = os.path.basename(path).lower()
+        grouped = name.startswith("groupedbox_")
+        if prefer_grouped:
+            return (0 if grouped else 1, name)
+        return (0 if name.startswith("box_") else 1, name)
+
+    selected = sorted(candidates, key=_rank)[:1]
+    captions = {os.path.basename(path): _requested_boxplot_caption(path) for path in selected}
+    return selected, captions
+
+
 def chart_selector_node(state: EDAState) -> dict:
     all_charts = sorted(glob.glob(os.path.join(visualize.OUTPUT_DIR, "*.png")))
     if not all_charts:
@@ -79,6 +146,14 @@ def chart_selector_node(state: EDAState) -> dict:
         key_charts, captions, visual_debug = _run(analysis_results, slim_stat, hypotheses)
 
     # key/ 폴더 초기화 후 선별 차트 복사
+    requested_charts, requested_captions = _requested_key_charts(all_charts, state["user_question"])
+    seen = {os.path.abspath(path) for path in key_charts}
+    for path in requested_charts:
+        if os.path.abspath(path) not in seen:
+            key_charts.append(path)
+            seen.add(os.path.abspath(path))
+    captions = {**captions, **requested_captions}
+
     for f in glob.glob(os.path.join(visualize.KEY_DIR, "*.png")):
         os.remove(f)
     for src in key_charts:

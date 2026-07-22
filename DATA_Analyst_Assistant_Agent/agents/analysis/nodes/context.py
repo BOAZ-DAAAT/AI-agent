@@ -41,6 +41,7 @@ def build_analysis_context(
     issues: list[str] = []
     candidate_insights: list[str] = []
     candidate_hypotheses: list[str] = []
+    derived_group_results: list[dict[str, Any]] = []
     for profile in eda_profiles:
         profile_block = profile.get("profile", profile)
         status = profile_block.get("quality_status")
@@ -49,6 +50,11 @@ def build_analysis_context(
         issues.extend(str(item) for item in profile_block.get("key_issues", []) or [])
         candidate_insights.extend(_candidate_texts(profile.get("insight_result")))
         candidate_hypotheses.extend(_candidate_texts(profile.get("hypotheses")))
+        statistical_metadata = profile.get("statistical_metadata")
+        if isinstance(statistical_metadata, dict):
+            derived = statistical_metadata.get("derived_group_comparison")
+            if isinstance(derived, dict):
+                derived_group_results.append(_slim_derived_group_result(derived))
         for caution in profile.get("cautions", []) or []:
             if isinstance(caution, dict) and caution.get("message_ko"):
                 issues.append(str(caution["message_ko"]))
@@ -104,6 +110,7 @@ def build_analysis_context(
         eda_key_issues=list(dict.fromkeys(issues)),
         eda_candidate_insights=list(dict.fromkeys(candidate_insights)),
         eda_candidate_hypotheses=list(dict.fromkeys(candidate_hypotheses)),
+        eda_derived_group_results=derived_group_results,
         known_data_quality_issues=known_data_quality_issues,
         analysis_data_contract=analysis_contract,
         mart_columns=mart_columns,
@@ -130,6 +137,27 @@ def _question_type_from_state(state: OrchestrationState) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _slim_derived_group_result(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "status",
+        "kind",
+        "entity_col",
+        "observation_col",
+        "metric_col",
+        "target_col",
+        "count_col",
+        "min_count",
+        "threshold_source",
+        "total_entities",
+        "eligible_entities",
+        "excluded_entities",
+        "relationships",
+        "high_metric_group",
+        "findings",
+    }
+    return {key: value[key] for key in allowed if key in value}
 
 
 def _candidate_texts(value: Any, *, max_items: int = 12, max_chars: int = 500) -> list[str]:

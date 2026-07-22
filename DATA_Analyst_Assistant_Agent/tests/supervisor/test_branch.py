@@ -131,3 +131,43 @@ def test_branch_from_passes_hydrated_sql_context_to_analysis(monkeypatch) -> Non
     assert result.failed_agent == "analysis_agent"
     assert backend_adapter.events[-1]["event_type"] == "agent.failed"
     assert not any(event["event_type"] == "agent.completed" for event in backend_adapter.events)
+
+
+def test_branch_from_passes_branch_instruction_as_user_query(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        adapter=FakeRuntimeAdapter({"art_sql": json.dumps(_sql_payload(), ensure_ascii=False)})
+    )
+    backend_adapter = FakeBackendAdapter()
+    captured = {}
+
+    def fake_run_agent(agent_name, state, runtime):
+        captured["agent_name"] = agent_name
+        captured["state"] = state
+        return AgentEnvelope(
+            status=AgentStatus.failed,
+            agent_name=agent_name,
+            summary="stop after capture",
+            error="stop after capture",
+            artifact_refs=[ArtifactRef(artifact_id="art_eda_failed", type=ArtifactType.file)],
+        )
+
+    monkeypatch.setattr(branch_module, "_run_agent", fake_run_agent)
+
+    branch_from(
+        "eda",
+        "compare sellers with at least 10 orders by top 10 percent delivery days",
+        upstream_artifact_ids={"sql_agent": ["art_sql"]},
+        original_question="analyze delivery days and review score",
+        run_id="run_branch",
+        thread_id="thread_branch",
+        runtime=runtime,
+        backend_adapter=backend_adapter,
+        parent_node_id="node_sql",
+        target_table="analytics.mart_seller_delivery_review_monthly",
+    )
+
+    state = captured["state"]
+    assert captured["agent_name"] == "eda_agent"
+    assert "analyze delivery days and review score" in state.user_query
+    assert "compare sellers with at least 10 orders" in state.user_query
+    assert state.user_query == state.goal
