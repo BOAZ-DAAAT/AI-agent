@@ -237,6 +237,14 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
             "Do not test or report every EDA candidate by default. You may create additional "
             "hypotheses if the analysis plan requires them.\n"
         )
+    if context.eda_derived_group_results:
+        prompt += (
+            "\nStructured EDA-derived temporary group summaries "
+            "(computed from the current dataframe; prefer these when they match the branch request):\n"
+            f"{json.dumps(context.eda_derived_group_results, ensure_ascii=False, sort_keys=True)}\n"
+            "If you test the same entity-level relationship, use the same entity grain, "
+            "sample-size threshold, and columns unless the user asks otherwise.\n"
+        )
     if context.known_data_quality_issues:
         # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.
         joined = "\n".join(f"- {issue}" for issue in context.known_data_quality_issues)

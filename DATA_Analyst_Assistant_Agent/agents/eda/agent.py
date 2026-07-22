@@ -11,6 +11,10 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, load_analysis_inputs
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
+from DATA_Analyst_Assistant_Agent.agents.eda.lib.derived_group import (
+    build_derived_group_frame,
+    compute_derived_group_comparison,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentEnvelope,
     LocalCheck,
@@ -81,6 +85,20 @@ class EDAAgent:
         # codegen 탈출구가 도메인 밖으로 판정하면 top-level 플래그로 정직하게 노출한다
         # (성공 결과는 statistical_metadata.adhoc_analysis에 편입됨). 분석 에이전트가 라우팅에 씀.
         codegen = eda_result.get("codegen", {}) or {}
+        derived_group_comparison = (
+            (eda_result.get("statistical_metadata") or {}).get("derived_group_comparison")
+            or self._derive_group_comparison(csvs, state)
+        )
+        if derived_group_comparison:
+            statistical_metadata = dict(eda_result.get("statistical_metadata", {}) or {})
+            statistical_metadata["derived_group_comparison"] = derived_group_comparison
+            eda_result["statistical_metadata"] = statistical_metadata
+            if "[추가 분기 집계]" not in str(eda_result.get("final_summary", "")):
+                eda_result["final_summary"] = _append_derived_summary(
+                    eda_result.get("final_summary", ""),
+                    derived_group_comparison,
+                )
+        effective_profile = eda_result.get("profile_override") or profile
         out_of_domain = (
             {"reason": codegen.get("reason", ""), "user_question": codegen.get("user_question", "")}
             if codegen.get("status") == "out_of_domain" else None
@@ -89,7 +107,7 @@ class EDAAgent:
         payload = {
             "run_id": state.run_id,
             "source_artifacts": source_ids,
-            "profile": profile,
+            "profile": effective_profile,
             "user_question": eda_result.get("user_question", state.user_query),
             "analysis_plan": eda_result.get("analysis_plan", {}),
             "insight_result": eda_result.get("insight_result", ""),
@@ -115,11 +133,11 @@ class EDAAgent:
             parent_ids=source_ids,
             metadata={"kind": "eda_summary", "source_artifact_count": len(source_ids)},
             preview={
-                "row_count": profile["row_count"],
-                "columns": profile["columns"],
+                "row_count": effective_profile["row_count"],
+                "columns": effective_profile["columns"],
                 "final_summary": payload["final_summary"],
                 "key_charts": payload["key_charts"],
-                "quality_status": profile["quality_status"],
+                "quality_status": effective_profile["quality_status"],
             },
         )
         return AgentEnvelope(
@@ -147,10 +165,31 @@ class EDAAgent:
         main = max(frames, key=len)
         same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
         df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
+        derived_input = build_derived_group_frame(df, state.user_query or "")
+        graph_df = derived_input["dataframe"] if derived_input else df
+        graph_mart_design = derived_input.get("mart_design", {}) if derived_input else {}
+        graph_question = state.user_query or ""
+        if derived_input:
+            meta = derived_input["metadata"]
+            graph_question = (
+                f"{graph_question}\n\n"
+                "[분기 EDA 입력]\n"
+                f"{meta['entity_col']} 기준으로 임시 집계표를 생성한 뒤 "
+                f"{meta['count_col']} >= {meta['min_count']} 조건을 적용했습니다. "
+                f"현재 EDA 그래프 입력은 원본 주문 행이 아니라 "
+                f"{meta['eligible_entities']}개 {meta['entity_col']} 집계 행입니다."
+            )
 
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.
-        set_context(EdaContext(df=df, question_type=state.route_kind or "", user_question=state.user_query or ""))
+        set_context(EdaContext(
+            df=graph_df,
+            key_col=derived_input.get("key_col") if derived_input else None,
+            measure_cols=derived_input.get("measure_cols") if derived_input else None,
+            target_col=derived_input.get("target_col") if derived_input else None,
+            question_type=state.route_kind or "",
+            user_question=graph_question,
+        ))
         # 앞단이 넘긴 의미 힌트를 EDA로 전달(있으면 줍고 없으면 폴백). 앞단(오케스트레이터)은
         # "매출"/"월"/None 수준이라 대개 비어 옴 → 가설 노드가 priority_metrics로 폴백한다.
         plan = state.plan
@@ -175,9 +214,9 @@ class EDAAgent:
             app = build_app()
             result = app.invoke(
                 {
-                    "user_question": state.user_query,
+                    "user_question": graph_question,
                     "target_table": "",
-                    "mart_design": {},
+                    "mart_design": graph_mart_design,
                     "question_type": state.route_kind or "",
                     "plan_metric": plan_metric,
                     "plan_dimension": plan_dimension,
@@ -189,7 +228,22 @@ class EDAAgent:
             )
         finally:
             reset_context()
+        if derived_input:
+            statistical_metadata = dict(result.get("statistical_metadata", {}) or {})
+            statistical_metadata["derived_group_comparison"] = derived_input["metadata"]
+            result["statistical_metadata"] = statistical_metadata
+            result["profile_override"] = profile_from_csv_artifacts([
+                CsvArtifactData(artifact_id="derived_group", text="", dataframe=graph_df)
+            ])
         return result
+
+    @staticmethod
+    def _derive_group_comparison(csvs: list[CsvArtifactData], state: OrchestrationState) -> dict[str, Any] | None:
+        frames = [csv.dataframe for csv in csvs if csv.error is None and not csv.dataframe.empty]
+        if not frames:
+            return None
+        main = max(frames, key=len)
+        return compute_derived_group_comparison(main, state.user_query or "")
 
 
 # ─────────────────────────────
@@ -266,6 +320,16 @@ def _categorical_top_values(df: pd.DataFrame) -> dict[str, dict[str, int]]:
         counts = df[column].fillna("<NA>").astype(str).value_counts(dropna=False).head(5)
         categorical[column] = {str(value): int(count) for value, count in counts.items()}
     return categorical
+
+
+def _append_derived_summary(summary: str, derived: dict[str, Any]) -> str:
+    findings = [str(item) for item in derived.get("findings", []) if str(item).strip()]
+    if not findings:
+        return summary
+    addition = " ".join(findings[:3])
+    if not summary:
+        return addition
+    return f"{summary}\n\n[추가 분기 집계] {addition}"
 
 
 def run_eda_self_check(
