@@ -129,6 +129,25 @@ def test_normalize_method_decision_list_fields() -> None:
     )
 
 
+def test_fill_missing_method_decision_from_hypothesis_and_notes() -> None:
+    payload = {
+        "summary": "판매자별 평균 배송일과 리뷰 점수의 관계를 Spearman 상관으로 확인했다.",
+        "method_notes": ["판매자 단위 재집계 후 Spearman 상관을 적용했다."],
+        "hypothesis_tests": [
+            {
+                "hypothesis": "배송일이 길수록 리뷰 점수가 낮다.",
+                "test_name": "Spearman correlation",
+            }
+        ],
+    }
+
+    normalized = normalize_result_payload(payload)
+
+    assert normalized["method_decision"]["selected_method"] == "Spearman correlation"
+    assert normalized["method_decision"]["rationale"] == "판매자 단위 재집계 후 Spearman 상관을 적용했다."
+    assert "Filled missing method_decision from generated analysis evidence." in normalized["method_notes"]
+
+
 def test_recoverable_alias_is_not_fatal_but_broken_rows_are() -> None:
     assert fatal_result_contract_errors({"evidence_tables": [{"name": "summary", "rows": []}]}) == []
 

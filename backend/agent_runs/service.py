@@ -22,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, S
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
+from DATA_Analyst_Assistant_Agent.supervisor.summary.generator import generate_node_summary
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import NodeSummaryResult
 
 
@@ -132,12 +133,7 @@ class NodeSummaryLookup:
     summary: NodeSummaryResult
 
 
-def get_node_summary(
-    *,
-    services: BackendServices,
-    run_id: str,
-    node_id: str,
-) -> NodeSummaryLookup:
+def _completed_node_event(*, services: BackendServices, run_id: str, node_id: str):
     completed_event = next(
         (
             event
@@ -149,20 +145,44 @@ def get_node_summary(
     )
     if completed_event is None:
         raise NodeSummaryNotFoundError("완료된 노드를 찾을 수 없습니다.")
+    return completed_event
+
+
+def _summary_source_ids(completed_event, summary_metadata: dict[str, Any]) -> list[str]:
+    raw_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
+    return [item for item in raw_ids if isinstance(item, str) and item]
+
+
+def _latest_summary_artifact_id(
+    *, services: BackendServices, run_id: str, source_ids: list[str]
+) -> str | None:
+    wanted = set(source_ids)
+    if not wanted:
+        return None
+    latest_id: str | None = None
+    for artifact in services.artifact_registry.list_artifacts(run_id=run_id, type="file"):
+        metadata = artifact.metadata
+        if metadata.get("kind") != "node_summary":
+            continue
+        if set(metadata.get("source_artifact_ids") or []) == wanted:
+            latest_id = artifact.artifact_id
+    return latest_id
+
+
+def get_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    completed_event = _completed_node_event(services=services, run_id=run_id, node_id=node_id)
 
     summary_metadata = completed_event.metadata.get("summary")
     summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
-    summary_artifact_id = summary_metadata.get("summary_artifact_id")
-    if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
-        source_artifact_ids = completed_event.artifact_ids or summary_metadata.get("artifact_ids") or []
-        source_ids = {item for item in source_artifact_ids if isinstance(item, str)}
-        for artifact in reversed(services.artifact_registry.list_artifacts(run_id=run_id, type="file")):
-            metadata = artifact.metadata
-            if metadata.get("kind") != "node_summary":
-                continue
-            if set(metadata.get("source_artifact_ids") or []) == source_ids and source_ids:
-                summary_artifact_id = artifact.artifact_id
-                break
+    source_ids = _summary_source_ids(completed_event, summary_metadata)
+    summary_artifact_id = _latest_summary_artifact_id(
+        services=services, run_id=run_id, source_ids=source_ids
+    ) or summary_metadata.get("summary_artifact_id")
 
     if not isinstance(summary_artifact_id, str) or not summary_artifact_id:
         raise NodeSummaryNotFoundError("노드의 상세 서머리가 아직 생성되지 않았습니다.")
@@ -186,6 +206,25 @@ def get_node_summary(
         summary_artifact_id=summary_artifact_id,
         summary=summary,
     )
+
+
+def regenerate_node_summary(
+    *,
+    services: BackendServices,
+    run_id: str,
+    node_id: str,
+) -> NodeSummaryLookup:
+    """완료된 노드의 원본 artifact를 유지하고 summary artifact만 새로 만든다."""
+    completed_event = _completed_node_event(services=services, run_id=run_id, node_id=node_id)
+    summary_metadata = completed_event.metadata.get("summary")
+    summary_metadata = summary_metadata if isinstance(summary_metadata, dict) else {}
+    source_ids = _summary_source_ids(completed_event, summary_metadata)
+    if not source_ids:
+        raise NodeSummaryNotFoundError("서머리를 재생성할 원본 artifact가 없습니다.")
+
+    runtime = AgentRuntime(adapter=BackendAdapter(services=services))
+    generate_node_summary(source_ids, runtime, force_regenerate=True)
+    return get_node_summary(services=services, run_id=run_id, node_id=node_id)
 
 
 def new_thread_id() -> str:
@@ -377,6 +416,7 @@ _BRANCH_STAGE_AGENT = {
     "analysis": "analysis_agent",
     "insight": "insight",
 }
+_BRANCH_AGENT_STAGE = {agent: stage for stage, agent in _BRANCH_STAGE_AGENT.items()}
 
 
 class BranchPlanError(Exception):
@@ -389,6 +429,95 @@ class BranchPlan:
     original_question: str
     target_table: str | None
     default_parent_node_id: str | None
+
+
+def _run_lineage(*, services: BackendServices, run: RunRecord) -> list[RunRecord]:
+    lineage = [run]
+    seen = {run.run_id}
+    current = run
+    while True:
+        parent_run_id = current.metadata.get("branched_from_run_id")
+        if not isinstance(parent_run_id, str) or not parent_run_id:
+            break
+        if parent_run_id in seen:
+            raise BranchPlanError("분기 실행 계보에 순환 참조가 있습니다.")
+        try:
+            parent = services.run_service.get_run(parent_run_id)
+        except Exception as exc:
+            raise BranchPlanError("상위 분기 실행을 찾을 수 없습니다.") from exc
+        seen.add(parent.run_id)
+        lineage.append(parent)
+        current = parent
+    return list(reversed(lineage))
+
+
+def _event_artifact_ids(event) -> list[str]:
+    ids = event.artifact_ids
+    if not ids:
+        summary = event.metadata.get("summary")
+        if isinstance(summary, dict):
+            ids = summary.get("artifact_ids") or []
+    return [artifact_id for artifact_id in ids if isinstance(artifact_id, str) and artifact_id]
+
+
+def _effective_branch_stage_outputs(
+    *,
+    services: BackendServices,
+    lineage: list[RunRecord],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    artifact_ids_by_agent: dict[str, list[str]] = {}
+    node_id_by_agent: dict[str, str] = {}
+
+    for lineage_run in lineage:
+        for event in services.run_service.list_events(lineage_run.run_id):
+            if event.event_type != "agent.completed" or event.node_name not in _BRANCH_AGENT_STAGE:
+                continue
+            stage_artifact_ids = _event_artifact_ids(event)
+            if stage_artifact_ids:
+                artifact_ids_by_agent[event.node_name] = stage_artifact_ids
+            node_id = event.metadata.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                node_id_by_agent[event.node_name] = node_id
+
+    return artifact_ids_by_agent, node_id_by_agent
+
+
+def _default_branch_parent_node_id(
+    *,
+    services: BackendServices,
+    run_id: str,
+    start_stage: BranchStage,
+    checkpoint_state: dict[str, Any],
+    node_id_by_agent: dict[str, str] | None = None,
+) -> str | None:
+    """분기 시작 노드는 start_stage 직전 완료 노드에 붙인다.
+
+    예: EDA부터 다시 돌면 원본 SQL 노드 뒤에 새 EDA가 붙어야 하므로, 마지막 완료 노드
+    (보통 Insight)가 아니라 직전 단계(SQL)의 completed node_id를 사용한다.
+    """
+    start_index = _BRANCH_STAGE_ORDER.index(start_stage)
+    if start_index <= 0:
+        return None
+
+    previous_stage = _BRANCH_STAGE_ORDER[start_index - 1]
+    previous_agent = _BRANCH_STAGE_AGENT[previous_stage]
+    if node_id_by_agent and node_id_by_agent.get(previous_agent):
+        return node_id_by_agent[previous_agent]
+
+    latest_node_id: str | None = None
+
+    for event in services.run_service.list_events(run_id):
+        if event.event_type != "agent.completed" or event.node_name != previous_agent:
+            continue
+        node_id = event.metadata.get("node_id")
+        if isinstance(node_id, str) and node_id:
+            latest_node_id = node_id
+
+    if latest_node_id:
+        return latest_node_id
+
+    fallback = checkpoint_state.get("last_completed_node_id")
+    return fallback if isinstance(fallback, str) else None
 
 
 def prepare_branch_plan(
@@ -410,10 +539,17 @@ def prepare_branch_plan(
     orchestration_state = to_orchestration_state(checkpoint_state)
     start_index = _BRANCH_STAGE_ORDER.index(start_stage)
     upstream_stages = _BRANCH_STAGE_ORDER[:start_index]
+    lineage = _run_lineage(services=services, run=run)
+    effective_artifact_ids, effective_node_ids = _effective_branch_stage_outputs(
+        services=services,
+        lineage=lineage,
+    )
+    checkpoint_artifact_ids = dict(orchestration_state.artifact_ids)
+    checkpoint_artifact_ids.update(effective_artifact_ids)
     upstream_artifact_ids = {
-        _BRANCH_STAGE_AGENT[stage]: orchestration_state.artifact_ids.get(_BRANCH_STAGE_AGENT[stage], [])
+        _BRANCH_STAGE_AGENT[stage]: checkpoint_artifact_ids.get(_BRANCH_STAGE_AGENT[stage], [])
         for stage in upstream_stages
-        if orchestration_state.artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
+        if checkpoint_artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
     }
     missing_stages = [
         stage for stage in upstream_stages if not upstream_artifact_ids.get(_BRANCH_STAGE_AGENT[stage])
@@ -421,12 +557,18 @@ def prepare_branch_plan(
     if missing_stages:
         raise BranchPlanError(f"{', '.join(missing_stages)} 단계 결과가 없어 분기를 시작할 수 없습니다.")
 
-    default_parent_node_id = checkpoint_state.get("last_completed_node_id")
+    default_parent_node_id = _default_branch_parent_node_id(
+        services=services,
+        run_id=run.run_id,
+        start_stage=start_stage,
+        checkpoint_state=checkpoint_state,
+        node_id_by_agent=effective_node_ids,
+    )
     return BranchPlan(
         upstream_artifact_ids=upstream_artifact_ids,
         original_question=orchestration_state.user_query,
         target_table=orchestration_state.plan.target_table if orchestration_state.plan else None,
-        default_parent_node_id=default_parent_node_id if isinstance(default_parent_node_id, str) else None,
+        default_parent_node_id=default_parent_node_id,
     )
 
 

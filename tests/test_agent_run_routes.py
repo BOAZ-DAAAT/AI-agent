@@ -138,6 +138,76 @@ def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> N
     assert events_response.json()[0]["node_name"] == "supervisor"
 
 
+def test_related_events_returns_branch_family_siblings(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+
+    root = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    first_branch = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "branched_from_run_id": root.run_id},
+    )
+    second_branch = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "branched_from_run_id": root.run_id},
+    )
+    unrelated = services.run_service.create_run(
+        thread_id="thread_other",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+
+    root_event = services.run_service.append_event(
+        root.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        metadata={"node_id": "root_sql"},
+    )
+    first_branch_event = services.run_service.append_event(
+        first_branch.run_id,
+        "agent.completed",
+        "EDA branch completed",
+        node_name="eda_agent",
+        metadata={"node_id": "branch_one_eda"},
+    )
+    second_branch_event = services.run_service.append_event(
+        second_branch.run_id,
+        "agent.started",
+        "Analysis branch started",
+        node_name="analysis_agent",
+        metadata={"node_id": "branch_two_analysis"},
+    )
+    unrelated_event = services.run_service.append_event(
+        unrelated.run_id,
+        "agent.completed",
+        "Unrelated completed",
+        node_name="sql_agent",
+        metadata={"node_id": "unrelated_sql"},
+    )
+
+    response = client.get(
+        f"/agent-runs/{second_branch.run_id}/related-events",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    event_ids = {event["event_id"] for event in response.json()}
+    assert root_event.event_id in event_ids
+    assert first_branch_event.event_id in event_ids
+    assert second_branch_event.event_id in event_ids
+    assert unrelated_event.event_id not in event_ids
+
+
 def test_get_completed_node_summary_returns_registered_summary(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)
@@ -183,6 +253,54 @@ def test_get_completed_node_summary_returns_registered_summary(tmp_path, monkeyp
     assert body["summary_artifact_id"] == summary_artifact.artifact_id
     assert body["summary"]["detail"]["kind"] == "sql"
     assert body["summary"]["key_finding"] == "월별 매출 집계가 완료되었습니다."
+
+
+def test_get_completed_node_summary_prefers_latest_matching_artifact(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(thread_id="thread_latest_summary", project_id="sess_001")
+    source_artifact = _register_file_artifact(
+        services, run.run_id, payload={"rows": 12}, metadata={"kind": "analysis_result"},
+    )
+    old_payload = _node_summary_payload()
+    old_payload["key_finding"] = "기존 폴백 서머리"
+    old_summary = _register_file_artifact(
+        services, run.run_id, payload=old_payload,
+        metadata={"kind": "node_summary", "source_artifact_ids": [source_artifact.artifact_id]},
+    )
+    services.run_service.append_event(
+        run.run_id, "agent.completed", "Analysis Agent completed",
+        node_name="analysis_agent", artifact_ids=[source_artifact.artifact_id],
+        metadata={
+            "node_id": "node_analysis",
+            "summary": {
+                "agent": "analysis_agent",
+                "artifact_ids": [source_artifact.artifact_id],
+                "summary_artifact_id": old_summary.artifact_id,
+            },
+        },
+    )
+    new_payload = _node_summary_payload()
+    new_payload["key_finding"] = "새로 생성한 서머리"
+    new_summary = _register_file_artifact(
+        services, run.run_id, payload=new_payload,
+        metadata={"kind": "node_summary", "source_artifact_ids": [source_artifact.artifact_id]},
+    )
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/nodes/node_analysis/summary", headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary_artifact_id"] == new_summary.artifact_id
+    assert response.json()["summary"]["key_finding"] == "새로 생성한 서머리"
 
 
 def test_get_completed_node_summary_resolves_legacy_event_by_source_artifacts(tmp_path, monkeypatch) -> None:

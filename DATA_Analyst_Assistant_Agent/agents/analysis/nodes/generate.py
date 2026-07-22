@@ -106,9 +106,23 @@ Rules:
   limitations. Create `review_request` only when the definition or method choice
   materially affects interpretation and user confirmation would improve analysis
   quality.
+- When the user asks to exclude entities below a sample-size threshold (for
+  example "n<30 sellers"), compute that threshold at the requested entity grain
+  from the current dataframe before filtering. For seller-level thresholds on a
+  seller/order/month mart, prefer `df.groupby("seller_id")["order_id"].nunique()`
+  when `order_id` exists, otherwise use row counts. Do NOT treat a pre-existing
+  count-like mart column such as `seller_order_count` as the entity sample size
+  unless the analysis_data_contract explicitly defines it as that exact
+  entity-level total.
+- If an entity filter leaves too few rows/groups for a statistic, set the
+  related decision to `inconclusive`, state that the test is not estimable, and
+  do not describe NaN/None statistics as a positive/negative relationship.
 - Always include `method_decision` in result with selected_method, rationale,
   assumptions_checked, and fallbacks_considered. Choose a method automatically
   whenever the observed data and objective establish a defensible preference.
+- Treat `method_decision` as part of the required result contract, not as an
+  optional note. If you compute a correlation, trend, regression, test, or
+  heuristic threshold, explicitly name that method and why it was chosen.
 - Create `review_request` only when at least two mutually exclusive analysis
   paths are each valid for this data and their different assumptions or
   interpretations would materially change the next analysis. Do not ask merely
@@ -147,6 +161,12 @@ Rules:
       "columns": ["group", "n", "mean_value"],
       "rows": [{{"group": "A", "n": 10, "mean_value": 3.2}}],
   }}]
+  result["method_decision"] = {{
+      "selected_method": "spearman_correlation",
+      "rationale": "왜도가 있는 집계 지표 간 단조 관계를 확인하기 위해 Pearson 대신 Spearman을 선택했다.",
+      "assumptions_checked": ["판매자 단위 재집계 후 순위 기반 관계를 해석한다."],
+      "fallbacks_considered": ["선형성 가정이 필요한 Pearson 상관은 보조 대안으로만 검토했다."],
+  }}
 - When a previous selection response is supplied, treat it as a binding
   constraint for this analysis. A free-text response is a new analysis
   constraint, not a note to append to the report.

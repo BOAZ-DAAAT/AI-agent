@@ -37,6 +37,19 @@ class EvidenceTable(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AnalysisItem(BaseModel):
+    """Analysis UI가 문장 파싱 없이 카드로 렌더링할 수 있는 본 분석 단위."""
+
+    title: str
+    method: str = ""
+    purpose: str = ""
+    result: str = ""
+    key_numbers: list[str] = Field(default_factory=list)
+    interpretation: str = ""
+    caution: str = ""
+    decision: str = ""
+
+
 class SQLSummaryDetail(BaseModel):
     """SQL 단계 — 정합성 확인 → 파생변수 생성 → 데이터마트 설계라는 고유 역할을 반영."""
 
@@ -47,7 +60,7 @@ class SQLSummaryDetail(BaseModel):
     derived_columns: list[FindingSection] = Field(default_factory=list)  # 파생변수 각각(정의·계산식)
     mart_grain: str = ""                                 # 최종 마트의 grain(행 단위)
     mart_columns: list[str] = Field(default_factory=list)      # 최종 마트 컬럼 목록
-    mart_preview: list[dict[str, Any]] = Field(default_factory=list)  # 실제 CSV 앞 5행(근거 그대로, LLM이 안 씀)
+    mart_preview: list[dict[str, Any]] = Field(default_factory=list)  # 실제 CSV 앞 10행(근거 그대로, LLM이 안 씀)
     sql_snippet: str = ""                                # 실행된 SQL(근거 그대로, LLM이 안 씀)
     interpretation_scope: list[str] = Field(default_factory=list)
     handoff: str = ""                                  # 다음 EDA 단계가 이어받을 분석 가능 범위
@@ -72,6 +85,7 @@ class AnalysisSummaryDetail(BaseModel):
 
     kind: Literal["analysis"] = "analysis"
     method_decision: dict[str, Any] = Field(default_factory=dict)   # 근거 그대로 발췌(LLM이 안 씀)
+    analysis_items: list[AnalysisItem] = Field(default_factory=list)
     hypothesis_tests: list[FindingSection] = Field(default_factory=list)   # H0/H1/판정/근거
     key_statistics: list[FindingSection] = Field(default_factory=list)    # 핵심 수치 근거
     evidence_tables: list[EvidenceTable] = Field(default_factory=list)    # 원본 analysis_result의 실제 표

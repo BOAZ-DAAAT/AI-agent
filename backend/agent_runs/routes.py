@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import mimetypes
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -9,12 +11,12 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from backend.auth.deps import get_current_user
 from backend.session.service import get_owned_session
 from data_agent_backend.models.common import BackendError
-from data_agent_backend.models.runs import RunStatus
+from data_agent_backend.models.runs import RunRecord, RunStatus
 
 from .event_stream import EVENT_STREAM_POLL_INTERVAL_SECONDS, stream_run_events
 from .schemas import (
@@ -42,6 +44,23 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+def _branch_root_id(services, run: RunRecord) -> str:
+    current = run
+    seen = {run.run_id}
+
+    while True:
+        parent_run_id = current.metadata.get("branched_from_run_id")
+        if not isinstance(parent_run_id, str) or not parent_run_id:
+            return current.run_id
+        if parent_run_id in seen:
+            return current.run_id
+        seen.add(parent_run_id)
+        try:
+            current = services.run_service.get_run(parent_run_id)
+        except BackendError:
+            return current.run_id
 
 
 @router.delete("/{run_id}", response_model=AgentRunDeleteResponse)
@@ -103,6 +122,42 @@ def read_agent_node_summary(
         agent_name=result.agent_name,
         summary_artifact_id=result.summary_artifact_id,
         summary=result.summary,
+    )
+
+
+@router.get("/{run_id}/artifacts/{artifact_id}/content")
+def read_agent_run_artifact_content(
+    run_id: str,
+    artifact_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> Response:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+        artifact = services.artifact_registry.get_artifact(artifact_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, str(user["sub"]))
+
+    if artifact.run_id != run_id:
+        raise HTTPException(status_code=404, detail="실행에 연결된 artifact가 아닙니다.")
+
+    try:
+        path = services.artifact_store.get_path(artifact_id)
+        content = path.read_bytes()
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=300"},
     )
 
 
@@ -291,6 +346,29 @@ def branch_run(
         start_stage=payload.start_stage,
         source_run_id=run_id,
     )
+
+
+@router.get("/{run_id}/related-events")
+def list_related_agent_run_events(run_id: str, request: Request, _user: dict = Depends(get_current_user)) -> list[dict]:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    root_id = _branch_root_id(services, run)
+    candidate_runs = services.run_service.list_runs(
+        thread_id=run.thread_id,
+        project_id=run.project_id,
+    )
+    related_events = []
+    for candidate_run in candidate_runs:
+        if _branch_root_id(services, candidate_run) != root_id:
+            continue
+        related_events.extend(services.run_service.list_events(candidate_run.run_id))
+
+    related_events.sort(key=lambda event: (event.created_at or "", event.event_id))
+    return [event.model_dump(mode="json") for event in related_events]
 
 
 @router.get("/{run_id}")

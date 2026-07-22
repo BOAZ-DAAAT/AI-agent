@@ -442,6 +442,20 @@ def test_downstream_prompts_prioritize_required_columns_and_business_keys():
         assert "customers.customer_unique_id" in prompt_text
 
 
+def test_mart_design_prompt_includes_analysis_required_ratio_policy():
+    prompt_text = mart_design_prompt(base_state(plan=comprehensive_plan()))
+
+    for expected in (
+        "분석 필수 파생변수",
+        "연속형 비율",
+        "분자·분모·연산 순서",
+        "0이거나 NULL",
+        "required_mart_columns에 해당 output_column",
+        "마트 컬럼을 직접 사용",
+    ):
+        assert expected in prompt_text
+
+
 def test_mart_generation_prompt_contains_design_and_postcheck_semantics():
     state = base_state(plan=comprehensive_plan(), mart_design=mart_design_payload())
 
@@ -455,6 +469,10 @@ def test_mart_generation_prompt_contains_design_and_postcheck_semantics():
         "column_plan",
         "aggregation_method",
         "metric_support",
+        "분석 필수 파생변수",
+        "분자·분모·연산 순서",
+        "0/NULL 처리 규칙",
+        "column_plan에 없는 최종 표시용",
         "임의 컬럼·집계·필터",
         "row_count",
         "duplicate_grain_count",
