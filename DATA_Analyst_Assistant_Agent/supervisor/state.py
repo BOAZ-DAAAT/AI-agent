@@ -552,16 +552,10 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                 if schema_version >= 6
                 else {"status": "not_started"}
             ),
-            "clarification_answers": (
-                list(state.get("clarification_answers", [])) if schema_version >= 7 else []
-            ),
-            "retrieval_query": (
-                str(state.get("retrieval_query") or "") if schema_version >= 7 else ""
-            ),
-            "retrieval_query_generation": (
-                dict(state.get("retrieval_query_generation") or {"status": "not_started"})
-                if schema_version >= 7
-                else {"status": "not_started"}
+            "clarification_answers": list(state.get("clarification_answers", [])),
+            "retrieval_query": str(state.get("retrieval_query") or ""),
+            "retrieval_query_generation": dict(
+                state.get("retrieval_query_generation") or {"status": "not_started"}
             ),
         }
         normalized.pop("validation_results", None)
@@ -1057,6 +1051,16 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             filters=[str(item) for item in (plan_payload.get("filters") or []) if str(item).strip()],
             requires_mart_review=bool(plan_payload.get("requires_mart_review", False)),
             query_rules=dict(plan_payload.get("query_rules") or {}),
+            required_derivations=[
+                dict(item)
+                for item in (plan_payload.get("required_derivations") or [])
+                if isinstance(item, dict)
+            ],
+            analysis_heuristics=[
+                dict(item)
+                for item in (plan_payload.get("analysis_heuristics") or [])
+                if isinstance(item, dict)
+            ],
             route_kind=route_kind,
             generated_sql=generated_sql,
             source_sql=source_sql,

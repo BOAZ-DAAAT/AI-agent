@@ -10,7 +10,7 @@ import pytest
 from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes import tool_runner as TR
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes import (
-    comparison, distribution, inspect, quality, relationship, time as time_mod,
+    clustering, comparison, distribution, inspect, quality, relationship, time as time_mod,
 )
 
 
@@ -53,6 +53,7 @@ def _state(**overrides) -> dict:
     (comparison.comparison_node, "comparison_result"),
     (relationship.relationship_node, "relationship_result"),
     (time_mod.time_node, "time_result"),
+    (clustering.clustering_node, "clustering_summary"),
     (inspect.inspect_node, "inspect_result"),
 ])
 def test_node_calls_llm_exactly_once(monkeypatch, node_fn, result_key):

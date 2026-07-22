@@ -61,3 +61,37 @@ def test_prompt_requests_three_part_caption(monkeypatch):
     assert "왜 이 차트를 골랐는지" in prompt
     assert "확인 가능한 구체적 결론" in prompt
     assert "새 숫자 생성 금지" in prompt
+
+
+def test_prompt_states_eda_caption_role_boundary(monkeypatch):
+    fake = _FakeLLM('{"remove": [], "reason": {}, "keep_captions": {}}')
+    monkeypatch.setattr(css, "_load_llm", lambda: fake)
+
+    css._call_llm_remove(
+        filenames=["a.png", "b.png"],
+        user_question="질문",
+        question_type="comparison",
+        analysis_results={},
+        statistical_metadata={},
+    )
+
+    prompt = fake.prompts[0]
+    assert "EDA role boundary for captions" in prompt
+    assert "exploratory EDA notes" in prompt
+    assert "not final analysis conclusions" in prompt
+    assert "follow-up Analysis validation" in prompt
+
+
+def test_caption_normalization_keeps_eda_exploratory_tone():
+    caption = (
+        "가설 1의 직접 근거로 선택했다. "
+        "피어슨 상관 -0.365로 음의 상관이 확인되며 점수가 낮다는 결론을 확인 가능하다."
+    )
+
+    normalized = css._normalize_eda_caption(caption)
+
+    assert "직접 근거" not in normalized
+    assert "결론" not in normalized
+    assert "확인 가능" not in normalized
+    assert "후속 Analysis" in normalized
+    assert "별도 검증이 필요하다" in normalized

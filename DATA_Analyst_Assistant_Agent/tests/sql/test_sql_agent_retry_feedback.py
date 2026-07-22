@@ -125,6 +125,75 @@ def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monk
     assert payload["query_rules"] == state.plan.query_rules
 
 
+def test_sql_agent_includes_derivation_contract_requests_in_supervisor_plan_context(monkeypatch) -> None:
+    fake_app = _FakeApp()
+    _patch_build_app(monkeypatch, fake_app)
+    state = OrchestrationState(
+        run_id="run_1",
+        user_query="seller 표본 수를 고려해 분석해줘",
+        plan=AnalysisPlan(
+            goal="seller별 분석",
+            required_derivations=[{
+                "name": "seller_sample_order_count",
+                "entity": "seller_id",
+                "grain": "seller_id",
+                "source_columns": ["orders.order_id"],
+                "definition": "COUNT(DISTINCT order_id) per seller_id",
+                "preferred_name": "seller_sample_order_count",
+            }],
+            analysis_heuristics=[{
+                "name": "low_n_threshold",
+                "default_policy": "record n<30 as a limitation",
+                "must_record": True,
+            }],
+        ),
+    )
+
+    SQLAgent()._run_main_sql_agent(state)
+
+    assert fake_app.invoked_with is not None
+    reason = fake_app.invoked_with["planner_selection_reason"]
+    payload = json.loads(reason.split("Supervisor analysis_plan:\n", 1)[1])
+    assert payload["required_derivations"] == state.plan.required_derivations
+    assert payload["analysis_heuristics"] == state.plan.analysis_heuristics
+
+
+def test_analysis_data_contract_marks_unimplemented_required_derivation() -> None:
+    contract = SQLAgent._analysis_data_contract(
+        mart_design={
+            "grain": "seller_id x month",
+            "grain_columns": ["seller_id", "month"],
+            "column_plan": [
+                {
+                    "output_column": "seller_order_count",
+                    "role": "measure",
+                    "source_columns": ["orders.order_id"],
+                    "calculation_type": "derived",
+                    "calculation_rule": "COUNT(*) at seller/month grain",
+                    "aggregation_method": "COUNT",
+                }
+            ],
+        },
+        sql_draft={"target_table": "analytics.seller_month", "source_tables": ["orders"]},
+        generated_sql="SELECT seller_id, month, COUNT(*) AS seller_order_count FROM orders GROUP BY seller_id, month",
+        required_derivations=[{
+            "name": "seller_sample_order_count",
+            "entity": "seller_id",
+            "grain": "seller_id",
+            "source_columns": ["orders.order_id"],
+            "definition": "COUNT(DISTINCT order_id) per seller_id",
+            "preferred_name": "seller_sample_order_count",
+            "not_for": ["seller/month mart row count"],
+        }],
+    )
+
+    assert contract["unimplemented_derivations"][0]["preferred_name"] == "seller_sample_order_count"
+    rule = contract["sample_size_rules"]["seller_id"]
+    assert rule["preferred_column"] is None
+    assert rule["do_not_infer_from_name_only"] is True
+    assert "seller_order_count" in rule["count_like_columns_require_contract_match"]
+
+
 def test_sql_agent_contract_only_repairs_metadata_without_regenerating_sql(monkeypatch) -> None:
     _patch_build_app(monkeypatch, _ExplodingApp())
     state = OrchestrationState(

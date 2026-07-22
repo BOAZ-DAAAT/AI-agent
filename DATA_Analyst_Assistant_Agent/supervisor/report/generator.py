@@ -28,7 +28,8 @@ from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult,
 
 _TOOL_NAME = "supervisor.report.generator"
 _REPORT_KIND = "report"
-_REPORT_VERSION = 3                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화
+_REPORT_VERSION = 4                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화
+_DEFAULT_REPORT_MAX_TOKENS = 12288
 _MAX_ATTEMPTS = 2                                      # 최초 1회 + 재시도 1회
 
 _STAGE_LABELS = {"sql": "SQL 조회", "eda": "EDA 검증", "analysis": "분석", "insight": "인사이트"}
@@ -76,7 +77,7 @@ def _generate_with_llm(evidence: PathEvidence) -> ReportResult | None:
     llm = get_chat_model(
         model=os.getenv("REPORT_MODEL") or None,
         model_env="LLM_MODEL",
-        max_tokens=int(os.getenv("REPORT_MAX_TOKENS", "8192")),
+        max_tokens=int(os.getenv("REPORT_MAX_TOKENS", str(_DEFAULT_REPORT_MAX_TOKENS))),
     )
     facts_by_stage = {stage.stage: stage.facts for stage in evidence.stages}
     numbers = collect_numbers(facts_by_stage)

@@ -49,7 +49,7 @@ def test_get_chat_model_caps_default_max_tokens(monkeypatch) -> None:
     model = get_chat_model(model="openai/gpt-test")
 
     assert isinstance(model, FakeChatOpenAI)
-    assert captured["max_tokens"] == 4096
+    assert captured["max_tokens"] == 12288
 
 
 def test_get_chat_model_respects_explicit_max_tokens(monkeypatch) -> None:

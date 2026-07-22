@@ -24,6 +24,123 @@ def _looks_temporal_column(name: str) -> bool:
     return any(token in normalized for token in ("date", "time", "month", "year", "timestamp"))
 
 
+def _derivation_names(item: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get(key) or "").casefold()
+        for key in ("name", "preferred_name", "output_column")
+        if str(item.get(key) or "").strip()
+    }
+
+
+def _annotate_required_derivations(
+    derived_columns: list[dict[str, Any]],
+    required_derivations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    required_by_name: dict[str, dict[str, Any]] = {}
+    for derivation in required_derivations:
+        for name in _derivation_names(derivation):
+            required_by_name[name] = derivation
+    annotated: list[dict[str, Any]] = []
+    for column in derived_columns:
+        output_name = str(column.get("output_column") or "").casefold()
+        requirement = required_by_name.get(output_name)
+        if not requirement:
+            annotated.append(column)
+            continue
+        enriched = dict(column)
+        enriched["required_by_supervisor"] = True
+        for key in (
+            "name",
+            "purpose",
+            "entity",
+            "grain",
+            "definition",
+            "meaning",
+            "safe_for",
+            "not_for",
+            "source",
+        ):
+            if requirement.get(key) not in (None, "", [], {}):
+                enriched[key] = requirement[key]
+        annotated.append(enriched)
+    return annotated
+
+
+def _split_required_derivations(
+    derived_columns: list[dict[str, Any]],
+    required_derivations: list[dict[str, Any]],
+    mart_design: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    output_names = {
+        str(item.get("output_column") or "").casefold()
+        for item in derived_columns
+        if isinstance(item, dict)
+    }
+    unimplemented_names = {
+        str(item.get("name") or item.get("preferred_name") or "").casefold()
+        for item in (mart_design.get("unimplemented_derivations") or [])
+        if isinstance(item, dict)
+    }
+    implemented: list[dict[str, Any]] = []
+    unimplemented: list[dict[str, Any]] = []
+    for derivation in required_derivations:
+        names = _derivation_names(derivation)
+        target_name = str(derivation.get("preferred_name") or derivation.get("name") or "")
+        record = {**derivation, "preferred_name": target_name or derivation.get("preferred_name")}
+        if names & output_names and not (names & unimplemented_names):
+            implemented.append(record)
+        else:
+            record.setdefault("reason", "not found in mart_design.column_plan")
+            unimplemented.append(record)
+    return implemented, unimplemented
+
+
+def _sample_size_rules(
+    required_derivations: list[dict[str, Any]],
+    implemented_derivations: list[dict[str, Any]],
+    derived_columns: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    implemented_names = {
+        name: item
+        for item in implemented_derivations
+        for name in _derivation_names(item)
+    }
+    count_like_columns = [
+        str(item.get("output_column") or "")
+        for item in derived_columns
+        if "count" in str(item.get("output_column") or "").casefold()
+    ]
+    rules: dict[str, dict[str, Any]] = {}
+    for derivation in required_derivations:
+        text = " ".join(
+            str(derivation.get(key) or "")
+            for key in ("name", "purpose", "definition", "preferred_name")
+        ).casefold()
+        if not any(token in text for token in ("sample", "low-n", "low n", "count", "n<", "n <", "표본")):
+            continue
+        entity = str(derivation.get("entity") or derivation.get("grain") or "").strip()
+        if not entity:
+            continue
+        names = _derivation_names(derivation)
+        implemented = next((implemented_names[name] for name in names if name in implemented_names), {})
+        preferred_column = (
+            str(implemented.get("preferred_name") or implemented.get("name") or "")
+            if implemented
+            else None
+        )
+        rules[entity] = {
+            "definition": derivation.get("definition") or derivation.get("purpose") or "",
+            "preferred_column": preferred_column,
+            "source_columns": list(derivation.get("source_columns") or []),
+            "grain": derivation.get("grain") or entity,
+            "safe_for": list(derivation.get("safe_for") or ["entity sample-size checks"]),
+            "not_for": list(derivation.get("not_for") or []),
+            "do_not_infer_from_name_only": True,
+            "count_like_columns_require_contract_match": count_like_columns,
+        }
+    return rules
+
+
 class SQLAgent:
     name = "sql_agent"
 
@@ -150,6 +267,10 @@ class SQLAgent:
             }
             if state.plan.query_rules:
                 supervisor_plan_context["query_rules"] = state.plan.query_rules
+            if state.plan.required_derivations:
+                supervisor_plan_context["required_derivations"] = state.plan.required_derivations
+            if state.plan.analysis_heuristics:
+                supervisor_plan_context["analysis_heuristics"] = state.plan.analysis_heuristics
         clarification_request = ""
         if retry_context:
             feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")
@@ -255,6 +376,8 @@ class SQLAgent:
                 result.get("mart_design") or {},
                 sql_draft,
                 generated_sql,
+                required_derivations=state.plan.required_derivations,
+                analysis_heuristics=state.plan.analysis_heuristics,
             )
 
         plan_payload = {
@@ -469,9 +592,17 @@ class SQLAgent:
         mart_design: dict[str, Any],
         sql_draft: dict[str, Any],
         generated_sql: str,
+        required_derivations: list[dict[str, Any]] | None = None,
+        analysis_heuristics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         column_plan = list(mart_design.get("column_plan") or [])
         grain_columns = list(mart_design.get("grain_columns") or [])
+        required_derivations = [
+            dict(item) for item in (required_derivations or []) if isinstance(item, dict)
+        ]
+        analysis_heuristics = [
+            dict(item) for item in (analysis_heuristics or []) if isinstance(item, dict)
+        ]
         derived_columns = [
             {
                 "output_column": item.get("output_column"),
@@ -484,6 +615,12 @@ class SQLAgent:
             for item in column_plan
             if isinstance(item, dict)
         ]
+        derived_columns = _annotate_required_derivations(derived_columns, required_derivations)
+        implemented_derivations, unimplemented_derivations = _split_required_derivations(
+            derived_columns,
+            required_derivations,
+            mart_design,
+        )
         aggregation_rules = [
             item
             for item in derived_columns
@@ -503,6 +640,15 @@ class SQLAgent:
                 or any(_looks_temporal_column(str(source)) for source in item.get("source_columns") or [])
             ],
             "derived_columns": derived_columns,
+            "required_derivations": required_derivations,
+            "implemented_derivations": implemented_derivations,
+            "unimplemented_derivations": unimplemented_derivations,
+            "analysis_heuristics": analysis_heuristics,
+            "sample_size_rules": _sample_size_rules(
+                required_derivations,
+                implemented_derivations,
+                derived_columns,
+            ),
             "aggregation_rules": aggregation_rules,
             "deduplication_keys": list(mart_design.get("deduplication_keys") or []),
             "source_tables": list(mart_design.get("source_tables") or sql_draft.get("source_tables") or []),
@@ -524,7 +670,13 @@ class SQLAgent:
     ) -> dict[str, Any]:
         existing = dict(getattr(plan, "analysis_data_contract", None) or {})
         mart_design = dict(getattr(plan, "mart_design", None) or {})
-        contract = cls._analysis_data_contract(mart_design, sql_draft, generated_sql)
+        contract = cls._analysis_data_contract(
+            mart_design,
+            sql_draft,
+            generated_sql,
+            required_derivations=list(getattr(plan, "required_derivations", []) or []),
+            analysis_heuristics=list(getattr(plan, "analysis_heuristics", []) or []),
+        )
         inferred_columns = cls._infer_column_lineage_from_sql(generated_sql)
         if inferred_columns and not contract.get("derived_columns"):
             contract["derived_columns"] = inferred_columns

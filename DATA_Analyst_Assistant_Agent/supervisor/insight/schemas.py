@@ -1,7 +1,6 @@
 """Insight Agent 계약 — 도구 호출(LLM 신호)과 최종 산출물 스키마.
 
 LLM은 매 라운드 ToolCall(JSON)로 '제안'만 하고, 실행·검증은 코드가 한다
-(codegen과 같은 문법: LLM 신호 → 구조적 게이트 → 실행).
 """
 
 from __future__ import annotations

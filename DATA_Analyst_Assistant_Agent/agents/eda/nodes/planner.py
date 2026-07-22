@@ -114,7 +114,6 @@ def planner_node(state: EDAState) -> dict:
             round_idx=round_idx,
             max_rounds=MAX_ANALYSES,
             need_priority=need_priority,
-            codegen_selectable=True,   # 질문기준 발동: 도구로 못 푸는 파생계산이면 플래너가 codegen 선택
             emit_batch=emit_batch,
         )
         fb = state.get("validation_feedback")
@@ -140,7 +139,7 @@ def planner_node(state: EDAState) -> dict:
             choice, new_queue = batch[0], batch[1:]
             reason = decision.get("reason", "1차 배치 계획")
         else:
-            # 배치가 비었거나(emit_batch=False, 또는 LLM이 codegen/done을 골랐을 때) 기존 단일선택 로직
+            # 배치가 비었거나(emit_batch=False, 또는 LLM이 done을 골랐을 때) 기존 단일선택 로직
             choice = decision.get("next", "done")
             reason = decision.get("reason", "")
             if choice == "done" and feasible and not attempted and not _substantive_produced_output(state):
@@ -149,10 +148,8 @@ def planner_node(state: EDAState) -> dict:
                     "planner_done_unreliable: feasible analyses remain before any attempt; "
                     f"selecting {choice}"
                 )
-            # 환각 방지: feasible 목록 + codegen(특수 카드, 단 이미 한 번 써봤으면 재선택 금지 —
-            # route_after_codegen이 도메인 밖 거부 시 planner로 되돌리는데, 여기서 또 codegen을
-            # 고르게 두면 왕복 루프가 생긴다, #194) 밖 선택이면 done
-            allowed_single = allowed | ({"codegen"} - attempted)
+            # 환각 방지: EDA 분석 목록 밖 선택이면 done.
+            allowed_single = allowed
             if choice != "done" and choice not in allowed_single:
                 choice, reason = "done", f"유효하지 않은 선택({choice}) → 종료"
 
@@ -201,9 +198,6 @@ def _substantive_produced_output(state: EDAState) -> bool:
 
 def _feasible_tools(state: EDAState) -> list[dict]:
     """전제조건 충족 + 아직 안 돌린 분석 카드만 추린다 (결정론, LLM 0).
-
-    codegen이 도메인 밖으로 거부됐을 때, route_after_codegen이 이걸로 '아직 안 써본
-    진짜 분석 도구가 남았는지' 판단해 planner로 되돌릴지 종료할지 정한다(#194).
     """
     ctx = get_context()
     shape = _data_shape(ctx)
@@ -215,17 +209,13 @@ def _feasible_tools(state: EDAState) -> list[dict]:
 def route_after_planner(state: EDAState):
     """플래너 선택에 따라 분석 노드로 가거나, 종료 시 결정론 게이트로 분기.
 
-    종료(done)일 때:
-      - 실질 분석이 하나라도 결과를 냄  → insight (정상 경로)
-      - 아무 실질 분석도 결과를 못 냄    → codegen (도구로 시도조차 못 한 도메인 밖 질문)
-    ※ 판단LLM은 codegen 노드 안에서만 돈다. 정상 질문은 이 게이트에서 걸러져 진입 자체가 없다.
+    EDA는 관찰 가능한 품질·분포·비교·관계·시간·군집 신호까지만 만든다.
+    파생 지표 계산, p-value, 회귀/검정, 가설 판정은 analysis_agent 책임이다.
+    따라서 실질 분석 결과가 부족해도 EDA는 insight/handoff 요약을 남기고 종료한다.
     """
     choice = state.get("next_analysis", "done")
     if choice in ANALYSIS_NAMES:
         return choice
-    if choice == "codegen":                 # 질문기준: 플래너가 파생계산 필요로 직접 선택
-        return "codegen"
     if choice == "done":
-        # 존재기준 fallback: 도구가 아무 결과도 못 냈으면(범주형 mart 등) codegen 자동
-        return "insight" if _substantive_produced_output(state) else "codegen"
+        return "insight"
     return "insight"   # 예상 밖 값(환각 등)은 안전 기본값 insight로

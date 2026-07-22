@@ -49,6 +49,9 @@ def mart_design_prompt(state) -> str:
 - metric_support가 참조하는 calculation_grain과 required_mart_columns는 모두 column_plan의 output_column이어야 함
 - 최종 계획의 required_columns를 마트 컬럼 선택의 우선 근거로 사용
 - 최종 계획의 business_keys를 조인과 key_columns 선택의 우선 근거로 사용
+- Supervisor analysis_plan.required_derivations가 있으면 SQL이 만들어야 하는 구조적 파생변수로 취급하고 column_plan에 같은 preferred_name/output_column으로 포함합니다. 각 항목의 entity, grain, source_columns, definition, safe_for, not_for 의미를 보존합니다.
+- Supervisor analysis_plan.analysis_heuristics는 threshold, bin, low-n cutoff, label, method choice 같은 분석 단계 정책입니다. 사용자가 명시적으로 persisted column을 요구하지 않은 한 column_plan에 넣지 말고 design_reasoning에 하류 분석 가정으로만 기록합니다.
+- required_derivations를 스키마/조인/무결성 문제로 구현할 수 없으면 임의 count 컬럼으로 대체하지 말고 unimplemented_derivations에 name, reason, needed_source_columns를 기록합니다.
 - target_schema는 "{ALLOWED_MART_SCHEMA}" 로 고정
 - incremental이 자연스러우면 incremental_column 제안
 - 질문에 없는 정의를 과도하게 추가하지 말고 reasoning에 근거 설명
@@ -80,6 +83,13 @@ def mart_design_prompt(state) -> str:
       "calculation_grain": ["최종 지표 출력 grain 컬럼"],
       "required_mart_columns": ["column_plan에 선언된 컬럼"],
       "downstream_calculation": "중간 grain과 다단계 계산 순서를 포함한 후속 계산 계약"
+    }}
+  ],
+  "unimplemented_derivations": [
+    {{
+      "name": "구현하지 못한 required_derivations 이름",
+      "reason": "구현 불가 이유",
+      "needed_source_columns": ["필요한 source table.column"]
     }}
   ],
   "aggregation_policy": "preserve_common_grain 또는 aggregate_to_common_grain",

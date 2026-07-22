@@ -49,7 +49,13 @@ def run_tool_with_summary(
     개체로 추적되는 것 등)는 그대로 유지한다. chart_requests 분리·ctx 누적은 @tool 내부
     (_emit_and_dump)가 이미 처리하므로 여기서 따로 다루지 않는다.
     """
-    result_json = tool.invoke({})
+    result_json, tool_err = run_node_with_retry(
+        lambda: tool.invoke({}),
+        f"{node_name}.tool",
+        fallback='{"error": "tool execution failed; analysis skipped"}',
+    )
+    if tool_err:
+        return fallback, tool_err
     prompt = prompt_builder(result_json)
     return run_node_with_retry(
         lambda: get_llm().invoke(prompt).content.strip(), node_name, fallback=fallback

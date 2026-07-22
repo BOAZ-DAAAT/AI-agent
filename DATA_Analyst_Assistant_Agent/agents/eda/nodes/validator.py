@@ -33,7 +33,8 @@ def _completed_analyses(state: EDAState) -> list:
 
 
 _FACTS_FIELDS = ["inspect_facts", "quality_facts", "distribution_facts",
-                 "comparison_facts", "relationship_facts", "time_facts"]
+                 "comparison_facts", "relationship_facts", "time_facts",
+                 "clustering_facts"]
 
 
 def _all_analysis_facts(state: EDAState) -> dict:

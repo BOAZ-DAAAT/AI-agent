@@ -5,7 +5,6 @@ graph.py 는 `nodes.<node>_node` 로 참조하므로 여기서 전부 re-export 
 
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.chart_selector import chart_selector_node
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.clustering import clustering_node
-from DATA_Analyst_Assistant_Agent.agents.eda.nodes.codegen import codegen_node
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.comparison import comparison_node
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.distribution import distribution_node
 from DATA_Analyst_Assistant_Agent.agents.eda.nodes.hypothesis import hypothesis_node
@@ -25,7 +24,6 @@ __all__ = [
     "relationship_node",
     "time_node",
     "clustering_node",
-    "codegen_node",
     "insight_node",
     "hypothesis_node",
     "chart_selector_node",

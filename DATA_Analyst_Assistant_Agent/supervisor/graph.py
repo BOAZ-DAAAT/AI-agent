@@ -5,7 +5,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
     SupervisorInterruptPayload,
@@ -589,6 +589,30 @@ def _as_list(value: Any) -> list[Any]:
 def make_clarify_query_node(model: Any | None):
     def clarify_query_node(state: SupervisorState) -> SupervisorState:
         latest_query = str(state.get("clarified_query") or state.get("latest_user_query") or "")
+        prior_answers = [
+            str(answer).strip()
+            for answer in state.get("clarification_answers", [])
+            if str(answer).strip()
+        ]
+        if prior_answers and latest_query.strip():
+            decision = ClarificationDecision(
+                needs_clarification=False,
+                clarified_query=latest_query.strip(),
+                clarification_question="",
+                reason="User clarification has already been collected; proceed without asking again.",
+            )
+            return {
+                "clarified_query": decision.clarified_query,
+                "needs_clarification": False,
+                "clarification_question": "",
+                "clarification_input_mode": decision.input_mode,
+                "clarification_options": decision.options,
+                "clarification_allow_free_text": decision.allow_free_text,
+                "terminal_state": "running",
+                "next_action": "create_plan",
+                "current_step": "clarify_query",
+                "llm_decisions": _append_llm_decision(state, "clarify_query", decision),
+            }
         try:
             decision = invoke_supervisor_decision(
                 state,
@@ -842,6 +866,21 @@ def make_create_analysis_plan_node(model: Any | None):
                 extra=build_plan_context(state),
             )
         except Exception as exc:
+            if _is_missing_goal_validation_error(exc):
+                plan = _fallback_analysis_plan_from_state(state)
+                return {
+                    "analysis_plan": plan,
+                    "current_step": "create_analysis_plan",
+                    "decision_errors": [
+                        *state.get("decision_errors", []),
+                        {
+                            "node": "create_analysis_plan",
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                            "recovered": True,
+                        },
+                    ],
+                }
             return _decision_failure_updates(state, "create_analysis_plan", exc)
 
         plan: dict[str, Any] = {
@@ -854,6 +893,8 @@ def make_create_analysis_plan_node(model: Any | None):
             "filters": list(decision.filters),
             "requires_mart_review": decision.requires_mart_review,
             "query_rules": dict(state.get("analysis_rule_context") or {}),
+            "required_derivations": list(decision.required_derivations),
+            "analysis_heuristics": list(decision.analysis_heuristics),
         }
         if state.get("datasource_id") is not None:
             plan["datasource_id"] = state.get("datasource_id")
@@ -867,6 +908,41 @@ def make_create_analysis_plan_node(model: Any | None):
         }
 
     return create_analysis_plan_node
+
+
+def _is_missing_goal_validation_error(exc: Exception) -> bool:
+    if not isinstance(exc, ValidationError):
+        return False
+    return any(
+        tuple(error.get("loc", ())) == ("goal",) and error.get("type") == "missing"
+        for error in exc.errors()
+    )
+
+
+def _fallback_analysis_plan_from_state(state: SupervisorState) -> dict[str, Any]:
+    goal = _one_line_text(
+        state.get("clarified_query")
+        or state.get("latest_user_query")
+        or state.get("user_query")
+        or "analysis request"
+    )
+    return {
+        "goal": goal,
+        "route_kind": "comprehensive",
+        "planner_mode": "fallback",
+        "steps": [
+            "Build the requested dataset with SQL.",
+            "Profile relationships, distributions, and trends.",
+            "Generate evidence-backed insights.",
+        ],
+        "metric": None,
+        "dimension": None,
+        "filters": [],
+        "requires_mart_review": False,
+        "query_rules": dict(state.get("analysis_rule_context") or {}),
+        "required_derivations": [],
+        "analysis_heuristics": [],
+    }
 
 
 def make_decide_next_action_node(model: Any | None):

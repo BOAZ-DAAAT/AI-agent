@@ -13,9 +13,15 @@ isolation; hard isolation is the Docker executor follow-up.
 
 from __future__ import annotations
 
+import ast
 import builtins
 import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import pandas as pd
@@ -34,6 +40,24 @@ from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 class AnalysisCodeError(RuntimeError):
     """Raised when generated code fails to produce a valid result dict."""
+
+
+@dataclass(frozen=True)
+class CodeExecutionPlan:
+    decision: str
+    risk_level: str
+    reasons: list[str] = field(default_factory=list)
+    row_count: int = 0
+    column_count: int = 0
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "risk_level": self.risk_level,
+            "reasons": list(self.reasons),
+            "row_count": self.row_count,
+            "column_count": self.column_count,
+        }
 
 
 # Vetted heavy methods generated code may call instead of reimplementing.
@@ -66,6 +90,12 @@ _SAFE_BUILTIN_NAMES = (
 
 
 REQUIRED_RESULT_KEYS = ("summary", "findings", "statistics", "limitations")
+DEFAULT_CODE_EXEC_TIMEOUT_SECONDS = 600.0
+SMALL_MODELING_ROW_LIMIT = 10_000
+LARGE_MODELING_ROW_LIMIT = 100_000
+
+
+_ROW_ITERATION_METHODS = frozenset({"iterrows", "itertuples"})
 
 
 GENERATE_SYSTEM_PROMPT = """You write one small, auditable Python analysis script.
@@ -84,6 +114,9 @@ Rules:
 - Treat EDA insights and hypotheses as exploratory candidate hints, not as a
   checklist. Select only candidates that directly support the analysis plan and
   user question; ignore unrelated candidates without mentioning every omission.
+- Do not copy EDA insight_result, hypotheses, or final_summary into the final
+  analysis as evidence. Recompute coefficients, p-values, test decisions, effect
+  sizes, and interpretations from `df` in this analysis stage.
 - You may add new analysis hypotheses when they are needed to answer the plan
   and are supported by the available columns/data. Include them in
   `hypothesis_tests` when tested.
@@ -114,6 +147,14 @@ Rules:
   count-like mart column such as `seller_order_count` as the entity sample size
   unless the analysis_data_contract explicitly defines it as that exact
   entity-level total.
+- Prefer analysis_data_contract.sample_size_rules over column-name guessing.
+  If sample_size_rules has no implemented preferred_column, compute from its
+  source_columns when available or record a limitation instead of substituting
+  another count-like column by name.
+- Treat analysis_data_contract.analysis_heuristics as analyst-side method
+  assumptions. You may apply defensible thresholds/bins/labels, but record the
+  selected value, rationale, and sensitivity/limitation in method_decision,
+  method_notes, or limitations.
 - If an entity filter leaves too few rows/groups for a statistic, set the
   related decision to `inconclusive`, state that the test is not estimable, and
   do not describe NaN/None statistics as a positive/negative relationship.
@@ -376,10 +417,263 @@ def generate_analysis_code(
     return result if isinstance(result, GeneratedAnalysisCode) else GeneratedAnalysisCode.model_validate(result)
 
 
+def inspect_generated_code(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+) -> CodeExecutionPlan:
+    source = _source_for_code(code)
+    lowered = source.lower()
+    row_count = int(len(dataframe))
+    column_count = int(len(dataframe.columns))
+    reasons: list[str] = []
+
+    blocked_patterns = (
+        ("file/network/process access is not allowed", r"\b(open|eval|exec|compile)\s*\("),
+        (
+            "filesystem/network/process module usage is not allowed",
+            r"(^|\n)\s*(import|from)\s+(os|sys|subprocess|socket|pathlib|requests|urllib)\b|\b(os|sys|subprocess|socket|pathlib|requests|urllib)\s*\.",
+        ),
+    )
+    for reason, pattern in blocked_patterns:
+        if re.search(pattern, lowered):
+            return CodeExecutionPlan(
+                decision="blocked_unsafe",
+                risk_level="high",
+                reasons=[reason],
+                row_count=row_count,
+                column_count=column_count,
+            )
+
+    if re.search(r"\bwhile\b", lowered):
+        reasons.append("while loop may run indefinitely")
+    if re.search(r"\b(gridsearchcv|randomizedsearchcv|cross_val_score|cross_validate)\b", lowered):
+        reasons.append("cross-validation or hyperparameter search can be long-running")
+    if re.search(r"\b(randomforest|gradientboosting|xgboost|xgb|lightgbm|catboost)\b", lowered):
+        reasons.append("tree ensemble training can be long-running")
+    if re.search(r"\b(bootstrap|permutation|simulation|monte.?carlo)\b", lowered) and re.search(r"\bfor\b|\brange\s*\(", lowered):
+        reasons.append("simulation or resampling loop detected")
+    reasons.extend(_expensive_iteration_reasons(source, row_count))
+
+    fitting_detected = bool(re.search(r"\.fit(_predict|_transform)?\s*\(", lowered))
+    simple_modeling = bool(re.search(r"\b(ols|glm|logit|kmeans|pca)\b", lowered))
+    if fitting_detected:
+        if row_count > LARGE_MODELING_ROW_LIMIT:
+            reasons.append("model fitting on a large dataframe")
+        elif row_count > SMALL_MODELING_ROW_LIMIT and not simple_modeling:
+            reasons.append("model fitting on a medium dataframe without an explicitly lightweight method")
+
+    if reasons:
+        return CodeExecutionPlan(
+            decision="manual_run_recommended",
+            risk_level="high" if any("large" in reason or "indefinitely" in reason for reason in reasons) else "medium",
+            reasons=reasons,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    return CodeExecutionPlan(
+        decision="auto_run",
+        risk_level="low",
+        reasons=["code passed preflight for automatic execution"],
+        row_count=row_count,
+        column_count=column_count,
+    )
+
+
 def execute_generated_code(
-    code: GeneratedAnalysisCode, dataframe: pd.DataFrame
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+    *,
+    isolated: bool = False,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run generated code in the opened sandbox and return its `result` dict."""
+
+    if isolated:
+        return _execute_generated_code_isolated(
+            code,
+            dataframe,
+            timeout_seconds=_code_exec_timeout_seconds(timeout_seconds),
+        )
+    return _execute_generated_code_inline(code, dataframe)
+
+
+def _source_for_code(code: GeneratedAnalysisCode) -> str:
+    return f"{code.imports}\n{code.code}" if code.imports else code.code
+
+
+def _expensive_iteration_reasons(source: str, row_count: int) -> list[str]:
+    if row_count <= SMALL_MODELING_ROW_LIMIT:
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    visitor = _IterationRiskVisitor()
+    visitor.visit(tree)
+    reasons: list[str] = []
+    if visitor.has_nested_loop:
+        reasons.append("actual nested loop on a non-small dataframe may be expensive")
+    if visitor.has_dataframe_row_iteration:
+        reasons.append("dataframe row iteration on a non-small dataframe may be expensive")
+    return reasons
+
+
+class _IterationRiskVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.loop_depth = 0
+        self.has_nested_loop = False
+        self.has_dataframe_row_iteration = False
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_loop(node)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
+
+    def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
+        if self.loop_depth > 0:
+            self.has_nested_loop = True
+        if _iterates_dataframe_rows(node.iter):
+            self.has_dataframe_row_iteration = True
+        self.loop_depth += 1
+        self.generic_visit(node)
+        self.loop_depth -= 1
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        if self.loop_depth > 0 or len(node.generators) > 1:
+            self.has_nested_loop = True
+        for generator in node.generators:
+            if _iterates_dataframe_rows(generator.iter):
+                self.has_dataframe_row_iteration = True
+        self.loop_depth += 1
+        self.generic_visit(node)
+        self.loop_depth -= 1
+
+
+def _iterates_dataframe_rows(node: ast.AST) -> bool:
+    unwrapped = _unwrap_iteration_call(node)
+    if _is_dataframe_row_method_call(unwrapped):
+        return True
+    if _is_range_over_dataframe_length(unwrapped):
+        return True
+    if _is_zip_over_dataframe_columns(unwrapped):
+        return True
+    return _is_dataframe_records_call(unwrapped)
+
+
+def _unwrap_iteration_call(node: ast.AST) -> ast.AST:
+    current = node
+    wrappers = {"enumerate", "list", "tuple", "iter", "reversed", "sorted"}
+    while (
+        isinstance(current, ast.Call)
+        and isinstance(current.func, ast.Name)
+        and current.func.id in wrappers
+        and current.args
+    ):
+        current = current.args[0]
+    return current
+
+
+def _is_dataframe_row_method_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _ROW_ITERATION_METHODS
+        and _is_df_name(node.func.value)
+    )
+
+
+def _is_range_over_dataframe_length(node: ast.AST) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "range"
+        and node.args
+    ):
+        return False
+    return any(_is_dataframe_length_expr(arg) for arg in node.args)
+
+
+def _is_dataframe_length_expr(node: ast.AST) -> bool:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and len(node.args) == 1
+        and _is_df_name(node.args[0])
+    ):
+        return True
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "shape"
+        and _is_df_name(node.value.value)
+        and _is_zero_constant(node.slice)
+    )
+
+
+def _is_zip_over_dataframe_columns(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "zip"
+        and any(_is_dataframe_column_access(arg) for arg in node.args)
+    )
+
+
+def _is_dataframe_records_call(node: ast.AST) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "to_dict"
+        and _is_df_name(node.func.value)
+    ):
+        return False
+    if node.args and _is_records_literal(node.args[0]):
+        return True
+    return any(
+        keyword.arg == "orient" and keyword.value is not None and _is_records_literal(keyword.value)
+        for keyword in node.keywords
+    )
+
+
+def _is_dataframe_column_access(node: ast.AST) -> bool:
+    return isinstance(node, ast.Subscript) and _is_df_name(node.value)
+
+
+def _is_df_name(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "df"
+
+
+def _is_zero_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == 0
+
+
+def _is_records_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "records"
+
+
+def _execute_generated_code_inline(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+) -> dict[str, Any]:
+    """Run generated code in-process. Tests and the subprocess worker use this."""
 
     import math
     import numpy as np
@@ -393,7 +687,7 @@ def execute_generated_code(
         "df": dataframe.copy(),
         "result": None,
     }
-    source = f"{code.imports}\n{code.code}" if code.imports else code.code
+    source = _source_for_code(code)
     try:
         # Use a single namespace so comprehensions/generators can resolve
         # top-level variables created by generated code.
@@ -408,3 +702,160 @@ def execute_generated_code(
     if missing:
         raise AnalysisCodeError(f"result dict is missing required keys: {missing}")
     return result
+
+
+def _code_exec_timeout_seconds(value: float | None) -> float:
+    if value is not None:
+        return float(value)
+    return float(os.getenv("ANALYSIS_CODE_EXEC_TIMEOUT_SECONDS", str(DEFAULT_CODE_EXEC_TIMEOUT_SECONDS)))
+
+
+def _execute_generated_code_isolated(
+    code: GeneratedAnalysisCode,
+    dataframe: pd.DataFrame,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="analysis_codegen_") as temp_dir:
+        dataframe_path = os.path.join(temp_dir, "input.pkl")
+        code_path = os.path.join(temp_dir, "code.json")
+        result_path = os.path.join(temp_dir, "result.json")
+        runner_path = os.path.join(temp_dir, "runner.py")
+
+        dataframe.to_pickle(dataframe_path)
+        with open(code_path, "w", encoding="utf-8") as handle:
+            json.dump(code.model_dump(mode="json"), handle, ensure_ascii=False)
+        with open(runner_path, "w", encoding="utf-8") as handle:
+            handle.write(_subprocess_runner_source(dataframe_path, code_path, result_path))
+
+        env = dict(os.environ)
+        cwd = os.getcwd()
+        env["PYTHONPATH"] = (
+            cwd if not env.get("PYTHONPATH") else os.pathsep.join([cwd, env["PYTHONPATH"]])
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, runner_path],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _tail(exc.stdout)
+            stderr = _tail(exc.stderr)
+            detail = f"generated code exceeded execution timeout: {timeout_seconds:g} seconds"
+            if stdout or stderr:
+                detail = f"{detail}; stdout_tail={stdout!r}; stderr_tail={stderr!r}"
+            raise AnalysisCodeError(detail) from exc
+
+        if completed.returncode != 0:
+            raise AnalysisCodeError(
+                "generated code subprocess failed "
+                f"with exitcode={completed.returncode}; "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            )
+        if not os.path.exists(result_path):
+            raise AnalysisCodeError(
+                "generated code subprocess exited without writing a result artifact "
+                f"(exitcode={completed.returncode}); "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            )
+        try:
+            with open(result_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:  # noqa: BLE001
+            raise AnalysisCodeError(
+                "generated code subprocess wrote an unreadable result artifact; "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            ) from exc
+
+    if not payload.get("ok"):
+        error = str(payload.get("error") or "generated code failed in subprocess.")
+        traceback_text = _tail(payload.get("traceback"))
+        if traceback_text:
+            error = f"{error}; traceback_tail={traceback_text!r}"
+        raise AnalysisCodeError(error)
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise AnalysisCodeError("generated code subprocess returned an invalid result payload.")
+    return result
+
+
+def _subprocess_runner_source(dataframe_path: str, code_path: str, result_path: str) -> str:
+    payload = {
+        "dataframe_path": dataframe_path,
+        "code_path": code_path,
+        "result_path": result_path,
+    }
+    return f"""from __future__ import annotations
+
+import json
+import math
+import traceback
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import GeneratedAnalysisCode
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import _execute_generated_code_inline
+
+PATHS = {json.dumps(payload)}
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {{str(_json_safe(key)): _json_safe(item) for key, item in value.items()}}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+def main() -> None:
+    output = Path(PATHS["result_path"])
+    try:
+        dataframe = pd.read_pickle(PATHS["dataframe_path"])
+        with open(PATHS["code_path"], encoding="utf-8") as handle:
+            code = GeneratedAnalysisCode.model_validate(json.load(handle))
+        result = _execute_generated_code_inline(code, dataframe)
+        payload = {{"ok": True, "result": _json_safe(result)}}
+    except Exception as exc:
+        payload = {{
+            "ok": False,
+            "error": f"{{type(exc).__name__}}: {{exc}}",
+            "traceback": traceback.format_exc(),
+        }}
+    with output.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, allow_nan=False)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def _tail(value: Any, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    return text[-limit:]

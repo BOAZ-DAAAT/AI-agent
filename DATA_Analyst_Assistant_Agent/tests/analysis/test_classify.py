@@ -5,6 +5,7 @@ import pandas as pd
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.classify import (
     classify_intent,
     resolve_time_grain,
+    _safe_context_json,
 )
 from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.context import build_analysis_context
 from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import AnalysisContext, AnalysisIntent
@@ -30,6 +31,19 @@ def test_two_year_span_resolves_to_monthly() -> None:
     assert span >= 700
 
 
+def test_string_month_buckets_resolve_without_vectorized_datetime_crash() -> None:
+    months = pd.date_range("2017-01-01", periods=23, freq="MS").strftime("%Y-%m-%d").tolist()
+    frame = pd.DataFrame({
+        "order_date": [months[index % len(months)] for index in range(1000)],
+        "amount": range(1000),
+    })
+
+    grain, span = resolve_time_grain(frame, "order_date")
+
+    assert grain == "M"
+    assert span >= 650
+
+
 def test_half_year_span_resolves_to_weekly() -> None:
     dates = ["2026-01-01", "2026-03-01", "2026-06-01"]
     grain, _ = resolve_time_grain(_frame(dates), "order_date")
@@ -47,6 +61,25 @@ def test_missing_or_unparseable_time_column_returns_none() -> None:
     assert resolve_time_grain(_frame(["2026-06-01"]), "nope") == (None, None)
     bad = pd.DataFrame({"order_date": ["n/a", "unknown"], "amount": [1, 2]})
     assert resolve_time_grain(bad, "order_date") == (None, None)
+
+
+def test_safe_context_json_handles_non_json_pandas_values() -> None:
+    context = AnalysisContext(
+        user_question="delivery analysis",
+        goal="delivery analysis",
+        route_kind="comprehensive",
+        sample_rows=[{
+            "ts": pd.Timestamp("2018-01-01"),
+            "missing": pd.NaT,
+            "nan": float("nan"),
+        }],
+    )
+
+    text = _safe_context_json(context)
+
+    assert "2018-01-01T00:00:00" in text
+    assert '"missing": null' in text
+    assert '"nan": null' in text
 
 
 class _CapturingStructuredModel:

@@ -109,6 +109,29 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
     assert decision.reason == "리포트 완료"
 
 
+def test_analysis_plan_decision_recovers_derivation_shaped_payload_without_goal() -> None:
+    decision = parse_decision_json_as(
+        json.dumps(
+            {
+                "name": "delivery_days",
+                "purpose": "delivery days calculation",
+                "source_columns": [
+                    "orders.order_purchase_timestamp",
+                    "orders.order_delivered_customer_date",
+                ],
+                "definition": "purchase timestamp to delivered customer date in days",
+            }
+        ),
+        AnalysisPlanDecision,
+    )
+
+    assert decision.goal == "delivery days calculation"
+    assert decision.required_derivations[0]["name"] == "delivery_days"
+    assert decision.required_derivations[0]["definition"] == (
+        "purchase timestamp to delivered customer date in days"
+    )
+
+
 @pytest.mark.parametrize(
     ("schema", "payload"),
     [
@@ -138,6 +161,8 @@ def test_parse_decision_json_extracts_json_from_surrounding_text() -> None:
                 "dimension": "월",
                 "filters": [],
                 "requires_mart_review": False,
+                "required_derivations": [],
+                "analysis_heuristics": [],
                 "reason": "추이 분석",
             },
         ),
@@ -392,6 +417,7 @@ def test_decide_next_action_sends_compact_json_snapshot_to_model() -> None:
         "document_id": "sales_orders",
         "default_metrics": ["매출은 order_payments.payment_value 합계"],
     }
+    state["clarification_answers"] = ["최근 6개월 기준"]
     state["validation_results"] = [
         {"agent": "sql_agent", "message": "검증 메시지" * 500, "nested": {"detail": "중첩" * 500}}
         for _ in range(20)
@@ -500,6 +526,7 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
         "document_id": "sales_orders",
         "default_metrics": ["매출은 order_payments.payment_value 합계"],
     }
+    state["clarification_answers"] = ["최근 6개월 기준"]
     state["last_agent_result"] = AgentCompactResult(
         agent="sql_agent",
         status="success",
@@ -529,6 +556,7 @@ def test_node_context_builders_are_bounded_and_include_required_keys() -> None:
     ]
 
     assert "latest_user_query" in contexts[0]
+    assert contexts[0]["clarification_answers"] == ["최근 6개월 기준"]
     assert contexts[0]["analysis_rule_context"]["document_id"] == "sales_orders"
     assert "query" in contexts[1]
     assert contexts[1]["analysis_rule_context"]["document_id"] == "sales_orders"
