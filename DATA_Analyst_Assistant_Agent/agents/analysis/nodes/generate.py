@@ -16,10 +16,11 @@ from __future__ import annotations
 import ast
 import builtins
 import json
-import multiprocessing as mp
 import os
-import queue
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -715,37 +716,146 @@ def _execute_generated_code_isolated(
     *,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    ctx = mp.get_context("spawn")
-    result_queue = ctx.Queue()
-    process = ctx.Process(
-        target=_execute_generated_code_worker,
-        args=(code.model_dump(mode="json"), dataframe, result_queue),
-    )
-    process.start()
-    process.join(timeout_seconds)
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        raise AnalysisCodeError(f"generated code exceeded execution timeout: {timeout_seconds:g} seconds")
-    try:
-        payload = result_queue.get_nowait()
-    except queue.Empty as exc:
-        raise AnalysisCodeError("generated code worker exited without returning a result.") from exc
+    with tempfile.TemporaryDirectory(prefix="analysis_codegen_") as temp_dir:
+        dataframe_path = os.path.join(temp_dir, "input.pkl")
+        code_path = os.path.join(temp_dir, "code.json")
+        result_path = os.path.join(temp_dir, "result.json")
+        runner_path = os.path.join(temp_dir, "runner.py")
+
+        dataframe.to_pickle(dataframe_path)
+        with open(code_path, "w", encoding="utf-8") as handle:
+            json.dump(code.model_dump(mode="json"), handle, ensure_ascii=False)
+        with open(runner_path, "w", encoding="utf-8") as handle:
+            handle.write(_subprocess_runner_source(dataframe_path, code_path, result_path))
+
+        env = dict(os.environ)
+        cwd = os.getcwd()
+        env["PYTHONPATH"] = (
+            cwd if not env.get("PYTHONPATH") else os.pathsep.join([cwd, env["PYTHONPATH"]])
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, runner_path],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _tail(exc.stdout)
+            stderr = _tail(exc.stderr)
+            detail = f"generated code exceeded execution timeout: {timeout_seconds:g} seconds"
+            if stdout or stderr:
+                detail = f"{detail}; stdout_tail={stdout!r}; stderr_tail={stderr!r}"
+            raise AnalysisCodeError(detail) from exc
+
+        if completed.returncode != 0:
+            raise AnalysisCodeError(
+                "generated code subprocess failed "
+                f"with exitcode={completed.returncode}; "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            )
+        if not os.path.exists(result_path):
+            raise AnalysisCodeError(
+                "generated code subprocess exited without writing a result artifact "
+                f"(exitcode={completed.returncode}); "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            )
+        try:
+            with open(result_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:  # noqa: BLE001
+            raise AnalysisCodeError(
+                "generated code subprocess wrote an unreadable result artifact; "
+                f"stdout_tail={_tail(completed.stdout)!r}; "
+                f"stderr_tail={_tail(completed.stderr)!r}"
+            ) from exc
+
     if not payload.get("ok"):
-        raise AnalysisCodeError(str(payload.get("error") or "generated code failed in isolated worker."))
+        error = str(payload.get("error") or "generated code failed in subprocess.")
+        traceback_text = _tail(payload.get("traceback"))
+        if traceback_text:
+            error = f"{error}; traceback_tail={traceback_text!r}"
+        raise AnalysisCodeError(error)
     result = payload.get("result")
     if not isinstance(result, dict):
-        raise AnalysisCodeError("generated code worker returned an invalid result payload.")
+        raise AnalysisCodeError("generated code subprocess returned an invalid result payload.")
     return result
 
 
-def _execute_generated_code_worker(
-    code_payload: dict[str, Any],
-    dataframe: pd.DataFrame,
-    result_queue: Any,
-) -> None:
+def _subprocess_runner_source(dataframe_path: str, code_path: str, result_path: str) -> str:
+    payload = {
+        "dataframe_path": dataframe_path,
+        "code_path": code_path,
+        "result_path": result_path,
+    }
+    return f"""from __future__ import annotations
+
+import json
+import math
+import traceback
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import GeneratedAnalysisCode
+from DATA_Analyst_Assistant_Agent.agents.analysis.nodes.generate import _execute_generated_code_inline
+
+PATHS = {json.dumps(payload)}
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {{str(_json_safe(key)): _json_safe(item) for key, item in value.items()}}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+def main() -> None:
+    output = Path(PATHS["result_path"])
     try:
-        code = GeneratedAnalysisCode.model_validate(code_payload)
-        result_queue.put({"ok": True, "result": _execute_generated_code_inline(code, dataframe)})
-    except Exception as exc:  # noqa: BLE001
-        result_queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        dataframe = pd.read_pickle(PATHS["dataframe_path"])
+        with open(PATHS["code_path"], encoding="utf-8") as handle:
+            code = GeneratedAnalysisCode.model_validate(json.load(handle))
+        result = _execute_generated_code_inline(code, dataframe)
+        payload = {{"ok": True, "result": _json_safe(result)}}
+    except Exception as exc:
+        payload = {{
+            "ok": False,
+            "error": f"{{type(exc).__name__}}: {{exc}}",
+            "traceback": traceback.format_exc(),
+        }}
+    with output.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, allow_nan=False)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def _tail(value: Any, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    return text[-limit:]
