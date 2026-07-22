@@ -199,7 +199,7 @@ def test_generate_report_uses_report_max_tokens(adapter, runtime, monkeypatch):
 
     generate_report(list(ids.values()), runtime)
 
-    assert captured["max_tokens"] == 8192
+    assert captured["max_tokens"] == 12288
 
 
 def test_generate_report_respects_report_max_tokens_env(adapter, runtime, monkeypatch):
