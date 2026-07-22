@@ -17,7 +17,9 @@ def _integrity_rule(context: SimpleSQLGenerationContext | ComprehensiveSQLGenera
     if not context.integrity_failures:
         return ""
     return (
-        "\n- 관련 무결성 실패만 팬아웃 방지·중복 제거·타입 변환에 반영한다. "
+        "\n- integrity_failures는 필수 생성 계약이다. 관련 무결성 실패만 팬아웃 방지·중복 제거·타입 변환에 반드시 반영한다. "
+        "알려진 타입·값 오류는 최초 SQL의 정제 CTE에서 CASE, NULLIF, 명시적 CAST와 NULL로 정규화하고 "
+        "precheck_sql에서 비정상 값 건수를 센다. 원본 행 삭제, 임의 문자열 절단, 의미가 불명확한 값 조작은 금지한다. "
         "테이블/컬럼을 금지하거나 새 식별자를 만들지 않는다."
     )
 
@@ -40,7 +42,7 @@ MySQL 재사용 데이터마트 SQL을 작성한다.
 
 계약 우선순위
 1. mart_design(target_table, source_grains, final_grain, column_plan, metric_support, aggregation_policy)
-2. schema와 selected_tables
+2. schema와 selected_tables + integrity_failures
 3. user_question
 4. previous_feedback
 
@@ -75,7 +77,7 @@ def generate_query_prompt(context: SimpleSQLGenerationContext) -> str:
 MySQL 조회 SQL을 작성한다.
 
 계약 우선순위
-1. schema와 selected_tables
+1. schema와 selected_tables + integrity_failures
 2. user_question
 3. previous_feedback
 

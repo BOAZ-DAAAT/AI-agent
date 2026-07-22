@@ -16,5 +16,9 @@ def build_validation_summary_payload(result: dict[str, Any]) -> dict[str, Any]:
         "generation_failure_reason": result.get("generation_failure_reason") or "",
         "failed_statement_index": result.get("failed_statement_index"),
         "failed_statement_sql": result.get("failed_statement_sql") or "",
+        "classification": result.get("classification") or "none",
+        "repair_strategy": result.get("repair_strategy") or "none",
+        "repair_attempted": bool(result.get("repair_attempted")),
+        "repair_validation_result": result.get("repair_validation_result") or {},
         "final_answer": result.get("final_answer") or "",
     }

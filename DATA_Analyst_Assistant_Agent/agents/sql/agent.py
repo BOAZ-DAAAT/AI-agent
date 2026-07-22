@@ -214,6 +214,14 @@ class SQLAgent:
                 "failed_statement_sql": "",
                 "failed_sql_component": None,
                 "execution_error_info": {},
+                "classification": "none",
+                "repair_strategy": "none",
+                "repair_attempted": False,
+                "repair_validation_result": {
+                    "result": "not_attempted",
+                    "reason_code": "not_attempted",
+                    "details": {},
+                },
                 "final_answer": "",
             }
         )
@@ -265,6 +273,10 @@ class SQLAgent:
             "failed_statement_sql": result.get("failed_statement_sql") or "",
             "failed_sql_component": result.get("failed_sql_component"),
             "execution_error_info": result.get("execution_error_info") or {},
+            "classification": result.get("classification") or "none",
+            "repair_strategy": result.get("repair_strategy") or "none",
+            "repair_attempted": bool(result.get("repair_attempted")),
+            "repair_validation_result": result.get("repair_validation_result") or {},
             "final_answer": result.get("final_answer") or "",
             "source": "main/sql_agent/lang graph",
         }
