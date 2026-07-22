@@ -13,6 +13,7 @@ isolation; hard isolation is the Docker executor follow-up.
 
 from __future__ import annotations
 
+import ast
 import builtins
 import json
 import multiprocessing as mp
@@ -91,6 +92,9 @@ REQUIRED_RESULT_KEYS = ("summary", "findings", "statistics", "limitations")
 DEFAULT_CODE_EXEC_TIMEOUT_SECONDS = 600.0
 SMALL_MODELING_ROW_LIMIT = 10_000
 LARGE_MODELING_ROW_LIMIT = 100_000
+
+
+_ROW_ITERATION_METHODS = frozenset({"iterrows", "itertuples"})
 
 
 GENERATE_SYSTEM_PROMPT = """You write one small, auditable Python analysis script.
@@ -447,9 +451,7 @@ def inspect_generated_code(
         reasons.append("tree ensemble training can be long-running")
     if re.search(r"\b(bootstrap|permutation|simulation|monte.?carlo)\b", lowered) and re.search(r"\bfor\b|\brange\s*\(", lowered):
         reasons.append("simulation or resampling loop detected")
-    nested_loop_count = len(re.findall(r"\bfor\b", lowered))
-    if nested_loop_count >= 2 and row_count > SMALL_MODELING_ROW_LIMIT:
-        reasons.append("multiple loops on a non-small dataframe may be expensive")
+    reasons.extend(_expensive_iteration_reasons(source, row_count))
 
     fitting_detected = bool(re.search(r"\.fit(_predict|_transform)?\s*\(", lowered))
     simple_modeling = bool(re.search(r"\b(ols|glm|logit|kmeans|pca)\b", lowered))
@@ -496,6 +498,174 @@ def execute_generated_code(
 
 def _source_for_code(code: GeneratedAnalysisCode) -> str:
     return f"{code.imports}\n{code.code}" if code.imports else code.code
+
+
+def _expensive_iteration_reasons(source: str, row_count: int) -> list[str]:
+    if row_count <= SMALL_MODELING_ROW_LIMIT:
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    visitor = _IterationRiskVisitor()
+    visitor.visit(tree)
+    reasons: list[str] = []
+    if visitor.has_nested_loop:
+        reasons.append("actual nested loop on a non-small dataframe may be expensive")
+    if visitor.has_dataframe_row_iteration:
+        reasons.append("dataframe row iteration on a non-small dataframe may be expensive")
+    return reasons
+
+
+class _IterationRiskVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.loop_depth = 0
+        self.has_nested_loop = False
+        self.has_dataframe_row_iteration = False
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_loop(node)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
+
+    def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
+        if self.loop_depth > 0:
+            self.has_nested_loop = True
+        if _iterates_dataframe_rows(node.iter):
+            self.has_dataframe_row_iteration = True
+        self.loop_depth += 1
+        self.generic_visit(node)
+        self.loop_depth -= 1
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        if self.loop_depth > 0 or len(node.generators) > 1:
+            self.has_nested_loop = True
+        for generator in node.generators:
+            if _iterates_dataframe_rows(generator.iter):
+                self.has_dataframe_row_iteration = True
+        self.loop_depth += 1
+        self.generic_visit(node)
+        self.loop_depth -= 1
+
+
+def _iterates_dataframe_rows(node: ast.AST) -> bool:
+    unwrapped = _unwrap_iteration_call(node)
+    if _is_dataframe_row_method_call(unwrapped):
+        return True
+    if _is_range_over_dataframe_length(unwrapped):
+        return True
+    if _is_zip_over_dataframe_columns(unwrapped):
+        return True
+    return _is_dataframe_records_call(unwrapped)
+
+
+def _unwrap_iteration_call(node: ast.AST) -> ast.AST:
+    current = node
+    wrappers = {"enumerate", "list", "tuple", "iter", "reversed", "sorted"}
+    while (
+        isinstance(current, ast.Call)
+        and isinstance(current.func, ast.Name)
+        and current.func.id in wrappers
+        and current.args
+    ):
+        current = current.args[0]
+    return current
+
+
+def _is_dataframe_row_method_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _ROW_ITERATION_METHODS
+        and _is_df_name(node.func.value)
+    )
+
+
+def _is_range_over_dataframe_length(node: ast.AST) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "range"
+        and node.args
+    ):
+        return False
+    return any(_is_dataframe_length_expr(arg) for arg in node.args)
+
+
+def _is_dataframe_length_expr(node: ast.AST) -> bool:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and len(node.args) == 1
+        and _is_df_name(node.args[0])
+    ):
+        return True
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "shape"
+        and _is_df_name(node.value.value)
+        and _is_zero_constant(node.slice)
+    )
+
+
+def _is_zip_over_dataframe_columns(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "zip"
+        and any(_is_dataframe_column_access(arg) for arg in node.args)
+    )
+
+
+def _is_dataframe_records_call(node: ast.AST) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "to_dict"
+        and _is_df_name(node.func.value)
+    ):
+        return False
+    if node.args and _is_records_literal(node.args[0]):
+        return True
+    return any(
+        keyword.arg == "orient" and keyword.value is not None and _is_records_literal(keyword.value)
+        for keyword in node.keywords
+    )
+
+
+def _is_dataframe_column_access(node: ast.AST) -> bool:
+    return isinstance(node, ast.Subscript) and _is_df_name(node.value)
+
+
+def _is_df_name(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "df"
+
+
+def _is_zero_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == 0
+
+
+def _is_records_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "records"
 
 
 def _execute_generated_code_inline(

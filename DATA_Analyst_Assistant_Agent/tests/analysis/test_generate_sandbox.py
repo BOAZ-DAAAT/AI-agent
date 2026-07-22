@@ -240,6 +240,63 @@ def test_preflight_flags_while_loop() -> None:
     assert any("while" in reason for reason in plan.reasons)
 
 
+def test_preflight_allows_independent_comprehensions_on_non_small_dataframe() -> None:
+    code = _code(
+        "top_x = [str(value) for value in df['x'].head(5)]\n"
+        "top_y = [str(value) for value in df['y'].head(5)]\n"
+        "result = {'summary': 'ok', 'findings': top_x + top_y, 'statistics': {'n': len(df)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_does_not_count_for_in_strings_or_comments() -> None:
+    code = _code(
+        "# for seller in sellers; for month in months\n"
+        "note = 'for display only, not a loop for execution'\n"
+        "result = {'summary': note, 'findings': [note], 'statistics': {'n': len(df)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
+def test_preflight_flags_actual_nested_loop_on_non_small_dataframe() -> None:
+    code = _code(
+        "pairs = []\n"
+        "for seller in df['x'].head(10):\n"
+        "    for month in df['y'].head(10):\n"
+        "        pairs.append((seller, month))\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(pairs)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("nested loop" in reason for reason in plan.reasons)
+
+
+def test_preflight_flags_dataframe_row_iteration_on_non_small_dataframe() -> None:
+    code = _code(
+        "total = 0\n"
+        "for _, row in df.iterrows():\n"
+        "    total += row['x']\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'total': int(total)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(20_000), "y": range(20_000)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "manual_run_recommended"
+    assert any("row iteration" in reason for reason in plan.reasons)
+
+
 def test_execute_generated_code_subprocess_success() -> None:
     out = execute_generated_code(
         _code("result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'n': len(df)}, 'limitations': []}"),
