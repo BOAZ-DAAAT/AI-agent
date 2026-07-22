@@ -253,6 +253,29 @@ def test_normalize_v6_checkpoint_adds_retrieval_fields() -> None:
     assert normalized["analysis_rule_retrieval"] == {"status": "success", "hit_count": 3}
 
 
+def test_normalize_v6_checkpoint_preserves_retrieval_and_clarification_fields() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="seller별 리뷰와 배송 관계 분석",
+        datasource_id=None,
+    )
+    state["state_schema_version"] = 6
+    state["clarification_answers"] = ["단일 판매자 기준으로 해줘"]
+    state["retrieval_query"] = "단일 판매자 기준 seller 리뷰 배송 분석"
+    state["retrieval_query_generation"] = {"status": "success", "reason": "user clarified"}
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["state_schema_version"] == 7
+    assert normalized["clarification_answers"] == ["단일 판매자 기준으로 해줘"]
+    assert normalized["retrieval_query"] == "단일 판매자 기준 seller 리뷰 배송 분석"
+    assert normalized["retrieval_query_generation"] == {
+        "status": "success",
+        "reason": "user clarified",
+    }
+
+
 def test_to_orchestration_state_merges_state_and_result_limitations_without_duplicates() -> None:
     state = empty_supervisor_state(
         thread_id="thread_sales_001",

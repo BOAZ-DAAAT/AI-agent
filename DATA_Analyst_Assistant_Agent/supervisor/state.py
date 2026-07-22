@@ -552,16 +552,10 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
                 if schema_version >= 6
                 else {"status": "not_started"}
             ),
-            "clarification_answers": (
-                list(state.get("clarification_answers", [])) if schema_version >= 7 else []
-            ),
-            "retrieval_query": (
-                str(state.get("retrieval_query") or "") if schema_version >= 7 else ""
-            ),
-            "retrieval_query_generation": (
-                dict(state.get("retrieval_query_generation") or {"status": "not_started"})
-                if schema_version >= 7
-                else {"status": "not_started"}
+            "clarification_answers": list(state.get("clarification_answers", [])),
+            "retrieval_query": str(state.get("retrieval_query") or ""),
+            "retrieval_query_generation": dict(
+                state.get("retrieval_query_generation") or {"status": "not_started"}
             ),
         }
         normalized.pop("validation_results", None)
