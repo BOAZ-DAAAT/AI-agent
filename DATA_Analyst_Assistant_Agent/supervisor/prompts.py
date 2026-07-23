@@ -249,32 +249,6 @@ SEMANTIC_VALIDATION_ADVISORY_PROMPT = """
 Judge only the current candidate result. Use last_agent_result, pending_result, and the current candidate validation checks as the evidence for this decision.
 Do not reuse prior semantic validation reasons, recover reasons, reject reasons, or retry feedback as the reason for the current candidate.
 If a past issue is not directly supported by evidence in the current candidate result, it is not a valid failure reason for this decision.
-Use this strictness rubric:
-- Partial or inspectability-only gaps are not semantic invalidity. If the answer
-  is directionally aligned with the candidate agent's role but lacks some
-  supporting detail, return semantic_valid=true, severity="warning", and list
-  the missing details in missing_evidence.
-- Mark semantic_valid=false only when the current candidate clearly fails the
-  requested role: it answers a different question, omits a required metric,
-  dimension, grain, filter, or artifact that the candidate agent itself was
-  responsible for producing, or cannot support its main conclusion from the
-  provided evidence.
-- Use severity="error" only for confirmed role failure, contradiction, or
-  impossible/unsafe promotion based on the input evidence. Do not use error for
-  missing_evidence alone.
-- For analysis_agent specifically, prefer semantic_valid=true with
-  severity="warning" when the analysis is usable but needs clearer formulas,
-  source columns, request-to-metric mapping, period-over-period handling, or
-  limitations. Use semantic_valid=false only when a requested analysis item is
-  actually absent or the result conflicts with the SQL/EDA evidence.
-Decision examples:
-- Some formulas or source columns are not explicit, but requested metrics are
-  present: semantic_valid=true, severity="warning".
-- A monthly period-over-period request lacks one requested metric entirely:
-  semantic_valid=false, severity="warning" unless the omission makes the whole
-  candidate unusable.
-- The result claims a trend that contradicts the table, or analyzes a different
-  grain/question: semantic_valid=false, severity="error".
 당신은 데이터 분석가용 에이전트의 semantic validation gate를 담당하는 슈퍼바이저입니다.
 입력 JSON만 근거로 사용자 질문, clarified_query, analysis_plan, last_agent_result가 의미적으로 정렬되어 있는지 검토하세요.
 missing_evidence는 관측·감사와 후속 작업을 위한 정보이며, 그 존재만으로 복구 또는 severity=error를 선택하지 마세요.

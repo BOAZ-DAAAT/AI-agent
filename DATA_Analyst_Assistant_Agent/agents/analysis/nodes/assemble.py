@@ -22,7 +22,6 @@ from DATA_Analyst_Assistant_Agent.agents.analysis.schemas import (
     AnalysisIntent,
     AnalysisKind,
     AnalysisResult,
-    AnswerCoverage,
     HumanReview,
     MethodDecision,
     ReviewRequest,
@@ -89,10 +88,6 @@ def build_result_from_outcome(
 
     limitations = [str(item) for item in (result_payload.get("limitations") or [])]
     method_notes = [str(item) for item in (result_payload.get("method_notes") or [])]
-    answer_coverage = build_answer_coverage(intent, context, outcome.code, outcome.result)
-    coverage_note = _answer_coverage_method_note(answer_coverage)
-    if coverage_note:
-        method_notes.append(coverage_note)
     review_request = _review_request_from_payload(result_payload.get("review_request"))
     method_decision = _method_decision_from_payload(result_payload.get("method_decision"))
     if outcome.status == "failed":
@@ -145,7 +140,7 @@ def build_result_from_outcome(
         data_quality_notes=list(dict.fromkeys(quality_notes)),
         eda_profile_summaries=profiles,
         human_review=HumanReview(required=review_required, reason=review_reason),
-        answer_coverage=answer_coverage,
+        answer_coverage=build_answer_coverage(intent, context, outcome.code, outcome.result),
         status=status,
         title=_title_for_intent(intent),
         executive_summary=str(result_payload.get("summary") or ""),
@@ -163,48 +158,6 @@ def build_result_from_outcome(
         error_history=list(outcome.error_history),
     )
     return result.model_dump(mode="json")
-
-
-def _answer_coverage_method_note(coverage: AnswerCoverage) -> str:
-    requested_signal_count = len(coverage.requested_metrics) + len(coverage.requested_dimensions)
-    if (
-        not coverage.missing_requirements
-        and not coverage.requested_time_column
-        and requested_signal_count <= 2
-    ):
-        return ""
-
-    requested_parts: list[str] = []
-    if coverage.requested_metrics:
-        requested_parts.append("metrics=" + ", ".join(coverage.requested_metrics))
-    if coverage.requested_dimensions:
-        requested_parts.append("dimensions=" + ", ".join(coverage.requested_dimensions))
-    if coverage.requested_time_column:
-        grain = f"/{coverage.requested_time_grain}" if coverage.requested_time_grain else ""
-        requested_parts.append(f"time={coverage.requested_time_column}{grain}")
-    if not requested_parts:
-        return ""
-
-    used_parts: list[str] = []
-    if coverage.used_metrics:
-        used_parts.append("metrics=" + ", ".join(coverage.used_metrics))
-    if coverage.used_dimensions:
-        used_parts.append("dimensions=" + ", ".join(coverage.used_dimensions))
-    if coverage.used_time_column:
-        grain = f"/{coverage.used_time_grain}" if coverage.used_time_grain else ""
-        used_parts.append(f"time={coverage.used_time_column}{grain}")
-    if coverage.missing_requirements:
-        used_parts.append("missing=" + ", ".join(coverage.missing_requirements))
-
-    used_text = "; ".join(used_parts) if used_parts else "no requested signals detected"
-    return (
-        "Answer coverage "
-        f"({coverage.coverage_status}): requested "
-        + "; ".join(requested_parts)
-        + "; used "
-        + used_text
-        + "."
-    )
 
 
 def _generated_source(outcome: AnalysisOutcome) -> str:

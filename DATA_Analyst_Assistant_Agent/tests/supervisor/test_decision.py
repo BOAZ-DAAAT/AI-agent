@@ -366,12 +366,6 @@ def test_semantic_validation_prompt_describes_missing_evidence_advisory_policy()
     assert "- create_plan" not in recommendation_section
 
 
-def test_semantic_validation_prompt_describes_lenient_analysis_rubric() -> None:
-    assert "Partial or inspectability-only gaps are not semantic invalidity" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
-    assert "For analysis_agent specifically, prefer semantic_valid=true" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
-    assert "Do not use error for\n  missing_evidence alone" in SEMANTIC_VALIDATION_ADVISORY_PROMPT
-
-
 @pytest.mark.parametrize("schema", [ResultValidationDecision, StepSummaryDecision])
 def test_internal_transition_decisions_allow_redecision_action(schema) -> None:
     payload = (

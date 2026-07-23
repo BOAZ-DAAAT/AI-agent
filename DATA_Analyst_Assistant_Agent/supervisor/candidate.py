@@ -312,9 +312,7 @@ def validate_candidate(
             details=semantic_decision.model_dump(mode="json"),
         )
     )
-    if contract_decision.decision == "await_approval":
-        outcome = outcome_from_contract_decision(result.agent, contract_decision)
-    elif semantic_recover:
+    if semantic_recover:
         outcome = ValidationOutcome(
             disposition="recover",
             reason=semantic_decision.reason or "semantic validation을 통과하지 못했습니다.",
@@ -330,6 +328,8 @@ def validate_candidate(
             ),
             reason_code="semantic_validation_failed",
         )
+    elif contract_decision.decision == "await_approval":
+        outcome = outcome_from_contract_decision(result.agent, contract_decision)
     elif semantic_advisory or contract_decision.decision == "accept_with_limitations":
         outcome = ValidationOutcome(
             disposition="accept_with_limitations",
