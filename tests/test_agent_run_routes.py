@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -113,6 +115,45 @@ def test_create_agent_run_returns_run_id_and_uses_selected_session(tmp_path, mon
     run_response = client.get(f"/agent-runs/{body['run_id']}", headers=_user_header())
     assert run_response.status_code == 200
     assert run_response.json()["status"] == "running"
+
+
+def test_create_agent_run_response_does_not_wait_for_worker(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    client = TestClient(create_app(services=services))
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(
+            id=session_id,
+            session_db="session_db",
+            mart_db="mart_db",
+        ),
+    )
+
+    def blocking_launch(**_kwargs) -> None:
+        worker_started.set()
+        release_worker.wait(timeout=2)
+
+    monkeypatch.setattr("backend.agent_runs.routes.launch_agent_run", blocking_launch)
+
+    started_at = time.monotonic()
+    response = client.post(
+        "/agent-runs",
+        json={"session_id": "sess_001", "query": "응답 분리 확인"},
+        headers=_user_header(),
+    )
+    elapsed = time.monotonic() - started_at
+
+    try:
+        assert response.status_code == 202
+        assert response.json()["run_id"].startswith("run_")
+        assert elapsed < 1
+        assert worker_started.wait(timeout=1)
+    finally:
+        release_worker.set()
 
 
 def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> None:

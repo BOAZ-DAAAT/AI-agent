@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
+import threading
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     Header,
     HTTPException,
@@ -53,6 +56,26 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+logger = logging.getLogger(__name__)
+
+
+def _start_agent_worker(
+    target: Callable[..., None],
+    *,
+    run_id: str,
+    **kwargs: Any,
+) -> None:
+    def run() -> None:
+        try:
+            target(run_id=run_id, **kwargs)
+        except Exception:
+            logger.exception("Agent worker failed for run_id=%s", run_id)
+
+    threading.Thread(
+        target=run,
+        name=f"agent-run-{run_id}",
+        daemon=True,
+    ).start()
 
 
 @router.post("/{run_id}/cancel", response_model=AgentRunCancelResponse)
@@ -268,7 +291,6 @@ def read_agent_run_artifact_content(
 @router.post("", response_model=AgentRunResponse, status_code=202)
 def create_agent_run(
     payload: AgentRunCreateRequest,
-    background_tasks: BackgroundTasks,
     request: Request,
     user: dict = Depends(get_current_user),
 ) -> AgentRunResponse:
@@ -286,13 +308,13 @@ def create_agent_run(
         metadata={"query": query, "session_id": session.id, "session_db": session.session_db},
     )
 
-    background_tasks.add_task(
+    _start_agent_worker(
         launch_agent_run,
+        run_id=run.run_id,
         services=services,
         session=session,
         username=username,
         query=query,
-        run_id=run.run_id,
         thread_id=thread_id,
     )
 
@@ -309,7 +331,6 @@ def create_agent_run(
 def resume_run(
     run_id: str,
     payload: AgentRunResumeRequest,
-    background_tasks: BackgroundTasks,
     request: Request,
     user: dict = Depends(get_current_user),
 ) -> AgentRunResumeResponse:
@@ -370,12 +391,12 @@ def resume_run(
         if payload.reason:
             resume_payload["reason"] = payload.reason
 
-    background_tasks.add_task(
+    _start_agent_worker(
         resume_agent_run,
+        run_id=run_id,
         services=services,
         session=session,
         resume_payload=resume_payload,
-        run_id=run_id,
         thread_id=run.thread_id,
     )
     return AgentRunResumeResponse(
@@ -390,7 +411,6 @@ def resume_run(
 def branch_run(
     run_id: str,
     payload: AgentRunBranchRequest,
-    background_tasks: BackgroundTasks,
     request: Request,
     user: dict = Depends(get_current_user),
 ) -> AgentRunBranchResponse:
@@ -429,11 +449,11 @@ def branch_run(
         },
     )
 
-    background_tasks.add_task(
+    _start_agent_worker(
         run_branch_task,
+        run_id=branch_run.run_id,
         services=services,
         session=session,
-        run_id=branch_run.run_id,
         thread_id=source_run.thread_id,
         start_stage=payload.start_stage,
         instruction=payload.instruction,
