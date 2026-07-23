@@ -291,6 +291,24 @@ class TestSQLSelfCheck:
         assert not dialect_check.passed
         assert "JULIANDAY" in dialect_check.detail
 
+    def test_mysql_distinct_window_aggregate_is_blocked(self):
+        checks = run_sql_self_check(
+            "SELECT COUNT(DISTINCT seller_id) OVER (PARTITION BY order_id) AS seller_count FROM order_items"
+        )
+        dialect_check = next(c for c in checks if c.name == "mysql_dialect_compatibility")
+        assert not dialect_check.passed
+        assert "DISTINCT inside window aggregate" in dialect_check.detail
+
+    def test_mysql_unsupported_window_error_is_repairable_aggregation(self):
+        from DATA_Analyst_Assistant_Agent.agents.sql.execution_errors import classify_execution_error
+
+        result = classify_execution_error(
+            "(1235, \"This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'\")"
+        )
+
+        assert result["classification"] == "repairable_sql"
+        assert result["repair_strategy"] == "rewrite_aggregation"
+
     def test_post_execution_checks_columns(self):
         checks = run_sql_self_check("SELECT 1", columns=["x"], row_count=1)
         names = {c.name for c in checks}

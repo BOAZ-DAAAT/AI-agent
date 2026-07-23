@@ -28,6 +28,10 @@ _MYSQL_BANNED_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bilike\b", "PostgreSQL ILIKE 연산자는 MySQL에서 지원되지 않습니다. LOWER(col) LIKE LOWER(pattern) 형태를 사용하세요."),
     (r"::[a-z_]+", "PostgreSQL 타입 캐스팅(::type)은 MySQL에서 지원되지 않습니다. CAST(... AS ...)를 사용하세요."),
     (r"\b(count|sum|avg|min|max)\s*\(\s*\)", "집계 함수에 인자가 비어 있습니다. COUNT(*) 또는 적절한 컬럼/표현식을 사용하세요."),
+    (
+        r"\b(count|sum|avg|min|max)\s*\(\s*distinct\b[\s\S]*?\)\s*over\s*\(",
+        "MySQL does not support DISTINCT inside window aggregate functions. Pre-aggregate in a CTE/subquery, then join it back.",
+    ),
 )
 
 
