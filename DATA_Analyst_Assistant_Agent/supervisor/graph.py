@@ -153,21 +153,25 @@ def make_match_olist_template_node():
             }
 
         template_id = match.template_id.value
+        template_kind = match.template_kind.value if match.template_kind is not None else "query"
+        route_kind = "comprehensive" if template_kind == "mart" else "simple"
         return {
             "olist_template_match": match_payload,
             "clarified_query": query,
             "analysis_plan": {
                 "goal": query,
-                "route_kind": "simple",
+                "route_kind": route_kind,
                 "planner_mode": "deterministic",
                 "steps": ["build_olist_sql", "prevalidate_sql", "execute_sql", "validate_sql_and_result"],
                 "metric": existing_plan.get("metric"),
                 "dimension": existing_plan.get("dimension"),
                 "filters": [],
-                "requires_mart_review": False,
+                "requires_mart_review": template_kind == "mart",
                 "query_rules": dict(existing_plan.get("query_rules") or {}),
                 "sql_generation_source": "olist_template",
                 "sql_template_id": template_id,
+                "sql_template_kind": template_kind,
+                "sql_template_parameters": match.parameters.model_dump(mode="json"),
                 "datasource_id": state.get("datasource_id"),
                 "catalog_summary": state.get("catalog_summary"),
             },

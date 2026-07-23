@@ -1078,6 +1078,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             business_grain=plan_payload.get("business_grain") or None,
             sql_generation_source=plan_payload.get("sql_generation_source"),
             sql_template_id=plan_payload.get("sql_template_id"),
+            sql_template_kind=plan_payload.get("sql_template_kind"),
+            sql_template_parameters=plan_payload.get("sql_template_parameters") or {},
             mart_design=dict(plan_payload.get("mart_design") or {}),
             analysis_data_contract=dict(plan_payload.get("analysis_data_contract") or {}),
         )

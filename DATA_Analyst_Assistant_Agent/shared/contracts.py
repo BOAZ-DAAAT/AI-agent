@@ -25,10 +25,66 @@ class SupervisorTerminalState(StrEnum):
 
 class OlistTemplateId(StrEnum):
     monthly_sales_orders = "monthly_sales_orders"
+    daily_sales_orders = "daily_sales_orders"
     order_status_distribution = "order_status_distribution"
     category_sales = "category_sales"
     review_score_distribution = "review_score_distribution"
     payment_method_summary = "payment_method_summary"
+    customer_state_sales = "customer_state_sales"
+    seller_state_sales = "seller_state_sales"
+    seller_performance = "seller_performance"
+    delivery_delay_summary = "delivery_delay_summary"
+    category_review_summary = "category_review_summary"
+    payment_installment_summary = "payment_installment_summary"
+    freight_cost_summary = "freight_cost_summary"
+    basket_size_summary = "basket_size_summary"
+    repeat_customer_summary = "repeat_customer_summary"
+    customer_rfm = "customer_rfm"
+    monthly_customer_cohort = "monthly_customer_cohort"
+    customer_repeat_behavior = "customer_repeat_behavior"
+    order_delivery_performance = "order_delivery_performance"
+    monthly_category_performance = "monthly_category_performance"
+    monthly_seller_performance = "monthly_seller_performance"
+    customer_seller_geo = "customer_seller_geo"
+    category_review_delivery = "category_review_delivery"
+    payment_behavior = "payment_behavior"
+    product_logistics = "product_logistics"
+
+
+class OlistTemplateKind(StrEnum):
+    query = "query"
+    mart = "mart"
+
+
+class OlistTemplateParameters(BaseModel):
+    """질문에서 안전하게 정규화한 결정론적 SQL 파라미터."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_date: str | None = None
+    end_date: str | None = None
+    order_statuses: list[str] = Field(default_factory=list)
+    customer_states: list[str] = Field(default_factory=list)
+    seller_states: list[str] = Field(default_factory=list)
+    top_n: int | None = Field(default=None, ge=1, le=100)
+
+
+class OlistTemplateDefinition(BaseModel):
+    """결정론적 템플릿의 매칭·스키마·출력 계약."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: OlistTemplateId
+    template_kind: OlistTemplateKind
+    route_kind: Literal["simple", "comprehensive"]
+    sql_type: Literal["select", "create_table_as"]
+    intent: str
+    metrics: list[str]
+    dimensions: list[str]
+    required_schema: dict[str, set[str]]
+    allowed_parameters: set[str] = Field(default_factory=set)
+    output_columns: list[str]
+    business_grain: str
 
 
 class LocalCheck(BaseModel):
@@ -164,6 +220,8 @@ class AnalysisPlan(BaseModel):
     planner_mode: Literal["llm", "deterministic"] = "deterministic"
     sql_generation_source: Literal["olist_template", "semantic_llm", "failed"] | None = None
     sql_template_id: OlistTemplateId | None = None
+    sql_template_kind: OlistTemplateKind | None = None
+    sql_template_parameters: OlistTemplateParameters = Field(default_factory=OlistTemplateParameters)
     metric: str | None = None
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)

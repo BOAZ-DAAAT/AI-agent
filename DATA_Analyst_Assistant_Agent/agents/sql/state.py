@@ -231,6 +231,8 @@ class AgentState(TypedDict):
     generation_source: str
     sql_generation_source: str
     sql_template_id: Optional[str]
+    sql_template_kind: Optional[str]
+    sql_template_parameters: Dict[str, Any]
     generation_failure_reason: str
     generation_context_diagnostics: List[Dict[str, Any]]
     failed_statement_index: Optional[int]

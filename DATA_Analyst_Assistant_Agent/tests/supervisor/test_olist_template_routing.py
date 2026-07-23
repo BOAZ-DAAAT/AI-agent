@@ -57,11 +57,23 @@ def test_template_match_builds_deterministic_plan_before_semantic_search() -> No
 
 
 def test_unsupported_template_routes_to_existing_semantic_flow() -> None:
-    updates = make_match_olist_template_node()(_state("2024년 월별 매출과 주문 수"))
+    updates = make_match_olist_template_node()(_state("최근 6개월 월별 매출과 주문 수"))
 
     assert updates["olist_template_match"]["status"] == "not_matched"
     assert "analysis_plan" not in updates
     assert _route_after_olist_template_match(updates) == "semantic_fallback"
+
+
+def test_mart_template_builds_comprehensive_plan_and_parameters() -> None:
+    updates = make_match_olist_template_node()(_state("2024년 RFM 데이터마트"))
+
+    assert updates["olist_template_match"]["status"] == "matched"
+    assert updates["analysis_plan"]["route_kind"] == "comprehensive"
+    assert updates["analysis_plan"]["sql_template_kind"] == "mart"
+    assert updates["analysis_plan"]["sql_template_id"] == "customer_rfm"
+    assert updates["analysis_plan"]["sql_template_parameters"]["start_date"] == "2024-01-01"
+    assert updates["analysis_plan"]["requires_mart_review"] is True
+    assert _route_after_olist_template_match(updates) == "execute_subagent"
 
 
 def test_semantic_sql_failure_requests_clarification_only_once() -> None:

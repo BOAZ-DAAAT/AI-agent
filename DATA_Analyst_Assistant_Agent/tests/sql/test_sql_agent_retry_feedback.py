@@ -9,8 +9,14 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OlistTemplateId, OrchestrationState
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisPlan,
+    OlistTemplateId,
+    OlistTemplateKind,
+    OrchestrationState,
+)
 from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    build_olist_mart_design,
     build_olist_sql_draft,
     build_olist_validation_plan,
 )
@@ -150,6 +156,8 @@ def test_sql_agent_passes_template_source_and_retry_limit_without_llm_planning(m
             planner_mode="deterministic",
             sql_generation_source="olist_template",
             sql_template_id=OlistTemplateId.monthly_sales_orders,
+            sql_template_kind=OlistTemplateKind.query,
+            sql_template_parameters={"start_date": "2017-01-01"},
         ),
     )
 
@@ -158,6 +166,8 @@ def test_sql_agent_passes_template_source_and_retry_limit_without_llm_planning(m
     assert fake_app.invoked_with is not None
     assert fake_app.invoked_with["sql_template_id"] == "monthly_sales_orders"
     assert fake_app.invoked_with["generation_source"] == "olist_template"
+    assert fake_app.invoked_with["sql_template_kind"] == "query"
+    assert fake_app.invoked_with["sql_template_parameters"]["start_date"] == "2017-01-01"
     assert fake_app.invoked_with["max_retries"] == 1
 
 
@@ -200,6 +210,51 @@ def test_template_source_is_written_to_plan_result_artifact_metadata_and_preview
         assert call["metadata"]["sql_template_id"] == template_id.value
         assert call["preview"]["sql_generation_source"] == "olist_template"
         assert call["preview"]["sql_template_id"] == template_id.value
+
+
+def test_mart_template_reference_and_kind_are_preserved_in_plan_and_artifacts() -> None:
+    template_id = OlistTemplateId.customer_rfm
+    draft = build_olist_sql_draft(template_id).model_dump()
+    result = {
+        "plan": build_olist_validation_plan(template_id),
+        "mart_design": build_olist_mart_design(template_id),
+        "sql_draft": draft,
+        "sql_result": [{"customer_unique_id": "c1", "frequency": 2}],
+        "row_count": 1,
+        "validation": {"result": "valid", "reason": "통과"},
+        "validation_findings": [],
+        "retry_hint": {"retryable": False, "reason_code": "none"},
+        "generation_source": "olist_template",
+        "sql_generation_source": "olist_template",
+        "sql_template_id": template_id.value,
+        "sql_template_kind": "mart",
+        "sql_template_parameters": {},
+        "final_answer": "완료",
+    }
+    state = OrchestrationState(
+        run_id="run_mart_template_artifacts",
+        user_query="RFM 데이터마트",
+        plan=AnalysisPlan(
+            goal="RFM 데이터마트",
+            route_kind="comprehensive",
+            planner_mode="deterministic",
+            sql_generation_source="olist_template",
+            sql_template_id=template_id,
+            sql_template_kind=OlistTemplateKind.mart,
+        ),
+    )
+    adapter = _CapturingAdapter(calls=[])
+
+    envelope = SQLAgent()._envelope_from_main_result(state, AgentRuntime(adapter=adapter), result)  # type: ignore[arg-type]
+
+    assert envelope.status.value == "success"
+    assert state.plan is not None
+    assert state.plan.target_table == "analytics.olist_customer_rfm"
+    assert state.plan.sql_template_kind == OlistTemplateKind.mart
+    template_artifacts = [call for call in adapter.calls if call["metadata"].get("sql_template_id")]
+    assert template_artifacts
+    assert all(call["metadata"]["sql_template_kind"] == "mart" for call in template_artifacts)
+    assert any(call["metadata"].get("target_table") == state.plan.target_table for call in template_artifacts)
 
 
 def test_sql_agent_contract_only_repairs_metadata_without_regenerating_sql(monkeypatch) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    build_olist_mart_design,
     build_olist_sql_draft,
     build_olist_validation_plan,
 )
@@ -17,8 +18,10 @@ def build_olist_template_sql(state: AgentState) -> dict:
         draft = build_olist_sql_draft(
             template_id,
             state.get("required_db_schema") or None,
+            parameters=state.get("sql_template_parameters") or {},
         )
         plan = build_olist_validation_plan(template_id)
+        mart_design = build_olist_mart_design(template_id)
     except Exception as exc:
         detail = f"Olist SQL 템플릿 구성에 실패했습니다: {exc}"
         finding = {
@@ -63,6 +66,7 @@ def build_olist_template_sql(state: AgentState) -> dict:
             "required_columns": plan["required_columns"],
         },
         "planning_stages": {"olist_template": template_id.value},
+        "mart_design": mart_design,
         "sql_draft": draft.model_dump(),
         "generation_source": "olist_template",
         "sql_generation_source": "olist_template",

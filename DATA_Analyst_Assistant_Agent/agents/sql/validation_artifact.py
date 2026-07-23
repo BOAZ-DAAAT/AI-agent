@@ -23,6 +23,8 @@ def build_validation_summary_payload(result: dict[str, Any]) -> dict[str, Any]:
             or "semantic_llm"
         ),
         "sql_template_id": result.get("sql_template_id"),
+        "sql_template_kind": result.get("sql_template_kind"),
+        "sql_template_parameters": result.get("sql_template_parameters") or {},
         "generation_failure_reason": result.get("generation_failure_reason") or "",
         "failed_statement_index": result.get("failed_statement_index"),
         "failed_statement_sql": result.get("failed_statement_sql") or "",

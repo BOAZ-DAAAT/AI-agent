@@ -14,6 +14,7 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     LocalCheck,
     OrchestrationState,
     OlistTemplateId,
+    OlistTemplateKind,
     ValidationBlock,
     ValidationFinding,
 )
@@ -152,6 +153,10 @@ class SQLAgent:
                 "sql_template_id": (
                     state.plan.sql_template_id.value if state.plan.sql_template_id else None
                 ),
+                "sql_template_kind": (
+                    state.plan.sql_template_kind.value if state.plan.sql_template_kind else None
+                ),
+                "sql_template_parameters": state.plan.sql_template_parameters.model_dump(),
             }
             if state.plan.query_rules:
                 supervisor_plan_context["query_rules"] = state.plan.query_rules
@@ -227,6 +232,16 @@ class SQLAgent:
                     if state.plan is not None and state.plan.sql_template_id is not None
                     else None
                 ),
+                "sql_template_kind": (
+                    state.plan.sql_template_kind.value
+                    if state.plan is not None and state.plan.sql_template_kind is not None
+                    else None
+                ),
+                "sql_template_parameters": (
+                    state.plan.sql_template_parameters.model_dump()
+                    if state.plan is not None
+                    else {}
+                ),
                 "max_retries": 1,
                 "generation_failure_reason": "",
                 "generation_context_diagnostics": [],
@@ -264,6 +279,17 @@ class SQLAgent:
             else None
         )
         template_id = OlistTemplateId(template_id_value) if template_id_value else None
+        template_kind_value = result.get("sql_template_kind") or (
+            state.plan.sql_template_kind.value
+            if state.plan is not None and state.plan.sql_template_kind is not None
+            else None
+        )
+        template_kind = OlistTemplateKind(template_kind_value) if template_kind_value else None
+        template_parameters = (
+            state.plan.sql_template_parameters.model_dump(mode="json")
+            if state.plan is not None
+            else {}
+        )
         state.generated_sql = generated_sql
         state.planner_mode = "deterministic" if template_id is not None else "llm"
         # comprehensive(마트) 경로면 마트 테이블 참조를 plan에 실어 하류로 넘긴다.
@@ -278,6 +304,7 @@ class SQLAgent:
             state.plan.planner_mode = state.planner_mode
             state.plan.sql_generation_source = generation_source
             state.plan.sql_template_id = template_id
+            state.plan.sql_template_kind = template_kind
             state.plan.target_table = target_table or None
             state.plan.source_tables = source_tables
             state.plan.business_grain = business_grain
@@ -301,6 +328,8 @@ class SQLAgent:
             "generation_source": generation_source,
             "sql_generation_source": generation_source,
             "sql_template_id": template_id.value if template_id else None,
+            "sql_template_kind": template_kind.value if template_kind else None,
+            "sql_template_parameters": template_parameters,
             "generation_failure_reason": result.get("generation_failure_reason") or "",
             "failed_statement_index": result.get("failed_statement_index"),
             "failed_statement_sql": result.get("failed_statement_sql") or "",
@@ -327,6 +356,8 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
             },
             preview={
                 "question_type": (result.get("plan") or {}).get("question_type"),
@@ -336,6 +367,7 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
         sql_plan_ref = runtime.adapter.register_artifact(
@@ -352,12 +384,15 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
             },
             preview={
                 "route_kind": (result.get("plan") or {}).get("route_kind"),
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
         sql_ref = runtime.adapter.register_artifact(
@@ -374,6 +409,8 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
             },
             preview={
                 "sql": generated_sql,
@@ -381,6 +418,7 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
 
@@ -400,6 +438,8 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
             },
             preview={
                 "row_count": result_row_count,
@@ -408,6 +448,7 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
         validation_payload = build_validation_summary_payload(result)
@@ -425,6 +466,7 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
             preview={
                 "validation_result": (result.get("validation") or {}).get("result"),
@@ -432,6 +474,7 @@ class SQLAgent:
                 "generation_source": generation_source,
                 "sql_generation_source": generation_source,
                 "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
 

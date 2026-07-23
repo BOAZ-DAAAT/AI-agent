@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    OLIST_TEMPLATE_REGISTRY,
     OlistTemplateId,
+    build_olist_mart_design,
     build_olist_sql_draft,
     build_olist_validation_plan,
     match_olist_template,
@@ -20,7 +22,7 @@ from DATA_Analyst_Assistant_Agent.agents.sql.validation_contract import (
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app, route_after_validation
 from DATA_Analyst_Assistant_Agent.agents.sql.nodes.prevalidate import route_after_prevalidation
-from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan
+from DATA_Analyst_Assistant_Agent.shared.contracts import AnalysisPlan, OlistTemplateKind
 
 
 @pytest.fixture(scope="module")
@@ -63,10 +65,10 @@ def test_match_olist_template_variants(
 @pytest.mark.parametrize(
     "question",
     [
-        "2024년 월별 매출과 주문 수를 보여줘",
         "최근 3개월 주문 상태별 분포",
-        "카테고리 매출 상위 10개",
         "카테고리별 매출과 주문 상태 분포를 함께 보여줘",
+        "월별 매출이 1000 이상인 기간",
+        "고객 지역 SP의 월별 매출과 주문 수",
     ],
 )
 def test_unsupported_or_ambiguous_question_uses_semantic_fallback(
@@ -113,8 +115,17 @@ def test_olist_sql_drafts_pass_existing_prevalidation_contracts(
     ]
 
     assert findings == []
-    assert draft["sql_type"] == "select"
-    assert draft["sql"].lstrip().upper().startswith(("SELECT", "WITH"))
+    definition = OLIST_TEMPLATE_REGISTRY[template_id]
+    if definition.template_kind == OlistTemplateKind.query:
+        assert draft["sql_type"] == "select"
+        assert draft["sql"].lstrip().upper().startswith(("SELECT", "WITH"))
+        assert draft["target_table"] is None
+    else:
+        assert draft["sql_type"] == "create_table_as"
+        assert draft["sql"].lstrip().upper().startswith("CREATE TABLE ANALYTICS.OLIST_")
+        assert draft["sql"].upper().count("CREATE TABLE") == 1
+        assert draft["target_table"] == f"analytics.olist_{template_id.value}"
+        assert build_olist_mart_design(template_id)["grain"] == definition.business_grain
 
 
 def test_review_distribution_keeps_group_by_in_top_level_select(olist_catalog: dict) -> None:
@@ -128,21 +139,33 @@ def test_review_distribution_keeps_group_by_in_top_level_select(olist_catalog: d
     assert "GROUP BY s.review_score" in draft["sql"]
 
 
+@pytest.mark.parametrize(
+    ("template_id", "question", "template_kind", "expected_sql_type"),
+    [
+        (OlistTemplateId.monthly_sales_orders, "월별 매출과 주문 수를 보여줘", "query", "select"),
+        (OlistTemplateId.customer_rfm, "RFM 데이터마트", "mart", "create_table_as"),
+    ],
+)
 def test_template_graph_skips_semantic_planning_and_sql_generation_llm(
     monkeypatch: pytest.MonkeyPatch,
     olist_catalog: dict,
+    template_id: OlistTemplateId,
+    question: str,
+    template_kind: str,
+    expected_sql_type: str,
 ) -> None:
     import DATA_Analyst_Assistant_Agent.agents.sql.nodes as nodes
 
     def forbidden_node(_state: dict) -> dict:
         raise AssertionError("템플릿 경로에서 semantic planning/generation을 호출하면 안 됩니다.")
 
-    def fake_execute(_state: dict) -> dict:
-        rows = [{"purchase_month": "2017-01-01", "product_sales": 10.0, "order_count": 1}]
+    def fake_execute(state: dict) -> dict:
+        rows = [{"result_key": "value"}]
         return {
             "sql_result": rows,
             "statement_results": [{"index": 0, "rows": rows, "row_count": 1}],
             "row_count": 1,
+            "postcheck_result": ([{"row_count": 1}] if state["sql_draft"]["sql_type"] == "create_table_as" else None),
             "error": "",
             "execution_error_info": {},
         }
@@ -151,7 +174,7 @@ def test_template_graph_skips_semantic_planning_and_sql_generation_llm(
     monkeypatch.setattr(nodes, "generate_sql", forbidden_node)
     monkeypatch.setattr(nodes, "execute_sql", fake_execute)
     payload = {
-        "user_question": "월별 매출과 주문 수를 보여줘",
+        "user_question": question,
         "required_db_schema": json.dumps(olist_catalog, ensure_ascii=False),
         "schema_text": "",
         "integrity_text": "",
@@ -182,7 +205,9 @@ def test_template_graph_skips_semantic_planning_and_sql_generation_llm(
         "error": "",
         "generation_source": "olist_template",
         "sql_generation_source": "olist_template",
-        "sql_template_id": "monthly_sales_orders",
+        "sql_template_id": template_id.value,
+        "sql_template_kind": template_kind,
+        "sql_template_parameters": {},
         "generation_failure_reason": "",
         "generation_context_diagnostics": [],
         "failed_statement_index": None,
@@ -200,7 +225,8 @@ def test_template_graph_skips_semantic_planning_and_sql_generation_llm(
 
     assert result["validation"]["result"] == "valid"
     assert result["sql_generation_source"] == "olist_template"
-    assert result["sql_template_id"] == "monthly_sales_orders"
+    assert result["sql_template_id"] == template_id.value
+    assert result["sql_draft"]["sql_type"] == expected_sql_type
     assert result["retry_count"] == 0
 
 
