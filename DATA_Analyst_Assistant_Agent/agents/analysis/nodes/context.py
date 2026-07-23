@@ -148,13 +148,11 @@ def _slim_derived_group_result(value: dict[str, Any]) -> dict[str, Any]:
         "metric_col",
         "target_col",
         "count_col",
-        "min_count",
-        "threshold_source",
+        "filter_expression",
         "total_entities",
         "eligible_entities",
         "excluded_entities",
         "relationships",
-        "high_metric_group",
         "findings",
     }
     return {key: value[key] for key in allowed if key in value}

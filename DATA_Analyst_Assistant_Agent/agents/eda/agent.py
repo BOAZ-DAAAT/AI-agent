@@ -10,7 +10,7 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, load_analysis_inputs
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, get_llm, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.derived_group import (
     build_derived_group_frame,
 )
@@ -168,18 +168,25 @@ class EDAAgent:
         same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
         df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
         branch_instruction = _extract_branch_instruction(state.user_query or "")
-        derived_question = f"[異붽? 吏?쒖궗??] {branch_instruction}" if branch_instruction else ""
-        derived_input = build_derived_group_frame(df, derived_question)
+        derived_question = f"[추가 지시사항] {branch_instruction}" if branch_instruction else ""
+        # branch_instruction 이 없으면(일반 실행) build_derived_group_frame 이 곧바로 None을
+        # 리턴하므로, 그 흔한 경로에서까지 LLM 클라이언트를 미리 만들지 않는다(테스트/키 없는
+        # 환경에서 불필요하게 실패하지 않도록 — get_llm() 은 실제 필요할 때만 평가).
+        derived_input = (
+            build_derived_group_frame(df, derived_question, llm=get_llm())
+            if branch_instruction
+            else None
+        )
         graph_df = derived_input["dataframe"] if derived_input else df
         graph_mart_design = derived_input.get("mart_design", {}) if derived_input else {}
         graph_question = state.user_query or ""
         if derived_input:
             meta = derived_input["metadata"]
+            filter_desc = f'"{meta["filter_expression"]}" 조건' if meta.get("filter_expression") else "필터 없이 전체"
             graph_question = (
                 f"{graph_question}\n\n"
                 "[분기 EDA 입력]\n"
-                f"{meta['entity_col']} 기준으로 임시 집계표를 생성한 뒤 "
-                f"{meta['count_col']} >= {meta['min_count']} 조건을 적용했습니다. "
+                f"{meta['entity_col']} 기준으로 임시 집계표를 생성한 뒤 {filter_desc}을 적용했습니다. "
                 f"현재 EDA 그래프 입력은 원본 주문 행이 아니라 "
                 f"{meta['eligible_entities']}개 {meta['entity_col']} 집계 행입니다."
             )
