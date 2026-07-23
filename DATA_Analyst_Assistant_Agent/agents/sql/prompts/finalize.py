@@ -1,13 +1,21 @@
-"""최종 답변(finalize_answer) 프롬프트 — 마트 요약/조회 답변/재작성."""
+"""Deprecated: 미사용 최종화 프롬프트의 직접 import 호환 모듈."""
 
 from __future__ import annotations
 
 import json
+import warnings
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
 
 
 def finalize_mart_prompt(state) -> str:
+    """Deprecated: 결정론적 ``finalize_answer``를 사용한다."""
+    warnings.warn(
+        "finalize_mart_prompt는 더 이상 런타임에서 사용되지 않습니다. "
+        "결정론적 finalize_answer 경로를 사용하세요.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return f"""
 너는 데이터 엔지니어/분석가용 결과 요약기다.
 
@@ -34,6 +42,13 @@ def finalize_mart_prompt(state) -> str:
 
 
 def finalize_answer_prompt(state) -> str:
+    """Deprecated: 결정론적 ``finalize_answer``를 사용한다."""
+    warnings.warn(
+        "finalize_answer_prompt는 더 이상 런타임에서 사용되지 않습니다. "
+        "결정론적 finalize_answer 경로를 사용하세요.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return f"""
 너는 데이터 분석 답변 작성기다.
 
@@ -52,6 +67,13 @@ SQL 결과:
 
 
 def finalize_rewrite_prompt(state, answer: str) -> str:
+    """Deprecated: 결정론적 ``finalize_answer``를 사용한다."""
+    warnings.warn(
+        "finalize_rewrite_prompt는 더 이상 런타임에서 사용되지 않습니다. "
+        "결정론적 finalize_answer 경로를 사용하세요.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return f"""
 너는 데이터 분석 결과를 사용자에게 설명하는 한국어 분석가다.
 

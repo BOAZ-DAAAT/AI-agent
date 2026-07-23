@@ -99,7 +99,7 @@ def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[
 
 
 def plan_question(state: AgentState):
-    response = try_llm_json(prompts.plan_prompt(state))
+    response = try_llm_json(prompts.plan_messages(state))
     if not response:
         return _plan_failure(
             reason_code="llm_empty_response",
