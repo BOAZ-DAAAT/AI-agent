@@ -3,9 +3,14 @@
 설계 원칙(계획 문서 참고):
 - API/비동기 실행을 전혀 가정하지 않는 순수 함수. artifact_ids 주면 요약 아티팩트 하나를
   만들어(또는 캐시에서 찾아) ArtifactRef를 리턴한다.
-- 숫자 검증은 shared/numeric_verify.py(공용 유틸)를 쓴다 — insight 코드를 직접 가져다 쓰지
-  않는다. 검증 실패 시 1회만 재시도, 그래도 실패하면 LLM 없이 근거 그대로 채우는 템플릿
-  폴백(절대 숫자를 지어내지 않는다).
+- 숫자 검증(shared/numeric_verify.py)은 쓰지 않는다 — report/generator.py와 같은 이유로
+  팀 판단에 따라 의도적으로 뺐다(2026-07-23). 검증 실패로 원본 덤프 폴백에 떨어져 요약
+  UX가 깨지는 걸 우선 피한다. JSON 파싱 실패나 필수 필드 누락처럼 구조 자체가 무너진
+  경우에만 재시도 후 폴백으로 간다.
+- 그마저 실패해도(2026-07-23) 곧장 정적 템플릿("자동 생성에 실패했습니다")으로 가지
+  않는다. shared/plain_narrative.py로 형식 요구를 낮춘 텍스트 생성을 한 번 더 시도해
+  실제 근거를 읽고 쓴 문장을 확보한다(_plain_narrative_result). 이것도 LLM 호출 자체가
+  죽어야만(API 전체 장애) 최종 정적 템플릿(_fallback_result)으로 간다.
 - 결과는 노드 종류(kind)별로 다른 의미적 구조를 쓴다(schemas.py의 discriminated union) —
   SQL은 정합성/파생변수/마트설계, EDA는 프로파일링/통계발견/차트생성, 분석은 방법론선택/
   가설검정, 인사이트는 근거종합/직답. 프롬프트·파서·폴백 전부 kind별로 분기한다.
@@ -20,13 +25,11 @@ import os
 import re
 from typing import Any, Callable
 
-from pydantic import BaseModel
-
 from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
-from DATA_Analyst_Assistant_Agent.shared.numeric_verify import collect_numbers, verify_texts
+from DATA_Analyst_Assistant_Agent.shared.plain_narrative import generate_plain_narrative
 from DATA_Analyst_Assistant_Agent.supervisor.summary.evidence import NodeEvidence, read_node_evidence
 from DATA_Analyst_Assistant_Agent.supervisor.summary.markdown import render_node_summary_artifact_markdown
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
@@ -41,7 +44,9 @@ from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
 )
 
 _TOOL_NAME = "supervisor.summary.generator"
-_SUMMARY_VERSION = 19                                  # v19: Insight AS-IS/TO-BE/ACTION 구조 추가
+_SUMMARY_VERSION = 21                                  # v21: 정적 템플릿 전에 간이 텍스트 생성 폴백 추가
+                                                        # (v20: 숫자 검증 폴백 제거(과학적 표기 오탐으로 폴백되던 문제))
+                                                        # (v19: Insight AS-IS/TO-BE/ACTION 구조 추가)
                                                         # (v13: SQL 핵심 어구 강조 문법 반영)
                                                         # (v12: SQL 화면 구조/10행 데이터마트 미리보기 반영)
                                                         # (v11: SQL 요약 톤/중복 SQL 노출 정리)
@@ -122,6 +127,8 @@ def generate_node_summary(
         evidence.facts["branch_instruction"] = branch_instruction.strip()
     result = _generate_with_llm(evidence) if evidence.facts else None
     if result is None:
+        result = _plain_narrative_result(evidence)
+    if result is None:
         result = _fallback_result(evidence)
 
     return _register(artifact_ids, result, runtime)
@@ -155,12 +162,6 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
         return None
 
     llm = get_chat_model(model=os.getenv("SUMMARY_MODEL") or None, model_env="LLM_MODEL")
-    verification_evidence = {
-        "facts": evidence.facts,
-        "chart_captions": [chart.caption for chart in evidence.charts if chart.caption],
-    }
-    numbers = collect_numbers(verification_evidence)
-    corpus = json.dumps(verification_evidence, ensure_ascii=False, default=str)
     known_chart_ids = {c.artifact_id for c in evidence.charts}
     build_prompt = _PROMPT_BUILDERS[detail_kind]
     parse_result = _RESULT_PARSERS[detail_kind]
@@ -193,65 +194,8 @@ def _generate_with_llm(evidence: NodeEvidence) -> NodeSummaryResult | None:
             feedback = "[누락] title/subtitle/background/conclusion/key_finding은 비울 수 없고, 핵심 리스트는 최소 1개 이상이어야 한다."
             continue
 
-        ok, missing = verify_texts(_collect_generated_texts(result), numbers, corpus)
-        if not ok:
-            feedback = f"[검증 실패] 다음 숫자가 근거에 없다: {missing} — 근거에 있는 숫자만 써라. 새 숫자가 필요하면 쓰지 말고 서술만 하라."
-            continue
-
         return result
     return None
-
-
-def _collect_texts(value: Any) -> list[str]:
-    """결과 안의 모든 서술 텍스트를 재귀적으로 모은다(숫자 검증용 corpus 대상).
-
-    FindingSection.chart_artifact_ids는 서술이 아니라 식별자라서 제외한다 — "art_a374da05..."
-    같은 artifact_id 안에 우연히 박힌 숫자 조각이 "근거 없는 숫자"로 오탐되는 걸 막는다
-    (run_summary_sample 실행 중 EDA/인사이트 서머리가 이 이유로 계속 폴백되던 실사례).
-    """
-    texts: list[str] = []
-    if isinstance(value, str):
-        if value:
-            texts.append(value)
-    elif isinstance(value, FindingSection):
-        texts.extend(_collect_texts(value.heading))
-        texts.extend(_collect_texts(value.body))
-        if value.source_label:
-            texts.extend(_collect_texts(value.source_label))
-    elif isinstance(value, BaseModel):
-        for field_name in type(value).model_fields:
-            texts.extend(_collect_texts(getattr(value, field_name)))
-    elif isinstance(value, dict):
-        for v in value.values():
-            texts.extend(_collect_texts(v))
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            texts.extend(_collect_texts(v))
-    return texts
-
-
-def _collect_generated_texts(result: NodeSummaryResult) -> list[str]:
-    """LLM이 작성한 서술만 숫자 검증한다.
-
-    원본 근거에서 결정론적으로 복사한 표, 코드, 방법 결정, 차트 설명을 다시 검증하면
-    검증 corpus와 복사 필드의 경계가 어긋날 때 정상 숫자를 환각으로 오판할 수 있다.
-    """
-    candidate = result.model_copy(deep=True)
-    candidate.code_used = ""
-    detail = candidate.detail
-    if isinstance(detail, SQLSummaryDetail):
-        detail.mart_preview = []
-        detail.sql_snippet = ""
-    elif isinstance(detail, EDASummaryDetail):
-        detail.primary_hypothesis = {}
-    elif isinstance(detail, AnalysisSummaryDetail):
-        detail.method_decision = {}
-        detail.evidence_tables = []
-        detail.supporting_charts = []
-    elif isinstance(detail, InsightSummaryDetail):
-        detail.evidence_sources = []
-        detail.supporting_charts = []
-    return _collect_texts(candidate)
 
 
 # ─────────────────────────────
@@ -959,6 +903,82 @@ def _prompt_common_parts(evidence: NodeEvidence, feedback: str) -> tuple[str, st
     )
     feedback_section = f"\n[이전 시도 피드백]\n{feedback}\n" if feedback else ""
     return facts_text, charts_text, feedback_section
+
+
+# ─────────────────────────────
+# 2차 폴백 — 구조화 JSON이 실패했을 때, 형식 요구를 낮춰 LLM에 한 번 더 맡긴다(2026-07-23).
+# 서사(제목/배경/결론)와 각 fact 섹션 본문을 전부 같은 호출·같은 목소리로 받아, "사람이 쓴
+# 서사 + 기계가 덤프한 raw 값"처럼 톤이 갈리지 않게 한다. 라벨 하나를 LLM이 빼먹으면 그
+# 섹션만 원본 값으로 메운다(전체를 정적 템플릿으로 버리지 않는다).
+# ─────────────────────────────
+def _plain_narrative_result(evidence: NodeEvidence) -> NodeSummaryResult | None:
+    detail_kind = _DETAIL_KIND.get(evidence.source_kind)
+    if detail_kind is None:
+        return None
+    label = _KIND_LABELS.get(evidence.source_kind, evidence.source_kind or "알 수 없는 단계")
+
+    fact_items = [(k, v) for k, v in evidence.facts.items() if v]
+    line_specs: list[tuple[str, str]] = [
+        ("제목", "8자 내외 소제목"),
+        ("한줄요약", "핵심을 압축한 1문장"),
+        ("배경", "왜 이 단계가 필요했는지, 1~2문장"),
+    ]
+    fact_labels = [_FACT_LABELS.get(k, k) for k, _ in fact_items]
+    line_specs += [(lbl, "이 항목 원본 값을 보고 자연스러운 문장 1~2개, 숫자는 있는 그대로 인용")
+                   for lbl in fact_labels]
+    if evidence.charts:
+        line_specs.append(("관련 차트", "이 차트들이 보여주는 내용을 문장으로"))
+    line_specs.append(("결론", "1~2문장"))
+
+    llm = get_chat_model(model=os.getenv("SUMMARY_MODEL") or None, model_env="LLM_MODEL")
+    facts_text, charts_text, _ = _prompt_common_parts(evidence, "")
+    parsed = generate_plain_narrative(
+        llm, label=label, line_specs=line_specs, evidence_text=facts_text, charts_text=charts_text)
+    if parsed is None:
+        return None
+
+    catch_all = parsed.get("__all__", "")
+    sections: list[FindingSection] = []
+    for (key, value), lbl in zip(fact_items, fact_labels):
+        body = parsed.get(lbl) or _format_fact_value(value)
+        sections.append(FindingSection(heading=lbl, body=body, source_label=lbl, chart_artifact_ids=[]))
+    if evidence.charts:
+        chart_body = parsed.get("관련 차트") or "다음 차트가 이 단계의 근거로 함께 제공됩니다."
+        sections.append(FindingSection(heading="관련 차트", body=chart_body, source_label="차트",
+                                       chart_artifact_ids=[c.artifact_id for c in evidence.charts]))
+
+    if detail_kind == "sql":
+        detail: Any = SQLSummaryDetail(derived_columns=sections,
+                                        mart_preview=list(evidence.facts.get("preview") or []),
+                                        sql_snippet="")
+    elif detail_kind == "eda":
+        detail = EDASummaryDetail(statistical_findings=sections,
+                                   primary_hypothesis=evidence.facts.get("primary_hypothesis") or {})
+    elif detail_kind == "analysis":
+        detail = AnalysisSummaryDetail(hypothesis_tests=sections,
+                                        method_decision=evidence.facts.get("method_decision") or {},
+                                        limitations=[str(x) for x in (evidence.facts.get("limitations") or [])])
+    else:
+        answer = parsed.get("배경") or catch_all
+        detail = InsightSummaryDetail(
+            answer=answer, as_is=answer,
+            key_insights=[str(x) for x in (evidence.facts.get("key_insights") or [])],
+            action_plan=[str(x) for x in (evidence.facts.get("action_plan") or [])],
+            evidence_sources=[str(x) for x in (evidence.facts.get("evidence_labels") or [])],
+            limitations=[str(x) for x in (evidence.facts.get("limitations") or [])])
+
+    background = parsed.get("배경") or catch_all or f"이 단계는 {label} 아티팩트입니다."
+    return NodeSummaryResult(
+        title=parsed.get("제목") or f"{label} 결과",
+        subtitle=parsed.get("한줄요약") or background[:60],
+        background=background,
+        code_used=evidence.code_used,
+        detail=detail,
+        conclusion=parsed.get("결론") or catch_all or background,
+        key_finding=parsed.get("한줄요약") or background[:80],
+        source_kind=evidence.source_kind,
+        fallback_used=True,
+    )
 
 
 # ─────────────────────────────

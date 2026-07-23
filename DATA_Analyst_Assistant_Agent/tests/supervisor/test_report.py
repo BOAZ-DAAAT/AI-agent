@@ -306,6 +306,38 @@ def test_generate_report_falls_back_when_llm_fails(adapter, runtime, monkeypatch
     assert len(payload["key_findings"]) > 0
 
 
+def test_generate_report_uses_plain_narrative_before_static_fallback(adapter, runtime, monkeypatch):
+    """구조화 JSON이 두 번 다 실패해도, 곧장 정적 "실패했습니다" 템플릿으로 가지 않고
+
+    간이 텍스트 생성(shared/plain_narrative.py)을 한 번 더 시도해 실제 생성된 문장을 쓴다.
+    """
+    run = adapter.create_run(thread_id="thread_report_plain_narrative")
+    ids = _seed_full_path(adapter, run.run_id)
+
+    plain_response = (
+        "제목: 카테고리별 매출 원인 분석\n"
+        "요약: toys 카테고리가 매출 성장을 주도했다.\n"
+        "배경: 카테고리별 매출 차이의 원인을 확인할 필요가 있었다.\n"
+        "진행과정: SQL로 카테고리별 매출을 집계하고 EDA로 이상치를 확인한 뒤 분석했다.\n"
+        "EDA 검증 — final_summary: 가전 카테고리에서 이상치 후보가 두드러졌다.\n"
+        "한줄요약: 이상치를 빼면 카테고리 간 매출 차이는 크지 않다.\n"
+        "결론: 이상치 검토 프로세스 도입이 필요하다."
+    )
+    fake_llm = _FakeLLM(["not json", "still not json", plain_response])
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
+
+    ref = generate_report(list(ids.values()), runtime)
+
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+    assert len(fake_llm.calls) == 3            # 구조화 2회 실패 + 간이 텍스트 생성 1회
+    assert payload["fallback_used"] is True    # 내부 플래그는 유지(집계/디버깅용)
+    assert "실패" not in json.dumps(payload, ensure_ascii=False)   # 화면엔 실패 티가 없어야 함
+    assert payload["title"] == "카테고리별 매출 원인 분석"
+    assert "이상치" in payload["conclusion_and_recommendations"]
+    eda_section = next(f for f in payload["key_findings"] if f["heading"] == "EDA 검증 — final_summary")
+    assert eda_section["body"] == "가전 카테고리에서 이상치 후보가 두드러졌다."
+
+
 def test_generate_report_works_without_eda_stage(adapter, runtime, monkeypatch):
     run = adapter.create_run(thread_id="thread_report_no_eda_gen")
     ids = _seed_full_path(adapter, run.run_id)

@@ -20,7 +20,6 @@ from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
 from DATA_Analyst_Assistant_Agent.supervisor.summary import generator as generator_module
 from DATA_Analyst_Assistant_Agent.supervisor.summary.evidence import read_node_evidence
 from DATA_Analyst_Assistant_Agent.supervisor.summary.generator import generate_node_summary
-from DATA_Analyst_Assistant_Agent.shared.numeric_verify import collect_numbers, verify_texts
 from DATA_Analyst_Assistant_Agent.supervisor.summary.schemas import (
     AnalysisSummaryDetail,
     EDASummaryDetail,
@@ -466,31 +465,6 @@ def test_insight_summary_expands_sparse_to_be(adapter, runtime, monkeypatch):
     assert "배송 소요일이 긴 판매자군을 우선 점검합니다." in payload["detail"]["to_be"]
 
 
-def test_collect_texts_excludes_chart_artifact_ids_from_numeric_verification():
-    """run-summary_sample 실사례: artifact_id 안 숫자 조각("art_a374da05...")이 근거없는
-    숫자로 오탐되어 EDA/인사이트 서머리가 계속 폴백되던 버그의 회귀 테스트."""
-    result = NodeSummaryResult(
-        title="t", subtitle="s", background="b", conclusion="c", key_finding="k",
-        source_kind="eda_summary",
-        detail=EDASummaryDetail(
-            statistical_findings=[FindingSection(
-                heading="관계 분석", body="상관계수는 -0.367입니다.",
-                chart_artifact_ids=["art_a374da05e2394a29b4401fa83de851f0"],
-            )],
-        ),
-    )
-
-    texts = generator_module._collect_texts(result)
-
-    assert "art_a374da05e2394a29b4401fa83de851f0" not in texts
-    assert not any("374da05" in t for t in texts)
-
-    numbers = collect_numbers({"pearson_r": -0.367})
-    corpus = json.dumps({"pearson_r": -0.367}, ensure_ascii=False)
-    ok, missing = verify_texts(texts, numbers, corpus)
-    assert ok, missing
-
-
 def test_generate_summary_falls_back_per_kind_when_llm_fails(adapter, runtime, monkeypatch):
     run = adapter.create_run(thread_id="thread_fallback")
     artifact_id = _register(
@@ -506,6 +480,39 @@ def test_generate_summary_falls_back_per_kind_when_llm_fails(adapter, runtime, m
 
     assert payload["fallback_used"] is True
     assert payload["detail"]["kind"] == "eda"
+
+
+def test_generate_summary_uses_plain_narrative_before_static_fallback(adapter, runtime, monkeypatch):
+    """구조화 JSON이 두 번 다 실패해도, 곧장 정적 "실패했습니다" 템플릿으로 가지 않고
+
+    간이 텍스트 생성(shared/plain_narrative.py)을 한 번 더 시도해 실제 생성된 문장을 쓴다.
+    """
+    run = adapter.create_run(thread_id="thread_plain_narrative")
+    artifact_id = _register(
+        adapter, run.run_id, ArtifactType.file,
+        {"final_summary": "toys 카테고리 중심의 매출 집중 구조입니다.", "hypotheses": "",
+         "primary_hypothesis": {}, "cautions": [], "data_level": {}, "statistical_metadata": {}},
+        kind="eda_summary", filename="eda_summary.json",
+    )
+    plain_response = (
+        "제목: 매출 집중 확인\n"
+        "한줄요약: toys 카테고리가 매출을 주도한다.\n"
+        "배경: 카테고리별 매출 편차를 확인할 필요가 있었다.\n"
+        "핵심 요약: toys 중심으로 매출이 몰려 있는 구조로 나타났다.\n"
+        "결론: 다른 카테고리 대비 toys 의존도가 높다."
+    )
+    fake_llm = _FakeLLM(["not json", "still not json", plain_response])
+    monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
+
+    ref = generate_node_summary([artifact_id], runtime)
+    payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
+
+    assert len(fake_llm.calls) == 3            # 구조화 2회 실패 + 간이 텍스트 생성 1회
+    assert payload["fallback_used"] is True    # 내부 플래그는 유지(집계/디버깅용)
+    assert "실패" not in json.dumps(payload, ensure_ascii=False)   # 화면엔 실패 티가 없어야 함
+    assert payload["title"] == "매출 집중 확인"
+    assert "toys" in payload["conclusion"]
+    assert payload["detail"]["statistical_findings"][0]["body"] == "toys 중심으로 매출이 몰려 있는 구조로 나타났다."
 
 
 def test_analysis_summary_accepts_numbers_from_visual_evidence(adapter, runtime, monkeypatch):

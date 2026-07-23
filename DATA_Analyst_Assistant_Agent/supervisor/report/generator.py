@@ -6,6 +6,10 @@ summary/generator.py와 같은 설계 원칙을 따른다:
 - 숫자 검증(shared/numeric_verify.py)은 여기서는 쓰지 않는다 — 팀 판단으로 의도적으로
   뺐다(리포트가 검증 실패로 원본 덤프 폴백에 떨어져 UX가 깨지는 걸 우선 피함). JSON 파싱
   실패나 필수 필드 누락처럼 구조 자체가 무너진 경우에만 재시도 후 폴백으로 간다.
+- 그마저 실패해도(2026-07-23) 곧장 정적 템플릿("자동 리포트 생성에 실패했습니다")으로
+  가지 않는다. shared/plain_narrative.py로 형식 요구를 낮춘 텍스트 생성을 한 번 더
+  시도해 실제 근거를 읽고 쓴 문장을 확보한다(_plain_narrative_result). 이것도 LLM 호출
+  자체가 죽어야만(API 전체 장애) 최종 정적 템플릿(_fallback_result)으로 간다.
 
 summary와 다른 점은 "노드 하나"가 아니라 "경로 전체(존재하는 단계만)"를 한 번의 LLM
 호출로 하나의 흐름 있는 글로 종합한다는 것 — 단계별 나열("SQL 단계에서는~")은 명시적으로
@@ -23,12 +27,15 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
+from DATA_Analyst_Assistant_Agent.shared.plain_narrative import generate_plain_narrative
 from DATA_Analyst_Assistant_Agent.supervisor.report.evidence import PathEvidence, read_path_evidence
 from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult, FindingSection
 
 _TOOL_NAME = "supervisor.report.generator"
 _REPORT_KIND = "report"
-_REPORT_VERSION = 5                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화 (v5: 숫자 검증 게이트 제거)
+_REPORT_VERSION = 6                                    # 프롬프트/스키마 바뀌면 올려서 옛 캐시 무효화
+                                                        # (v6: 정적 템플릿 전에 간이 텍스트 생성 폴백 추가)
+                                                        # (v5: 숫자 검증 게이트 제거)
 _DEFAULT_REPORT_MAX_TOKENS = 12288
 _MAX_ATTEMPTS = 2                                      # 최초 1회 + 재시도 1회
 
@@ -51,6 +58,8 @@ def generate_report(artifact_ids: list[str], runtime: AgentRuntime) -> ArtifactR
 
     evidence = read_path_evidence(artifact_ids, runtime)
     result = _generate_with_llm(evidence) if evidence.stages else None
+    if result is None:
+        result = _plain_narrative_result(evidence)
     if result is None:
         result = _fallback_result(evidence)
 
@@ -174,6 +183,88 @@ def _to_result(parsed: dict[str, Any], evidence: PathEvidence, known_chart_ids: 
         key_finding=key_finding,
         included_stages=evidence.present_stage_names,
         fallback_used=False,
+    )
+
+
+def _plain_narrative_result(evidence: PathEvidence) -> ReportResult | None:
+    """구조화 JSON이 실패했을 때, 형식 요구를 낮춰 LLM에 한 번 더 맡긴다(2026-07-23).
+
+    summary/generator.py의 _plain_narrative_result와 같은 설계: 서사(제목/요약/진행과정/
+    결론)와 각 단계×fact 섹션 본문을 전부 같은 호출·같은 목소리로 받는다. 라벨 하나를
+    LLM이 빼먹으면 그 섹션만 원본 값으로 메운다(전체를 정적 템플릿으로 버리지 않는다).
+    """
+    if not evidence.stages:
+        return None
+    journey = " → ".join(s.label for s in evidence.stages) or "알 수 없음"
+
+    line_specs: list[tuple[str, str]] = [
+        ("제목", "이 분석 여정 전체를 나타내는 구체적인 제목"),
+        ("요약", "결론부터 먼저, 2~3문장"),
+        ("배경", "사용자가 뭘 궁금해했는지와 이 여정이 왜 필요했는지, 1~2문장"),
+        ("진행과정", "SQL/EDA/분석을 어떻게 준비하고 검증하고 확인했는지, 1~2문장"),
+    ]
+    stage_fact_items: list[tuple[str, str, Any]] = []  # (section_label, stage_label, value)
+    for stage in evidence.stages:
+        for key, value in stage.facts.items():
+            if not value:
+                continue
+            stage_fact_items.append((f"{stage.label} — {key}", stage.label, value))
+    line_specs += [(lbl, "이 항목 원본 값을 보고 자연스러운 문장 1~2개, 숫자는 있는 그대로 인용")
+                   for lbl, _, _ in stage_fact_items]
+    if evidence.charts:
+        line_specs.append(("관련 차트", "이 차트들이 보여주는 내용을 문장으로"))
+    line_specs.append(("한줄요약", "전체를 압축한 1문장(미리보기용)"))
+    line_specs.append(("결론", "최종 결론과 실행 제안, 1~2문장"))
+
+    llm = get_chat_model(
+        model=os.getenv("REPORT_MODEL") or None,
+        model_env="LLM_MODEL",
+        max_tokens=int(os.getenv("REPORT_MAX_TOKENS", str(_DEFAULT_REPORT_MAX_TOKENS))),
+    )
+    stage_blocks = [
+        f"[{_STAGE_LABELS.get(stage.stage, stage.stage)} 근거]\n"
+        f"{json.dumps(stage.facts, ensure_ascii=False, default=str)[:2500]}"
+        for stage in evidence.stages
+    ]
+    evidence_text = "\n\n".join(stage_blocks)
+    charts_text = json.dumps(
+        [{"artifact_id": c.artifact_id, "caption": c.caption, "stage": c.stage} for c in evidence.charts],
+        ensure_ascii=False,
+    )
+    parsed = generate_plain_narrative(
+        llm, label=journey, line_specs=line_specs, evidence_text=evidence_text, charts_text=charts_text)
+    if parsed is None:
+        return None
+
+    catch_all = parsed.get("__all__", "")
+    findings: list[FindingSection] = []
+    for lbl, stage_label, value in stage_fact_items:
+        body = parsed.get(lbl) or _format_fact_value(value)
+        findings.append(FindingSection(heading=lbl, body=body, source_label=stage_label, chart_artifact_ids=[]))
+    if evidence.charts:
+        chart_body = parsed.get("관련 차트") or "다음 차트가 이 여정의 근거로 함께 제공됩니다."
+        findings.append(FindingSection(heading="관련 차트", body=chart_body, source_label="차트",
+                                       chart_artifact_ids=[c.artifact_id for c in evidence.charts]))
+    if not findings:
+        findings.append(FindingSection(heading="근거 없음",
+                                       body=catch_all or "경로에 유효한 근거 데이터가 없습니다.",
+                                       chart_artifact_ids=[]))
+
+    code_used = next((s.code_used for s in evidence.stages if s.code_used), "")
+    background = parsed.get("배경") or catch_all or f"이 리포트는 {journey} 경로의 근거를 담고 있습니다."
+
+    return ReportResult(
+        title=parsed.get("제목") or "분석 여정 리포트",
+        executive_summary=parsed.get("요약") or catch_all or background,
+        background_and_question=background,
+        methodology_narrative=parsed.get("진행과정") or catch_all or background,
+        code_used=code_used,
+        key_findings=findings,
+        limitations=[],
+        conclusion_and_recommendations=parsed.get("결론") or catch_all or background,
+        key_finding=parsed.get("한줄요약") or background[:80],
+        included_stages=evidence.present_stage_names,
+        fallback_used=True,
     )
 
 
