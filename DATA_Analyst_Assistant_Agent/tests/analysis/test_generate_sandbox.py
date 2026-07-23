@@ -282,6 +282,28 @@ def test_preflight_flags_actual_nested_loop_on_non_small_dataframe() -> None:
     assert any("nested loop" in reason for reason in plan.reasons)
 
 
+def test_preflight_allows_nested_loop_over_derived_groupby_result() -> None:
+    """실사례(2026-07-23): groupby 결과처럼 이미 작게 뭉쳐진 대상을 도는 중첩 루프는
+
+    row_count가 커도 안전해야 한다 — df를 직접 참조하지 않기 때문. 이 오탐 때문에
+    P99 제외 재분석 코드가 통째로 스킵된 실제 사례를 재현한다.
+    """
+    code = _code(
+        "rows = []\n"
+        "grp = df.groupby('bucket')\n"
+        "for name, g in grp:\n"
+        "    counts = g['score'].value_counts()\n"
+        "    for score, count in counts.items():\n"
+        "        rows.append({'bucket': name, 'score': score, 'count': int(count)})\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'rows': len(rows)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"bucket": ["a", "b"] * 10_261, "score": [1, 2] * 10_261})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
 def test_preflight_flags_dataframe_row_iteration_on_non_small_dataframe() -> None:
     code = _code(
         "total = 0\n"

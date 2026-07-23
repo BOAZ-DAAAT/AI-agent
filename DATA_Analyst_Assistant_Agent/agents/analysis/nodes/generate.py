@@ -569,8 +569,17 @@ def _expensive_iteration_reasons(source: str, row_count: int) -> list[str]:
 
 
 class _IterationRiskVisitor(ast.NodeVisitor):
+    """중첩 루프 자체가 아니라, 원본 dataframe 행을 도는 루프가 중첩에 관여할 때만 위험으로 본다.
+
+    groupby 결과·value_counts 같은 이미 축약된 대상을 도는 중첩(예: 배송구간 4개 × 리뷰점수
+    5개처럼 수십 회 수준)까지 "중첩됐다"는 이유만으로 차단하면, 큰 df에서 안전하게 요약표를
+    만드는 정상 코드까지 전부 실행이 막힌다(2026-07-23 실사례로 발견 — 10,520행 데이터에서
+    이 오탐 때문에 완성된 분석 코드가 통째로 스킵됨).
+    """
+
     def __init__(self) -> None:
         self.loop_depth = 0
+        self.risky_loop_depth = 0          # 현재 열려 있는, 원본 df 행을 도는 루프 개수
         self.has_nested_loop = False
         self.has_dataframe_row_iteration = False
 
@@ -593,26 +602,41 @@ class _IterationRiskVisitor(ast.NodeVisitor):
         self._visit_comprehension(node)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
-        if self.loop_depth > 0:
-            self.has_nested_loop = True
+        touches_df = _references_df(node.iter)
         if _iterates_dataframe_rows(node.iter):
             self.has_dataframe_row_iteration = True
+        if self.loop_depth > 0 and (touches_df or self.risky_loop_depth > 0):
+            self.has_nested_loop = True
         self.loop_depth += 1
+        self.risky_loop_depth += 1 if touches_df else 0
         self.generic_visit(node)
         self.loop_depth -= 1
+        self.risky_loop_depth -= 1 if touches_df else 0
 
     def _visit_comprehension(
         self,
         node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
     ) -> None:
-        if self.loop_depth > 0 or len(node.generators) > 1:
+        touches_df = any(_references_df(generator.iter) for generator in node.generators)
+        if any(_iterates_dataframe_rows(generator.iter) for generator in node.generators):
+            self.has_dataframe_row_iteration = True
+        if (self.loop_depth > 0 or len(node.generators) > 1) and (touches_df or self.risky_loop_depth > 0):
             self.has_nested_loop = True
-        for generator in node.generators:
-            if _iterates_dataframe_rows(generator.iter):
-                self.has_dataframe_row_iteration = True
         self.loop_depth += 1
+        self.risky_loop_depth += 1 if touches_df else 0
         self.generic_visit(node)
         self.loop_depth -= 1
+        self.risky_loop_depth -= 1 if touches_df else 0
+
+
+def _references_df(node: ast.AST) -> bool:
+    """이 반복 대상 표현식 어딘가에 원본 `df` 이름이 등장하는지(예: df['x'].head(10)).
+
+    groupby/value_counts 결과를 담은 별도 변수(grp, counts 등)는 그 시점 표현식에 `df`가
+    안 나오므로 여기 걸리지 않는다 — 중첩 루프 위험 판정을 "원본 데이터에 직접 닿아 있는가"
+    기준으로 좁히기 위한 보수적(넓게 잡는) 체크다.
+    """
+    return any(isinstance(sub, ast.Name) and sub.id == "df" for sub in ast.walk(node))
 
 
 def _iterates_dataframe_rows(node: ast.AST) -> bool:
