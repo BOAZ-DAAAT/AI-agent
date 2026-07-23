@@ -138,6 +138,32 @@ def test_approval_is_decided_only_after_result_and_semantic_checks() -> None:
     assert record["outcome"]["disposition"] == "await_approval"
 
 
+def test_required_approval_takes_priority_over_analysis_semantic_limitation() -> None:
+    model = SemanticModel(
+        {
+            **_semantic_success(),
+            "semantic_valid": False,
+            "severity": "warning",
+            "reason": "analysis answer needs human review before promotion",
+            "missing_evidence": ["monthly_metric_evidence"],
+        }
+    )
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="approval_required",
+        summary="approval required",
+        artifact_ids=["analysis_001"],
+        approval=ApprovalRequirement(required=True, reason="review before using this analysis"),
+    )
+
+    updates = make_validate_candidate_node(model)(_state(result))
+
+    record = updates["pending_validation"]
+    assert record["checks"][-1]["name"] == "semantic"
+    assert record["checks"][-1]["findings"][0]["disposition"] == "limitation"
+    assert record["outcome"]["disposition"] == "await_approval"
+
+
 def test_limitation_finding_becomes_accept_with_limitations() -> None:
     result = AgentCompactResult(
         agent="analysis_agent",
