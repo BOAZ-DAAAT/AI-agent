@@ -579,10 +579,12 @@ def test_retryable_flag_without_repair_strategy_does_not_enter_repair():
     assert route_after_validation({**state, **result}) == "finalize"
 
 
-def test_same_error_after_repair_stops_at_default_retry_limit():
+def test_same_error_after_first_repair_allows_one_more_repair_then_stops():
     info = classify_execution_error(DriverError(1064, "You have an error in your SQL syntax"))
     state = repair_state(
         retry_count=1,
+        repair_retry_count=1,
+        max_repair_retries=2,
         error=info["message"],
         execution_error_info=info,
         validation={},
@@ -594,7 +596,8 @@ def test_same_error_after_repair_stops_at_default_retry_limit():
     result = validate_sql_and_result(state)
 
     assert result["retry_hint"]["retryable"] is True
-    assert route_after_validation({**state, **result}) == "finalize"
+    assert route_after_validation({**state, **result}) == "retry"
+    assert route_after_validation({**state, **result, "repair_retry_count": 2}) == "finalize"
 
 
 def test_comprehensive_ctas_repair_reenters_full_validation_and_execution(monkeypatch):

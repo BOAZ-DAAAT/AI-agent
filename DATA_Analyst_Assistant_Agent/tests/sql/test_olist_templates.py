@@ -230,15 +230,22 @@ def test_template_graph_skips_semantic_planning_and_sql_generation_llm(
     assert result["retry_count"] == 0
 
 
-def test_semantic_prevalidation_failure_skips_execution_and_retries_only_once() -> None:
+def test_semantic_prevalidation_failure_skips_execution_and_retries_repair_twice() -> None:
     state = {
         "validation": {"result": "invalid"},
         "retry_hint": {"retryable": True, "reason_code": "mysql_dialect_error"},
         "retry_count": 0,
         "max_retries": 1,
+        "repair_retry_count": 0,
+        "max_repair_retries": 2,
         "sql_template_id": None,
     }
 
     assert route_after_prevalidation(state) == "validate"  # type: ignore[arg-type]
     assert route_after_validation(state) == "retry"  # type: ignore[arg-type]
-    assert route_after_validation({**state, "retry_count": 1}) == "finalize"  # type: ignore[arg-type]
+    assert route_after_validation(  # type: ignore[arg-type]
+        {**state, "retry_count": 1, "repair_retry_count": 1}
+    ) == "retry"
+    assert route_after_validation(  # type: ignore[arg-type]
+        {**state, "retry_count": 2, "repair_retry_count": 2}
+    ) == "finalize"

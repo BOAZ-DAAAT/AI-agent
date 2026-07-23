@@ -135,7 +135,11 @@ class SQLAgent:
         )
 
     def _run_main_sql_agent(self, state: OrchestrationState) -> dict[str, Any]:
-        from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
+        from DATA_Analyst_Assistant_Agent.agents.sql.graph import (
+            SQL_MAX_REPAIR_RETRIES,
+            SQL_MAX_RETRIES,
+            build_app,
+        )
 
         app = build_app()
         catalog_summary = state.catalog_summary or {}
@@ -239,6 +243,7 @@ class SQLAgent:
                 "retry_hint": {},
                 "validation_summary": {},
                 "retry_count": 0,
+                "repair_retry_count": 0,
                 "feedback": "",
                 "error": "",
                 "generation_source": (
@@ -266,7 +271,8 @@ class SQLAgent:
                     if state.plan is not None
                     else {}
                 ),
-                "max_retries": 1,
+                "max_retries": SQL_MAX_RETRIES,
+                "max_repair_retries": SQL_MAX_REPAIR_RETRIES,
                 "generation_failure_reason": "",
                 "generation_context_diagnostics": [],
                 "failed_statement_index": None,

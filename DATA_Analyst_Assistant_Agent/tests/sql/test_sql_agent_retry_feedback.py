@@ -248,6 +248,7 @@ def test_sql_agent_passes_template_source_and_retry_limit_without_llm_planning(m
     assert fake_app.invoked_with["sql_template_kind"] == "query"
     assert fake_app.invoked_with["sql_template_parameters"]["start_date"] == "2017-01-01"
     assert fake_app.invoked_with["max_retries"] == 1
+    assert fake_app.invoked_with["max_repair_retries"] == 2
 
 
 def test_template_source_is_written_to_plan_result_artifact_metadata_and_preview() -> None:
