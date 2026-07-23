@@ -111,6 +111,112 @@ class RunService:
         self.sqlite.execute(f"UPDATE runs SET {', '.join(updates)} WHERE run_id = ?", params)
         return self.get_run(run_id, context)
 
+    def claim_created(
+        self,
+        run_id: str,
+        metadata: JsonDict | None = None,
+        context: PolicyContext | None = None,
+    ) -> RunRecord:
+        """Atomically move a newly created run into the running state."""
+        context = context or PolicyContext(run_id=run_id)
+        self.policy_engine.enforce(
+            "run.update",
+            run_id,
+            {"status": RunStatus.running.value, "metadata": metadata or {}},
+            context,
+        )
+        run = self.get_run(run_id, context)
+        merged_metadata = dict(run.metadata)
+        merged_metadata.update(metadata or {})
+        now = utc_now_iso()
+
+        with self.sqlite.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET status = ?, metadata_json = ?, updated_at = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (
+                    RunStatus.running.value,
+                    dumps_json(merged_metadata),
+                    now,
+                    run_id,
+                    RunStatus.created.value,
+                ),
+            )
+
+        if cursor.rowcount != 1:
+            current = self.get_run(run_id, context)
+            raise BackendError(
+                "RUN_NOT_CREATED",
+                "Run is no longer waiting to start.",
+                {"run_id": run_id, "status": current.status.value},
+            )
+        return self.get_run(run_id, context)
+
+    def cancel_run(
+        self,
+        run_id: str,
+        metadata: JsonDict | None = None,
+        context: PolicyContext | None = None,
+    ) -> RunRecord:
+        """Atomically cancel an active run and keep repeat requests idempotent."""
+        context = context or PolicyContext(run_id=run_id)
+        self.policy_engine.enforce(
+            "run.update",
+            run_id,
+            {"status": RunStatus.cancelled.value, "metadata": metadata or {}},
+            context,
+        )
+        run = self.get_run(run_id, context)
+        if run.status == RunStatus.cancelled:
+            return run
+        if run.status in {RunStatus.succeeded, RunStatus.failed}:
+            raise BackendError(
+                "RUN_NOT_CANCELLABLE",
+                "Completed or failed runs cannot be cancelled.",
+                {"run_id": run_id, "status": run.status.value},
+            )
+
+        merged_metadata = dict(run.metadata)
+        merged_metadata.update(metadata or {})
+        now = utc_now_iso()
+        cancellable_statuses = (
+            RunStatus.created.value,
+            RunStatus.running.value,
+            RunStatus.waiting_input.value,
+            RunStatus.waiting_approval.value,
+        )
+        placeholders = ", ".join("?" for _ in cancellable_statuses)
+
+        with self.sqlite.connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE runs
+                SET status = ?, metadata_json = ?, updated_at = ?
+                WHERE run_id = ? AND status IN ({placeholders})
+                """,
+                (
+                    RunStatus.cancelled.value,
+                    dumps_json(merged_metadata),
+                    now,
+                    run_id,
+                    *cancellable_statuses,
+                ),
+            )
+
+        if cursor.rowcount != 1:
+            current = self.get_run(run_id, context)
+            if current.status == RunStatus.cancelled:
+                return current
+            raise BackendError(
+                "RUN_NOT_CANCELLABLE",
+                "Run cannot be cancelled from its current state.",
+                {"run_id": run_id, "status": current.status.value},
+            )
+        return self.get_run(run_id, context)
+
     def claim_waiting_input(
         self,
         run_id: str,

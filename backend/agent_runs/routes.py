@@ -24,6 +24,7 @@ from .schemas import (
     AgentNodeSummaryResponse,
     AgentReportListItem,
     AgentReportListResponse,
+    AgentRunCancelResponse,
     AgentRunBranchRequest,
     AgentRunBranchResponse,
     AgentRunCreateRequest,
@@ -36,7 +37,9 @@ from .service import (
     BranchPlanError,
     NodeReportGenerationError,
     NodeSummaryNotFoundError,
+    RunCancellationConflictError,
     RunDeletionConflictError,
+    cancel_agent_run,
     delete_terminal_run_data,
     get_node_summary,
     generate_node_report,
@@ -50,6 +53,40 @@ from .service import (
 
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+@router.post("/{run_id}/cancel", response_model=AgentRunCancelResponse)
+def cancel_run(
+    run_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> AgentRunCancelResponse:
+    services = request.app.state.services
+    try:
+        run = services.run_service.get_run(run_id)
+    except BackendError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    username = str(user["sub"])
+    session_id = run.project_id or run.metadata.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise HTTPException(status_code=409, detail="실행에 연결된 세션 정보가 없습니다.")
+    get_owned_session(session_id, username)
+
+    try:
+        result = cancel_agent_run(
+            services=services,
+            run_id=run_id,
+            cancelled_by=username,
+        )
+    except RunCancellationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return AgentRunCancelResponse(
+        run_id=result.run_id,
+        status="cancelled",
+        discarded_node_id=result.discarded_node_id,
+    )
 
 
 def _branch_root_id(services, run: RunRecord) -> str:

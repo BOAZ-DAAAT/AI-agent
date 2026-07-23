@@ -57,6 +57,12 @@ class AgentRunDeleteResponse(BaseModel):
     deleted_artifact_count: int
 
 
+class AgentRunCancelResponse(BaseModel):
+    run_id: str
+    status: Literal["cancelled"]
+    discarded_node_id: str | None = None
+
+
 class AgentRunResumeRequest(BaseModel):
     """세 가지 재개 유형을 하나로 받는다 — type이 어느 필드가 필요한지 결정한다.
 

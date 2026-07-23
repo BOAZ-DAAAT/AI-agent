@@ -12,12 +12,22 @@ from sqlalchemy import inspect
 
 from backend.config import StorageMySQL
 from backend.session.schemas import SessionResponse
-from data_agent_backend.models.runs import TERMINAL_RUN_STATUSES, RunRecord, RunStatus
+from data_agent_backend.models.common import BackendError
+from data_agent_backend.models.runs import (
+    TERMINAL_RUN_STATUSES,
+    RunEvent,
+    RunRecord,
+    RunStatus,
+)
 from data_agent_backend.services.factory import BackendServices
 from data_agent_backend.storage.filesystem import ensure_child_path
 
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.backend_adapter import BackendAdapter
+from DATA_Analyst_Assistant_Agent.shared.cancellation import (
+    RunCancellationRequested,
+    raise_if_run_cancelled,
+)
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
@@ -43,11 +53,90 @@ class RunDeletionConflictError(Exception):
     """아직 실행 중인 run 삭제를 요청했을 때."""
 
 
+class RunCancellationConflictError(Exception):
+    """이미 완료되거나 실패한 run의 취소를 요청했을 때."""
+
+
 @dataclass(frozen=True)
 class RunDeletionResult:
     run_id: str
     deleted_event_count: int
     deleted_artifact_count: int
+
+
+@dataclass(frozen=True)
+class RunCancellationResult:
+    run_id: str
+    discarded_node_id: str | None
+
+
+_ACTIVE_NODE_EVENTS = {
+    "agent.started",
+    "agent.progress",
+    "agent.retrying",
+    "agent.waiting",
+    "agent.resumed",
+}
+_TERMINAL_NODE_EVENTS = {"agent.completed", "agent.discarded", "agent.failed"}
+
+
+def _active_node_event(events: list[RunEvent]) -> RunEvent | None:
+    active: RunEvent | None = None
+    for event in events:
+        node_id = event.metadata.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            continue
+        if event.event_type in _ACTIVE_NODE_EVENTS:
+            active = event
+        elif event.event_type in _TERMINAL_NODE_EVENTS and active is not None:
+            if active.metadata.get("node_id") == node_id:
+                active = None
+    return active
+
+
+def cancel_agent_run(
+    *,
+    services: BackendServices,
+    run_id: str,
+    cancelled_by: str,
+) -> RunCancellationResult:
+    try:
+        services.run_service.cancel_run(
+            run_id,
+            metadata={"cancelled_by": cancelled_by, "cancel_reason": "user_requested"},
+        )
+    except BackendError as exc:
+        if exc.code == "RUN_NOT_CANCELLABLE":
+            raise RunCancellationConflictError(str(exc)) from exc
+        raise
+
+    active_event = _active_node_event(services.run_service.list_events(run_id))
+    discarded_node_id: str | None = None
+    if active_event is not None:
+        discarded_node_id = str(active_event.metadata["node_id"])
+        attempt = int(active_event.metadata.get("attempt") or 1)
+        services.run_service.append_event(
+            run_id,
+            "agent.discarded",
+            "사용자 요청으로 진행 중인 작업을 중단했습니다.",
+            event_key=f"agent-node:{discarded_node_id}:agent.discarded:attempt:{attempt}",
+            node_name=active_event.node_name,
+            metadata={
+                **active_event.metadata,
+                "reason_code": "run_cancelled",
+                "cancelled_by": cancelled_by,
+            },
+        )
+
+    services.run_service.append_event(
+        run_id,
+        "run.cancelled",
+        "사용자 요청으로 Agent 실행을 중단했습니다.",
+        event_key=f"run:{run_id}:cancelled",
+        node_name="supervisor",
+        metadata={"cancelled_by": cancelled_by, "reason_code": "user_requested"},
+    )
+    return RunCancellationResult(run_id=run_id, discarded_node_id=discarded_node_id)
 
 
 def delete_terminal_run_data(
@@ -470,22 +559,37 @@ def launch_agent_run(
     run_id: str,
     thread_id: str,
 ) -> None:
-    services.run_service.update_status(
-        run_id,
-        RunStatus.running,
-        metadata={"session_id": session.id, "session_db": session.session_db, "owner": username},
-    )
-    services.run_service.append_event(
-        run_id,
-        "run.started",
-        "Agent workflow started.",
-        node_name="supervisor",
-        metadata={"session_id": session.id, "thread_id": thread_id},
-    )
-
     try:
+        try:
+            services.run_service.claim_created(
+                run_id,
+                metadata={
+                    "session_id": session.id,
+                    "session_db": session.session_db,
+                    "owner": username,
+                },
+            )
+        except BackendError as exc:
+            current_status = services.run_service.get_run(run_id).status
+            if exc.code == "RUN_NOT_CREATED" and current_status == RunStatus.cancelled:
+                return
+            raise
+
+        event_adapter = BackendAdapter(services=services)
+        event_adapter.append_run_event(
+            run_id,
+            "run.started",
+            "Agent workflow started.",
+            node_name="supervisor",
+            metadata={"session_id": session.id, "thread_id": thread_id},
+        )
         catalog_summary = build_session_catalog_summary(session)
-        adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
+        adapter = SessionBoundBackendAdapter(
+            services=services,
+            session=session,
+            catalog_summary=catalog_summary,
+        )
+        raise_if_run_cancelled(adapter, run_id)
         supervisor = SupervisorAgent(adapter, checkpoint_path=adapter.base_data_dir / f"{thread_id}.sqlite")
         initial_state = empty_supervisor_state(
             thread_id=thread_id,
@@ -503,6 +607,8 @@ def launch_agent_run(
             return
         result = supervisor._update_run_from_terminal_output(run_id, output)
         _append_terminal_event(services, run_id, result)
+    except RunCancellationRequested:
+        return
     except Exception as exc:
         _mark_run_failed(services, run_id, session.id, exc)
         raise
@@ -523,30 +629,37 @@ def resume_agent_run(
     run_id: str,
     thread_id: str,
 ) -> None:
-    run = services.run_service.get_run(run_id)
-    interrupt_node = run.metadata.get("node")
-    node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
-    resumed_from = str(run.metadata.get("resumed_from") or "clarification")
-    services.run_service.append_event(
-        run_id,
-        "human_input.resumed",
-        _RESUME_MESSAGES.get(resumed_from, _RESUME_MESSAGES["clarification"]),
-        node_name=node_name,
-        metadata={
-            "interrupt_type": resumed_from,
-            "thread_id": thread_id,
-            "node": node_name,
-        },
-    )
-
     try:
+        run = services.run_service.get_run(run_id)
+        interrupt_node = run.metadata.get("node")
+        node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
+        resumed_from = str(run.metadata.get("resumed_from") or "clarification")
+        event_adapter = BackendAdapter(services=services)
+        event_adapter.append_run_event(
+            run_id,
+            "human_input.resumed",
+            _RESUME_MESSAGES.get(resumed_from, _RESUME_MESSAGES["clarification"]),
+            node_name=node_name,
+            metadata={
+                "interrupt_type": resumed_from,
+                "thread_id": thread_id,
+                "node": node_name,
+            },
+        )
         catalog_summary = build_session_catalog_summary(session)
-        adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
+        adapter = SessionBoundBackendAdapter(
+            services=services,
+            session=session,
+            catalog_summary=catalog_summary,
+        )
+        raise_if_run_cancelled(adapter, run_id)
         supervisor = SupervisorAgent(adapter, checkpoint_path=adapter.base_data_dir / f"{thread_id}.sqlite")
         with bind_session_database(session):
             result = supervisor.resume(thread_id, resume_payload)
         if isinstance(result, SupervisorRunResult) and result.kind == "state":
             _append_terminal_event(services, run_id, result)
+    except RunCancellationRequested:
+        return
     except Exception as exc:
         _mark_run_failed(services, run_id, session.id, exc)
         raise
@@ -728,22 +841,33 @@ def run_branch_task(
     target_table: str | None,
     parent_node_id: str | None,
 ) -> None:
-    services.run_service.update_status(
-        run_id,
-        RunStatus.running,
-        metadata={"branch_stage": start_stage, "branch_instruction": instruction},
-    )
-    services.run_service.append_event(
-        run_id,
-        "branch.started",
-        f"'{instruction}' 지시사항으로 {start_stage} 단계부터 분기를 시작합니다.",
-        node_name="supervisor",
-        metadata={"branch": True, "start_stage": start_stage},
-    )
-
     try:
+        try:
+            services.run_service.claim_created(
+                run_id,
+                metadata={"branch_stage": start_stage, "branch_instruction": instruction},
+            )
+        except BackendError as exc:
+            current_status = services.run_service.get_run(run_id).status
+            if exc.code == "RUN_NOT_CREATED" and current_status == RunStatus.cancelled:
+                return
+            raise
+
+        event_adapter = BackendAdapter(services=services)
+        event_adapter.append_run_event(
+            run_id,
+            "branch.started",
+            f"'{instruction}' 지시사항으로 {start_stage} 단계부터 분기를 시작합니다.",
+            node_name="supervisor",
+            metadata={"branch": True, "start_stage": start_stage},
+        )
         catalog_summary = build_session_catalog_summary(session)
-        adapter = SessionBoundBackendAdapter(services=services, session=session, catalog_summary=catalog_summary)
+        adapter = SessionBoundBackendAdapter(
+            services=services,
+            session=session,
+            catalog_summary=catalog_summary,
+        )
+        raise_if_run_cancelled(adapter, run_id)
         runtime = AgentRuntime(adapter)
         with bind_session_database(session):
             result = branch_from(
@@ -758,6 +882,8 @@ def run_branch_task(
                 parent_node_id=parent_node_id,
                 target_table=target_table,
             )
+    except RunCancellationRequested:
+        return
     except Exception as exc:
         _mark_run_failed(services, run_id, session.id, exc)
         raise
@@ -822,19 +948,27 @@ def _mark_run_failed(
     session_id: str,
     exc: Exception,
 ) -> None:
-    try:
-        run = services.run_service.get_run(run_id)
-        if run.status != RunStatus.failed:
+    run = services.run_service.get_run(run_id)
+    if run.status == RunStatus.cancelled:
+        return
+    if run.status != RunStatus.failed:
+        try:
             services.run_service.update_status(
                 run_id,
                 RunStatus.failed,
                 metadata={"error": str(exc), "session_id": session_id},
             )
-    finally:
-        services.run_service.append_event(
-            run_id,
-            "run.failed",
-            str(exc),
-            node_name="supervisor",
-            metadata={"session_id": session_id},
-        )
+        except BackendError as update_exc:
+            current_status = services.run_service.get_run(run_id).status
+            if update_exc.code == "RUN_TERMINAL" and current_status == RunStatus.cancelled:
+                return
+            raise
+    if services.run_service.get_run(run_id).status == RunStatus.cancelled:
+        return
+    services.run_service.append_event(
+        run_id,
+        "run.failed",
+        str(exc),
+        node_name="supervisor",
+        metadata={"session_id": session_id},
+    )
