@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -22,6 +23,11 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.validation import validate_subagent_result
 from DATA_Analyst_Assistant_Agent.supervisor.tools import AgentToolResult
+
+
+@pytest.fixture(autouse=True)
+def _enable_olist_template_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLIST_TEMPLATE_ROUTING_ENABLED", "true")
 
 
 def _catalog() -> dict:
@@ -54,6 +60,17 @@ def test_template_match_builds_deterministic_plan_before_semantic_search() -> No
     assert orchestration.plan is not None
     assert orchestration.plan.sql_generation_source == "olist_template"
     assert orchestration.plan.sql_template_id.value == "monthly_sales_orders"
+
+
+def test_disabled_template_routing_uses_semantic_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLIST_TEMPLATE_ROUTING_ENABLED", "false")
+
+    updates = make_match_olist_template_node()(_state("월별 매출과 주문 수를 보여줘"))
+
+    assert updates["olist_template_match"]["status"] == "disabled"
+    assert updates["next_action"] == "create_plan"
+    assert "analysis_plan" not in updates
+    assert _route_after_olist_template_match(updates) == "semantic_fallback"
 
 
 def test_unsupported_template_routes_to_existing_semantic_flow() -> None:

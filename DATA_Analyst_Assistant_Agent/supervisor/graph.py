@@ -67,7 +67,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.candidate import (
     commit_candidate,
     validate_candidate,
 )
-from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import match_olist_template
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    match_olist_template,
+    olist_template_routing_enabled,
+)
 
 
 
@@ -134,6 +137,17 @@ def make_match_olist_template_node():
     def match_olist_template_node(state: SupervisorState) -> SupervisorState:
         query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
         existing_plan = dict(state.get("analysis_plan") or {})
+        if not olist_template_routing_enabled():
+            return {
+                "olist_template_match": {
+                    "status": "disabled",
+                    "supported": False,
+                    "reason": "OLIST_TEMPLATE_ROUTING_ENABLED 설정으로 고정 템플릿 라우팅이 비활성화되었습니다.",
+                },
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
         if existing_plan.get("required_derivations"):
             return {
                 "olist_template_match": {

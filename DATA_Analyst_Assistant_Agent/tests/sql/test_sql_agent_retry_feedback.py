@@ -5,8 +5,9 @@ from typing import Any
 import json
 from dataclasses import dataclass
 
-from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
+import pytest
 
+from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 from DATA_Analyst_Assistant_Agent.agents.sql.agent import SQLAgent
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
@@ -29,6 +30,11 @@ class _FakeApp:
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.invoked_with = payload
         return {}
+
+
+@pytest.fixture(autouse=True)
+def _enable_olist_template_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLIST_TEMPLATE_ROUTING_ENABLED", "true")
 
 
 def _patch_build_app(monkeypatch, fake_app: _FakeApp) -> None:
@@ -118,6 +124,33 @@ def test_sql_agent_clarification_empty_without_retry_context(monkeypatch) -> Non
 
     assert fake_app.invoked_with is not None
     assert fake_app.invoked_with["clarification_request"] == ""
+
+
+def test_sql_agent_ignores_stale_template_plan_when_routing_is_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("OLIST_TEMPLATE_ROUTING_ENABLED", "false")
+    fake_app = _FakeApp()
+    _patch_build_app(monkeypatch, fake_app)
+    state = OrchestrationState(
+        run_id="run_disabled_template",
+        user_query="월별 매출과 주문 수를 보여줘",
+        plan=AnalysisPlan(
+            goal="월별 매출과 주문 수",
+            planner_mode="deterministic",
+            sql_generation_source="olist_template",
+            sql_template_id=OlistTemplateId.monthly_sales_orders,
+            sql_template_kind=OlistTemplateKind.query,
+        ),
+    )
+
+    SQLAgent()._run_main_sql_agent(state)
+
+    assert fake_app.invoked_with is not None
+    assert fake_app.invoked_with["sql_template_id"] is None
+    assert fake_app.invoked_with["generation_source"] == "semantic_llm"
+    assert state.plan is not None
+    assert state.plan.planner_mode == "llm"
+    assert state.plan.sql_template_id is None
+    assert state.plan.sql_template_kind is None
 
 
 def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monkeypatch) -> None:

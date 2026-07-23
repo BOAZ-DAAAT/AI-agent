@@ -15,10 +15,14 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     OrchestrationState,
     OlistTemplateId,
     OlistTemplateKind,
+    OlistTemplateParameters,
     ValidationBlock,
     ValidationFinding,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_artifact import build_validation_summary_payload
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    olist_template_routing_enabled,
+)
 
 
 def _looks_temporal_column(name: str) -> bool:
@@ -142,6 +146,16 @@ class SQLAgent:
         )
 
         app = build_app()
+        if (
+            state.plan is not None
+            and state.plan.sql_template_id is not None
+            and not olist_template_routing_enabled()
+        ):
+            state.plan.planner_mode = "llm"
+            state.plan.sql_generation_source = "semantic_llm"
+            state.plan.sql_template_id = None
+            state.plan.sql_template_kind = None
+            state.plan.sql_template_parameters = OlistTemplateParameters()
         catalog_summary = state.catalog_summary or {}
         retry_context = state.plan.retry_context if state.plan else None
         required_derivations = (

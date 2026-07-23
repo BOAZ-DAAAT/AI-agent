@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from copy import deepcopy
 from datetime import date
@@ -10,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+import DATA_Analyst_Assistant_Agent.shared.config  # noqa: F401  (.env 로드)
 from DATA_Analyst_Assistant_Agent.agents.sql.olist_template_sql import OLIST_SQL_DRAFTS
 from DATA_Analyst_Assistant_Agent.agents.sql.state import SQLDraft
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
@@ -26,6 +28,12 @@ class OlistTemplateMatch(BaseModel):
     parameters: OlistTemplateParameters = Field(default_factory=OlistTemplateParameters)
     reason: str
     supported: bool = False
+
+
+def olist_template_routing_enabled() -> bool:
+    """Olist 고정 템플릿 우선 라우팅의 활성화 여부를 반환한다."""
+    raw_value = os.getenv("OLIST_TEMPLATE_ROUTING_ENABLED", "true")
+    return raw_value.strip().casefold() not in {"0", "false", "no", "off"}
 
 
 def _required_schema(template_id: OlistTemplateId) -> dict[str, set[str]]:
@@ -490,6 +498,7 @@ __all__ = [
     "build_olist_sql_draft",
     "build_olist_validation_plan",
     "match_olist_template",
+    "olist_template_routing_enabled",
     "missing_catalog_requirements",
     "template_catalog_rows",
 ]
