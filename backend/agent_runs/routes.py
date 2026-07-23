@@ -46,6 +46,7 @@ from .service import (
     delete_terminal_run_data,
     get_node_summary,
     generate_node_report,
+    list_session_events,
     list_session_reports,
     launch_agent_run,
     new_thread_id,
@@ -151,6 +152,24 @@ def list_agent_reports(
             for item in reports
         ]
     )
+
+
+@router.get("/session-events")
+def list_agent_session_events(
+    request: Request,
+    session_id: str = Query(...),
+    user: dict = Depends(get_current_user),
+) -> list[dict]:
+    """세션에서 시작된 모든 run(메인 쿼리마다의 트리 전체)의 이벤트를 한 번에 반환한다.
+
+    플레이그라운드 캔버스가 새로고침 후에도 이전 메인 쿼리들의 트리를 복원할 때 쓴다.
+    """
+    get_owned_session(session_id, str(user["sub"]))
+    events = list_session_events(
+        services=request.app.state.services,
+        session_id=session_id,
+    )
+    return [event.model_dump(mode="json") for event in events]
 
 
 @router.delete("/{run_id}", response_model=AgentRunDeleteResponse)
