@@ -17,6 +17,12 @@ def mart_design_prompt(state) -> str:
 질문 분석 결과:
 {json.dumps(state['plan'], ensure_ascii=False, indent=2)}
 
+Supervisor 필수 파생계약 JSON:
+{json.dumps(state.get('required_derivations') or [], ensure_ascii=False, indent=2)}
+
+Supervisor 분석 휴리스틱 JSON:
+{json.dumps(state.get('analysis_heuristics') or [], ensure_ascii=False, indent=2)}
+
 스키마 JSON:
 {state['schema_text']}
 
@@ -39,6 +45,10 @@ def mart_design_prompt(state) -> str:
 - target_metrics마다 최종 표시용 지표와 분석 필수 파생변수를 먼저 구분
 - 관계·분포·상관·구간화·모델링의 직접 입력으로 반복 사용되는 연속형 비율은 분석 필수 파생변수로 분류하여 column_plan에 포함
 - 분석 필수 파생변수는 derived 컬럼으로 선언하고, 상위 계획에 정의된 분자·분모·연산 순서와 grain을 calculation_rule에 그대로 보존하며 임의로 재정의하지 않음
+- required_derivations의 각 항목은 preferred_name을 output_column으로 사용하고 grain, source_columns, definition을 보존해 column_plan에 구현
+- required_derivations를 현재 원천 컬럼으로 안전하게 구현할 수 없으면 column_plan에 넣지 말고 unimplemented_derivations에 preferred_name, 사유, 필요한 원천 컬럼을 기록
+- 모든 required_derivations는 column_plan.output_column 또는 unimplemented_derivations 중 정확히 한 곳에만 기록
+- analysis_heuristics에서 persisted column을 명시적으로 요구하지 않은 항목은 SQL 컬럼이나 필터로 구현하지 않고 하류 분석 정책으로만 유지
 - 비율의 분모가 0이거나 NULL일 때의 처리 규칙도 calculation_rule에 명시
 - 최종 집계 뒤에만 계산 가능한 표시용 비율, 순위, 최종 판정값, 카테고리 요약 지표는 column_plan에 포함하지 않음
 - 배송 지연 산정 대상 여부, 배송 지연 여부, 지연 일수처럼 후속 분석에 직접 쓰이는 원자적 파생값도 포함 가능
@@ -72,6 +82,13 @@ def mart_design_prompt(state) -> str:
       "calculation_rule": "SQL이 아닌 자연어 의미 계약",
       "aggregation_method": "none 또는 SUM 또는 COUNT 또는 COUNT_DISTINCT 또는 MIN 또는 MAX 또는 AVG 또는 DEDUPLICATE",
       "inclusion_reason": "..."
+    }}
+  ],
+  "unimplemented_derivations": [
+    {{
+      "name": "required_derivations의 preferred_name",
+      "reason": "구현할 수 없는 구체적 사유",
+      "required_columns": ["추가로 필요한 원천 컬럼"]
     }}
   ],
   "metric_support": [

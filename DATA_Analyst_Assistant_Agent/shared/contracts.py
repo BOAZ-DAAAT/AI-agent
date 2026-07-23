@@ -212,6 +212,101 @@ class AgentEnvelope(BaseModel):
         return [ref.artifact_id for ref in self.artifact_refs]
 
 
+class RequiredDerivation(BaseModel):
+    """Supervisor가 SQL 마트에 요구하는 구조적 파생변수 계약."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1)
+    purpose: str | None = None
+    entity: str | None = None
+    grain: str | None = None
+    source_columns: list[str] = Field(default_factory=list)
+    definition: str | None = None
+    preferred_name: str | None = None
+    safe_for: list[str] = Field(default_factory=list)
+    not_for: list[str] = Field(default_factory=list)
+    source: str | None = None
+
+    @field_validator(
+        "name",
+        "purpose",
+        "entity",
+        "grain",
+        "definition",
+        "preferred_name",
+        "source",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("source_columns", "safe_for", "not_for", mode="before")
+    @classmethod
+    def normalize_optional_string_list(cls, value: Any) -> Any:
+        return [] if value is None else value
+
+    @field_validator("source_columns", "safe_for", "not_for")
+    @classmethod
+    def normalize_string_list(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            candidate = item.strip()
+            if candidate and candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_preferred_name(self) -> "RequiredDerivation":
+        if not self.name:
+            raise ValueError("name은 비어 있을 수 없습니다.")
+        if not self.preferred_name:
+            self.preferred_name = self.name
+        return self
+
+
+class AnalysisHeuristic(BaseModel):
+    """SQL 컬럼 계약과 분리해 하류 분석에 전달하는 분석 정책."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1)
+    purpose: str | None = None
+    default_policy: str | None = None
+    rationale: str | None = None
+    source: str | None = None
+    must_record: bool = True
+
+    @field_validator(
+        "name",
+        "purpose",
+        "default_policy",
+        "rationale",
+        "source",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def reject_blank_name(self) -> "AnalysisHeuristic":
+        if not self.name:
+            raise ValueError("name은 비어 있을 수 없습니다.")
+        return self
+
+
 class AnalysisPlan(BaseModel):
     goal: str
     datasource_id: str | None = None
@@ -241,6 +336,8 @@ class AnalysisPlan(BaseModel):
     business_grain: str | None = None
     mart_design: dict[str, Any] = Field(default_factory=dict)
     analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
+    required_derivations: list[RequiredDerivation] = Field(default_factory=list)
+    analysis_heuristics: list[AnalysisHeuristic] = Field(default_factory=list)
 
     @field_validator("sql_generation_source", mode="before")
     @classmethod

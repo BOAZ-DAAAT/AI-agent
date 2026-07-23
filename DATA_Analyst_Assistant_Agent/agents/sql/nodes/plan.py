@@ -75,6 +75,8 @@ def _normalize_question_plan(state: AgentState, parsed: dict[str, Any]) -> dict[
     route_kind = route_kind_raw
     if route_kind not in {"simple", "comprehensive"}:
         raise ValueError(f"unsupported route_kind: {route_kind or 'empty'}")
+    if state.get("required_derivations"):
+        route_kind = "comprehensive"
 
     target_metrics = _list_of_str(parsed.get("target_metrics"))
     if route_kind == "comprehensive" and not target_metrics:

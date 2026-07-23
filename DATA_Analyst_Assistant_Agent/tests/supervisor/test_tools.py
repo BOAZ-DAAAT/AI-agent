@@ -333,10 +333,12 @@ def test_subagent_adapter_returns_plan_metadata_state_updates() -> None:
         "goal": "월별 매출",
         "target_table": None,
         "source_tables": [],
-        "business_grain": None,
-        "mart_design": {},
-        "analysis_data_contract": {},
-    }
+            "business_grain": None,
+            "mart_design": {},
+            "analysis_data_contract": {},
+            "required_derivations": [],
+            "analysis_heuristics": [],
+        }
 
 
 class InvalidStatusAgent:

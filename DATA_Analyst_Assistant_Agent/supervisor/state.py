@@ -1006,6 +1006,9 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
     plan_payload = state.get("analysis_plan") or {}
     goal = str(plan_payload.get("goal") or state.get("latest_user_query") or "")
     route_kind = str(plan_payload.get("route_kind") or "simple")
+    has_required_derivations = bool(plan_payload.get("required_derivations"))
+    if has_required_derivations:
+        route_kind = "comprehensive"
     planner_mode = "llm" if plan_payload.get("planner_mode") == "llm" else "deterministic"
     generated_sql = str(state.get("generated_sql") or "")
     pending_approval = state.get("pending_approval")
@@ -1068,7 +1071,10 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             metric=plan_payload.get("metric") or None,
             dimension=plan_payload.get("dimension") or None,
             filters=[str(item) for item in (plan_payload.get("filters") or []) if str(item).strip()],
-            requires_mart_review=bool(plan_payload.get("requires_mart_review", False)),
+            requires_mart_review=bool(
+                has_required_derivations
+                or plan_payload.get("requires_mart_review", False)
+            ),
             query_rules=dict(plan_payload.get("query_rules") or {}),
             route_kind=route_kind,
             generated_sql=generated_sql,
@@ -1082,6 +1088,8 @@ def to_orchestration_state(state: SupervisorState) -> OrchestrationState:
             sql_template_parameters=plan_payload.get("sql_template_parameters") or {},
             mart_design=dict(plan_payload.get("mart_design") or {}),
             analysis_data_contract=dict(plan_payload.get("analysis_data_contract") or {}),
+            required_derivations=list(plan_payload.get("required_derivations") or []),
+            analysis_heuristics=list(plan_payload.get("analysis_heuristics") or []),
         )
     limitations = [str(item) for item in state.get("limitations", []) if item]
     limitations.extend(

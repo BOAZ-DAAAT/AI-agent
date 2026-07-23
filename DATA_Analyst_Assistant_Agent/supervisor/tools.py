@@ -283,6 +283,14 @@ class SubAgentAdapter:
                 "business_grain": state.plan.business_grain,
                 "mart_design": state.plan.mart_design,
                 "analysis_data_contract": state.plan.analysis_data_contract,
+                "required_derivations": [
+                    item.model_dump(mode="json")
+                    for item in state.plan.required_derivations
+                ],
+                "analysis_heuristics": [
+                    item.model_dump(mode="json")
+                    for item in state.plan.analysis_heuristics
+                ],
             }
             if state.plan.sql_generation_source is not None:
                 plan_updates["sql_generation_source"] = state.plan.sql_generation_source

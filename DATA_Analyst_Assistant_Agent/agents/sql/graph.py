@@ -18,7 +18,7 @@ def _max_retries(state: AgentState) -> int:
 
 
 def route_after_load_context(state: AgentState) -> str:
-    if state.get("sql_template_id"):
+    if state.get("sql_template_id") and not state.get("required_derivations"):
         return "template"
     return "semantic"
 

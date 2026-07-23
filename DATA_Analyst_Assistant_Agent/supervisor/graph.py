@@ -8,6 +8,8 @@ from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisHeuristic,
+    RequiredDerivation,
     SupervisorInterruptPayload,
     SupervisorTerminalState,
     ValidationFinding,
@@ -132,6 +134,17 @@ def make_match_olist_template_node():
     def match_olist_template_node(state: SupervisorState) -> SupervisorState:
         query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
         existing_plan = dict(state.get("analysis_plan") or {})
+        if existing_plan.get("required_derivations"):
+            return {
+                "olist_template_match": {
+                    "status": "skipped_structured_derivations",
+                    "supported": False,
+                    "reason": "구조적 파생계약은 semantic 마트 설계가 필요합니다.",
+                },
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
         match = match_olist_template(
             query,
             state.get("catalog_summary"),
@@ -167,6 +180,11 @@ def make_match_olist_template_node():
                 "dimension": existing_plan.get("dimension"),
                 "filters": [],
                 "requires_mart_review": template_kind == "mart",
+                "required_derivations": [],
+                "analysis_heuristics": [
+                    AnalysisHeuristic.model_validate(item).model_dump(mode="json")
+                    for item in existing_plan.get("analysis_heuristics") or []
+                ],
                 "query_rules": dict(existing_plan.get("query_rules") or {}),
                 "sql_generation_source": "olist_template",
                 "sql_template_id": template_id,
@@ -901,17 +919,46 @@ def make_create_analysis_plan_node(model: Any | None):
         except Exception as exc:
             return _decision_failure_updates(state, "create_analysis_plan", exc)
 
+        try:
+            required_derivations = [
+                item.model_dump(mode="json") for item in decision.required_derivations
+            ]
+            if not required_derivations:
+                required_derivations = [
+                    RequiredDerivation.model_validate(item).model_dump(mode="json")
+                    for item in (state.get("analysis_plan") or {}).get(
+                        "required_derivations", []
+                    )
+                ]
+            analysis_heuristics = [
+                item.model_dump(mode="json") for item in decision.analysis_heuristics
+            ]
+            if not analysis_heuristics:
+                analysis_heuristics = [
+                    AnalysisHeuristic.model_validate(item).model_dump(mode="json")
+                    for item in (state.get("analysis_plan") or {}).get(
+                        "analysis_heuristics", []
+                    )
+                ]
+        except Exception as exc:
+            return _decision_failure_updates(state, "create_analysis_plan", exc)
+        route_kind = "comprehensive" if required_derivations else decision.route_kind
         plan: dict[str, Any] = {
             "goal": decision.goal,
-            "route_kind": decision.route_kind,
+            "route_kind": route_kind,
             "planner_mode": "llm",
             "sql_generation_source": "semantic_llm",
             "sql_template_id": None,
+            "sql_template_kind": None,
             "steps": list(decision.steps),
             "metric": decision.metric,
             "dimension": decision.dimension,
             "filters": list(decision.filters),
-            "requires_mart_review": decision.requires_mart_review,
+            "requires_mart_review": bool(
+                required_derivations or decision.requires_mart_review
+            ),
+            "required_derivations": required_derivations,
+            "analysis_heuristics": analysis_heuristics,
             "query_rules": dict(state.get("analysis_rule_context") or {}),
         }
         if state.get("datasource_id") is not None:

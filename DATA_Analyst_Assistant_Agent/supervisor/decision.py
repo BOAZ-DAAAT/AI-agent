@@ -6,6 +6,10 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
+from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisHeuristic,
+    RequiredDerivation,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.capabilities import agent_capabilities_context
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import DECIDE_NEXT_ACTION_PROMPT
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -71,6 +75,8 @@ class AnalysisPlanDecision(BaseModel):
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
+    required_derivations: list[RequiredDerivation] = Field(default_factory=list)
+    analysis_heuristics: list[AnalysisHeuristic] = Field(default_factory=list)
     reason: str = ""
 
 

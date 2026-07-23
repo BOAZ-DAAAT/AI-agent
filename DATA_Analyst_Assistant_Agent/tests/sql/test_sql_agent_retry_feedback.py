@@ -144,6 +144,85 @@ def test_sql_agent_includes_query_rules_in_existing_supervisor_plan_context(monk
     assert payload["query_rules"] == state.plan.query_rules
 
 
+def test_sql_agent_passes_structured_contracts_outside_planner_reason(monkeypatch) -> None:
+    fake_app = _FakeApp()
+    _patch_build_app(monkeypatch, fake_app)
+    state = OrchestrationState(
+        run_id="run_contract",
+        user_query="배송 지연을 분석해줘",
+        plan=AnalysisPlan(
+            goal="배송 지연 분석",
+            route_kind="simple",
+            sql_generation_source="olist_template",
+            sql_template_id=OlistTemplateId.delivery_delay_summary,
+            sql_template_kind=OlistTemplateKind.query,
+            required_derivations=[
+                {
+                    "name": "배송 지연 일수",
+                    "preferred_name": "delivery_delay_days",
+                    "source_columns": ["delivered_at", "estimated_at"],
+                }
+            ],
+            analysis_heuristics=[{"name": "이상치 민감도 기록"}],
+        ),
+    )
+
+    SQLAgent()._run_main_sql_agent(state)
+
+    assert fake_app.invoked_with is not None
+    assert fake_app.invoked_with["required_derivations"][0]["preferred_name"] == "delivery_delay_days"
+    assert fake_app.invoked_with["analysis_heuristics"][0]["must_record"] is True
+    assert "required_derivations" not in fake_app.invoked_with["planner_selection_reason"]
+    assert "analysis_heuristics" not in fake_app.invoked_with["planner_selection_reason"]
+    assert fake_app.invoked_with["sql_template_id"] is None
+    assert fake_app.invoked_with["generation_source"] == "semantic_llm"
+    assert state.plan is not None
+    assert state.plan.route_kind == "comprehensive"
+    assert state.plan.requires_mart_review is True
+
+
+def test_analysis_data_contract_records_derivation_implementation_status() -> None:
+    required = [
+        {"name": "배송 지연 일수", "preferred_name": "delivery_delay_days"},
+        {"name": "지역 거리", "preferred_name": "geo_distance_km"},
+    ]
+    mart_design = {
+        "grain": "order_id",
+        "grain_columns": ["order_id"],
+        "column_plan": [
+            {
+                "output_column": "delivery_delay_days",
+                "role": "measure",
+                "source_columns": ["delivered_at", "estimated_at"],
+                "calculation_type": "derived",
+                "calculation_rule": "날짜 차이",
+                "aggregation_method": "none",
+            }
+        ],
+        "unimplemented_derivations": [
+            {
+                "name": "geo_distance_km",
+                "reason": "좌표 컬럼 없음",
+                "required_columns": ["latitude", "longitude"],
+            }
+        ],
+    }
+
+    contract = SQLAgent._analysis_data_contract(
+        mart_design,
+        {"target_table": "analytics.delivery_mart"},
+        "CREATE TABLE analytics.delivery_mart AS SELECT ...",
+        required_derivations=required,
+        analysis_heuristics=[{"name": "이상치 민감도 기록", "must_record": True}],
+    )
+
+    assert contract["required_derivations"] == required
+    assert contract["analysis_heuristics"][0]["name"] == "이상치 민감도 기록"
+    assert contract["implemented_derivations"][0]["output_column"] == "delivery_delay_days"
+    assert contract["unimplemented_derivations"][0]["reason"] == "좌표 컬럼 없음"
+    assert contract["unimplemented_derivations"][0]["output_column"] == "geo_distance_km"
+
+
 def test_sql_agent_passes_template_source_and_retry_limit_without_llm_planning(monkeypatch) -> None:
     fake_app = _FakeApp()
     _patch_build_app(monkeypatch, fake_app)

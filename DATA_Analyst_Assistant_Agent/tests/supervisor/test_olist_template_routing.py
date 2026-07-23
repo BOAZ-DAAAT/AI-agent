@@ -76,6 +76,38 @@ def test_mart_template_builds_comprehensive_plan_and_parameters() -> None:
     assert _route_after_olist_template_match(updates) == "execute_subagent"
 
 
+def test_existing_required_derivation_skips_deterministic_template() -> None:
+    state = _state("월별 매출과 주문 수를 보여줘")
+    state["analysis_plan"] = {
+        "goal": "월별 매출",
+        "required_derivations": [
+            {"name": "순매출", "preferred_name": "net_revenue"}
+        ],
+    }
+
+    updates = make_match_olist_template_node()(state)
+
+    assert updates["olist_template_match"]["status"] == "skipped_structured_derivations"
+    assert "analysis_plan" not in updates
+    assert _route_after_olist_template_match(updates) == "semantic_fallback"
+
+
+def test_existing_heuristic_only_plan_keeps_deterministic_template() -> None:
+    state = _state("월별 매출과 주문 수를 보여줘")
+    state["analysis_plan"] = {
+        "goal": "월별 매출",
+        "analysis_heuristics": [{"name": "이상치 민감도 기록"}],
+    }
+
+    updates = make_match_olist_template_node()(state)
+
+    assert updates["olist_template_match"]["status"] == "matched"
+    assert updates["analysis_plan"]["sql_template_id"] == "monthly_sales_orders"
+    assert updates["analysis_plan"]["analysis_heuristics"][0]["name"] == "이상치 민감도 기록"
+    assert updates["analysis_plan"]["analysis_heuristics"][0]["must_record"] is True
+    assert _route_after_olist_template_match(updates) == "execute_subagent"
+
+
 def test_semantic_sql_failure_requests_clarification_only_once() -> None:
     state = _state("복합 매출 분석")
     result = AgentCompactResult(

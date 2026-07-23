@@ -140,6 +140,28 @@ class SQLAgent:
         app = build_app()
         catalog_summary = state.catalog_summary or {}
         retry_context = state.plan.retry_context if state.plan else None
+        required_derivations = (
+            [
+                item.model_dump(mode="json")
+                for item in state.plan.required_derivations
+            ]
+            if state.plan is not None
+            else []
+        )
+        analysis_heuristics = (
+            [
+                item.model_dump(mode="json")
+                for item in state.plan.analysis_heuristics
+            ]
+            if state.plan is not None
+            else []
+        )
+        if state.plan is not None and required_derivations:
+            state.plan.route_kind = "comprehensive"
+            state.plan.requires_mart_review = True
+            state.plan.sql_generation_source = "semantic_llm"
+            state.plan.sql_template_id = None
+            state.plan.sql_template_kind = None
         supervisor_plan_context = {}
         if state.plan is not None:
             supervisor_plan_context = {
@@ -191,6 +213,8 @@ class SQLAgent:
                 "required_db_schema": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "clarification_request": clarification_request,
                 "planner_selection_reason": planner_selection_reason,
+                "required_derivations": required_derivations,
+                "analysis_heuristics": analysis_heuristics,
                 "schema_text": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "integrity_text": "",
                 "integrity_dataset_name": state.datasource_id or "default",
@@ -313,6 +337,14 @@ class SQLAgent:
                 result.get("mart_design") or {},
                 sql_draft,
                 generated_sql,
+                required_derivations=[
+                    item.model_dump(mode="json")
+                    for item in state.plan.required_derivations
+                ],
+                analysis_heuristics=[
+                    item.model_dump(mode="json")
+                    for item in state.plan.analysis_heuristics
+                ],
             )
 
         plan_payload = {
@@ -656,6 +688,9 @@ class SQLAgent:
         mart_design: dict[str, Any],
         sql_draft: dict[str, Any],
         generated_sql: str,
+        *,
+        required_derivations: list[dict[str, Any]] | None = None,
+        analysis_heuristics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         column_plan = list(mart_design.get("column_plan") or [])
         grain_columns = list(mart_design.get("grain_columns") or [])
@@ -676,6 +711,55 @@ class SQLAgent:
             for item in derived_columns
             if str(item.get("aggregation_method") or "none").lower() != "none"
         ]
+        required_derivations = list(required_derivations or [])
+        analysis_heuristics = list(analysis_heuristics or [])
+        output_columns = {
+            str(item.get("output_column") or "").strip()
+            for item in column_plan
+            if isinstance(item, dict)
+        }
+        implemented_derivations = [
+            {
+                **item,
+                "output_column": str(
+                    item.get("preferred_name") or item.get("name") or ""
+                ).strip(),
+            }
+            for item in required_derivations
+            if str(item.get("preferred_name") or item.get("name") or "").strip()
+            in output_columns
+        ]
+        unimplemented_names = {
+            str(item.get("name") or "").strip()
+            for item in mart_design.get("unimplemented_derivations") or []
+            if isinstance(item, dict)
+        }
+        unimplemented_derivations: list[dict[str, Any]] = []
+        for item in required_derivations:
+            preferred_name = str(
+                item.get("preferred_name") or item.get("name") or ""
+            ).strip()
+            if preferred_name not in unimplemented_names:
+                continue
+            implementation = next(
+                (
+                    candidate
+                    for candidate in mart_design.get("unimplemented_derivations") or []
+                    if isinstance(candidate, dict)
+                    and str(candidate.get("name") or "").strip() == preferred_name
+                ),
+                {},
+            )
+            unimplemented_derivations.append(
+                {
+                    **item,
+                    "output_column": preferred_name,
+                    "reason": implementation.get("reason"),
+                    "required_columns": list(
+                        implementation.get("required_columns") or []
+                    ),
+                }
+            )
         return {
             "target_table": sql_draft.get("target_table") or mart_design.get("mart_name"),
             "row_grain": mart_design.get("grain") or sql_draft.get("business_grain") or "",
@@ -699,6 +783,10 @@ class SQLAgent:
                 "집계 수준의 연관성을 개별 주문 수준 인과로 해석하지 않습니다.",
                 "계약과 표본이 충분히 뒷받침하지 않으면 추세 검정은 기술적 해석으로 제한합니다.",
             ],
+            "required_derivations": required_derivations,
+            "analysis_heuristics": analysis_heuristics,
+            "implemented_derivations": implemented_derivations,
+            "unimplemented_derivations": unimplemented_derivations,
             "generated_sql": generated_sql,
         }
 
@@ -711,7 +799,19 @@ class SQLAgent:
     ) -> dict[str, Any]:
         existing = dict(getattr(plan, "analysis_data_contract", None) or {})
         mart_design = dict(getattr(plan, "mart_design", None) or {})
-        contract = cls._analysis_data_contract(mart_design, sql_draft, generated_sql)
+        contract = cls._analysis_data_contract(
+            mart_design,
+            sql_draft,
+            generated_sql,
+            required_derivations=[
+                item.model_dump(mode="json")
+                for item in getattr(plan, "required_derivations", [])
+            ],
+            analysis_heuristics=[
+                item.model_dump(mode="json")
+                for item in getattr(plan, "analysis_heuristics", [])
+            ],
+        )
         inferred_columns = cls._infer_column_lineage_from_sql(generated_sql)
         if inferred_columns and not contract.get("derived_columns"):
             contract["derived_columns"] = inferred_columns
