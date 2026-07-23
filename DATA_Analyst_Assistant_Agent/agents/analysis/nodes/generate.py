@@ -188,6 +188,26 @@ Rules:
   str), statistics (dict of computed numbers), limitations (list of str).
   Optional but preferred keys: hypothesis_tests, evidence_tables, interpretation,
   method_notes, review_request.
+- Make the answer auditable for the supervisor semantic gate. In `statistics`,
+  include a `request_alignment` object whenever the user asks for concrete
+  metrics, dimensions, time grain, or period-over-period changes. It should
+  contain:
+  - interpreted_question: one sentence restating the business question you
+    actually answered.
+  - metric_map: a list of objects with requested_metric, computed_metric,
+    formula, source_columns, and evidence_location.
+  - grain: the row/grouping grain used for the final answer, such as month or
+    customer-month.
+  - time_basis: the timestamp/date column and period extraction used, when
+    applicable.
+  - comparison_formula: the exact formula for growth, delta, lift, or
+    period-over-period comparison, when applicable.
+  Also mention the same mapping briefly in findings or method_notes so a
+  validator can see that every requested metric was answered without reading
+  code.
+- For period-over-period requests, compute and expose both the base values and
+  the comparison values. State how the first period and zero/blank denominators
+  were handled.
 - If you include `evidence_tables`, every item MUST be a dict with exactly this
   stable shape: title (str), columns (list[str]), rows (list[dict]). Use `title`;
   do not use `name` as the table label key.
