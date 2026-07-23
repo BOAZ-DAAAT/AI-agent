@@ -12,6 +12,10 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     SupervisorTerminalState,
     ValidationFinding,
 )
+from DATA_Analyst_Assistant_Agent.shared.cancellation import (
+    RunCancellationRequested,
+    raise_if_run_cancelled,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.analysis_review import (
     validate_analysis_review_resume,
 )
@@ -67,6 +71,37 @@ from DATA_Analyst_Assistant_Agent.supervisor.candidate import (
 )
 
 
+def _run_id_from_state(state: SupervisorState) -> str:
+    return str(state.get("current_run_id") or "")
+
+
+def _with_cancellation_guard(node: Any, backend_adapter: Any | None):
+    def guarded_node(state: SupervisorState) -> SupervisorState:
+        run_id = _run_id_from_state(state)
+        raise_if_run_cancelled(backend_adapter, run_id)
+        result = node(state)
+        raise_if_run_cancelled(backend_adapter, run_id)
+        return result
+
+    return guarded_node
+
+
+def _emit_cancelled_active_node(
+    backend_adapter: Any | None,
+    state: SupervisorState,
+    active_node: Any,
+    *,
+    action: str,
+) -> None:
+    emit_node_lifecycle_event(
+        backend_adapter,
+        state,
+        "agent.discarded",
+        active_node,
+        "사용자 요청으로 진행 중인 작업을 중단했습니다.",
+        action=action,
+        metadata={"reason_code": "run_cancelled"},
+)
 
 
 def _has_specific_analysis_intent(query: str) -> bool:
@@ -1065,6 +1100,18 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 agent_name,
                 working_state,
             )
+            raise_if_run_cancelled(
+                getattr(subagent_adapter, "backend_adapter", None),
+                _run_id_from_state(working_state),
+            )
+        except RunCancellationRequested:
+            _emit_cancelled_active_node(
+                getattr(subagent_adapter, "backend_adapter", None),
+                working_state,
+                active_node,
+                action=str(action or ""),
+            )
+            raise
         except AgentContractError as exc:
             message = f"{agent_name} 결과의 에이전트 계약 검증에 실패했습니다: {exc}"
             failed_state, failed_node, failed_event_type = fail_active_node(
@@ -1248,6 +1295,18 @@ def make_generate_insight_node(insight_generator: Any):
         else:
             try:
                 result = insight_generator.generate(working_state)
+                raise_if_run_cancelled(
+                    getattr(insight_generator, "backend_adapter", None),
+                    _run_id_from_state(working_state),
+                )
+            except RunCancellationRequested:
+                _emit_cancelled_active_node(
+                    getattr(insight_generator, "backend_adapter", None),
+                    working_state,
+                    active_node,
+                    action="call_insight",
+                )
+                raise
             except Exception as exc:
                 result = _failed_insight_result(f"인사이트 생성 또는 저장에 실패했습니다: {exc}")
 
@@ -1494,13 +1553,17 @@ def build_graph(
 
             insight_generator = SupervisorInsightGenerator(backend_adapter)
 
-    graph = StateGraph(SupervisorState)
     backend_adapter = getattr(subagent_adapter, "backend_adapter", None)
-    graph.add_node(
+    graph = StateGraph(SupervisorState)
+
+    def add_node(name: str, node: Any) -> None:
+        graph.add_node(name, _with_cancellation_guard(node, backend_adapter))
+
+    add_node(
         "rewrite_retrieval_query",
         make_rewrite_retrieval_query_node(model),
     )
-    graph.add_node(
+    add_node(
         "retrieve_analysis_rules",
         make_retrieve_analysis_rules_node(
             analysis_rule_search,
@@ -1508,18 +1571,18 @@ def build_graph(
             analysis_rule_reranker,
         ),
     )
-    graph.add_node("clarify_query", make_clarify_query_node(model))
-    graph.add_node("collect_clarification", make_collect_clarification_node())
-    graph.add_node("create_analysis_plan", make_create_analysis_plan_node(model))
-    graph.add_node("decide_next_action", make_decide_next_action_node(model))
-    graph.add_node("completion_guard", make_completion_guard_node())
-    graph.add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
-    graph.add_node("generate_insight", make_generate_insight_node(insight_generator))
-    graph.add_node("validate_candidate", make_validate_candidate_node(model))
-    graph.add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
-    graph.add_node("collect_analysis_review", make_collect_analysis_review_node())
-    graph.add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
-    graph.add_node("finalize", make_finalize_node(model, backend_adapter))
+    add_node("clarify_query", make_clarify_query_node(model))
+    add_node("collect_clarification", make_collect_clarification_node())
+    add_node("create_analysis_plan", make_create_analysis_plan_node(model))
+    add_node("decide_next_action", make_decide_next_action_node(model))
+    add_node("completion_guard", make_completion_guard_node())
+    add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
+    add_node("generate_insight", make_generate_insight_node(insight_generator))
+    add_node("validate_candidate", make_validate_candidate_node(model))
+    add_node("commit_candidate", make_commit_candidate_node(backend_adapter))
+    add_node("collect_analysis_review", make_collect_analysis_review_node())
+    add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
+    add_node("finalize", make_finalize_node(model, backend_adapter))
 
     graph.add_edge(START, "rewrite_retrieval_query")
     graph.add_edge("rewrite_retrieval_query", "retrieve_analysis_rules")

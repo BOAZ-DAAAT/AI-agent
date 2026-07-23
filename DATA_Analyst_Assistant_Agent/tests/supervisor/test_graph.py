@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     _route_after_decide,
+    _with_cancellation_guard,
     build_graph,
     make_clarify_query_node,
     make_create_analysis_plan_node,
@@ -21,6 +22,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
     make_retrieve_analysis_rules_node,
     _retrieve_diverse_analysis_hits,
 )
+from DATA_Analyst_Assistant_Agent.shared.cancellation import RunCancellationRequested
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import commit_candidate
 from DATA_Analyst_Assistant_Agent.shared.pinecone import CompanyContextHit
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -517,6 +519,15 @@ class RecordingBackendAdapter:
                 **kwargs,
             }
         )
+
+
+class CancellableRecordingBackendAdapter(RecordingBackendAdapter):
+    def __init__(self, *, cancelled: bool = False) -> None:
+        super().__init__()
+        self.cancelled = cancelled
+
+    def is_run_cancelled(self, _run_id: str) -> bool:
+        return self.cancelled
 
 
 class ForbiddenArtifactBackend(RecordingBackendAdapter):
@@ -1292,6 +1303,47 @@ def test_execute_subagent_emits_agent_lifecycle_events() -> None:
     assert ("result.staged", "sql_agent") in event_pairs
     assert ("agent.completed", "sql_agent") not in event_pairs
     assert result["active_node"]["status"] == "running"
+
+
+def test_execute_subagent_discards_active_node_when_cancelled_after_call() -> None:
+    backend = CancellableRecordingBackendAdapter()
+    adapter = FakeSubAgentAdapter()
+    adapter.backend_adapter = backend
+    original_call = adapter.call
+
+    def cancel_after_call(agent_name: str, state: dict[str, Any]) -> AgentToolResult:
+        result = original_call(agent_name, state)
+        backend.cancelled = True
+        return result
+
+    adapter.call = cancel_after_call  # type: ignore[method-assign]
+    state = _state()
+    state["next_action"] = "call_sql_agent"
+
+    with pytest.raises(RunCancellationRequested):
+        make_execute_subagent_node(adapter, None)(state)
+
+    event_types = [event["event_type"] for event in backend.events]
+    assert event_types == ["agent.started", "agent.discarded"]
+    assert "agent.failed" not in event_types
+    assert "result.staged" not in event_types
+
+
+def test_cancellation_guard_does_not_enter_next_graph_node() -> None:
+    backend = CancellableRecordingBackendAdapter(cancelled=True)
+    called = False
+
+    def node(state: dict[str, Any]) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return state
+
+    guarded = _with_cancellation_guard(node, backend)
+
+    with pytest.raises(RunCancellationRequested):
+        guarded(_state())
+
+    assert called is False
 
 
 def test_execute_subagent_contract_mismatch_emits_failed_lifecycle_event() -> None:

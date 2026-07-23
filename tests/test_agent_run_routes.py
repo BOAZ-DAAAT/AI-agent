@@ -138,6 +138,121 @@ def test_get_agent_run_and_events_returns_plain_json(tmp_path, monkeypatch) -> N
     assert events_response.json()[0]["node_name"] == "supervisor"
 
 
+def test_cancel_agent_run_discards_active_node_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(
+        thread_id="thread_cancel",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    services.run_service.update_status(run.run_id, "running")
+    services.run_service.append_event(
+        run.run_id,
+        "agent.started",
+        "SQL Agent started",
+        node_name="sql_agent",
+        metadata={
+            "node_id": "node_001",
+            "agent_name": "sql_agent",
+            "node_sequence": 1,
+            "attempt": 1,
+            "status": "running",
+        },
+    )
+
+    first = client.post(f"/agent-runs/{run.run_id}/cancel", headers=_user_header())
+    second = client.post(f"/agent-runs/{run.run_id}/cancel", headers=_user_header())
+
+    assert first.status_code == 200
+    assert first.json() == {
+        "run_id": run.run_id,
+        "status": "cancelled",
+        "discarded_node_id": "node_001",
+    }
+    assert second.status_code == 200
+    assert second.json()["status"] == "cancelled"
+    assert services.run_service.get_run(run.run_id).status.value == "cancelled"
+    events = services.run_service.list_events(run.run_id)
+    assert [event.event_type for event in events].count("agent.discarded") == 1
+    assert [event.event_type for event in events].count("run.cancelled") == 1
+    assert not any(event.event_type == "run.failed" for event in events)
+
+
+def test_cancel_agent_run_rejects_completed_run(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(
+        thread_id="thread_completed",
+        project_id="sess_001",
+    )
+    services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.post(f"/agent-runs/{run.run_id}/cancel", headers=_user_header())
+
+    assert response.status_code == 409
+    assert services.run_service.get_run(run.run_id).status.value == "succeeded"
+
+
+def test_cancel_agent_run_keeps_completed_node(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    run = services.run_service.create_run(
+        thread_id="thread_completed_node",
+        project_id="sess_001",
+    )
+    services.run_service.update_status(run.run_id, "running")
+    node_metadata = {
+        "node_id": "node_completed",
+        "agent_name": "sql_agent",
+        "node_sequence": 1,
+        "attempt": 1,
+    }
+    services.run_service.append_event(
+        run.run_id,
+        "agent.started",
+        "SQL Agent started",
+        node_name="sql_agent",
+        metadata={**node_metadata, "status": "running"},
+    )
+    services.run_service.append_event(
+        run.run_id,
+        "agent.completed",
+        "SQL Agent completed",
+        node_name="sql_agent",
+        metadata={**node_metadata, "status": "completed"},
+    )
+
+    response = client.post(f"/agent-runs/{run.run_id}/cancel", headers=_user_header())
+
+    assert response.status_code == 200
+    assert response.json()["discarded_node_id"] is None
+    event_types = [event.event_type for event in services.run_service.list_events(run.run_id)]
+    assert "agent.completed" in event_types
+    assert "agent.discarded" not in event_types
+
+
 def test_related_events_returns_branch_family_siblings(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)
@@ -526,6 +641,41 @@ def test_stream_agent_run_events_replays_all_for_unknown_cursor(
 
     assert response.status_code == 200
     assert f"id: {event.event_id}" in response.text
+    assert "event: run.closed" in response.text
+
+
+def test_stream_agent_run_events_closes_with_cancelled_status(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.EVENT_STREAM_POLL_INTERVAL_SECONDS",
+        0,
+    )
+    run = services.run_service.create_run(
+        thread_id="thread_cancelled_stream",
+        project_id="sess_001",
+    )
+    services.run_service.update_status(run.run_id, "running")
+    services.run_service.cancel_run(run.run_id)
+    cancelled_event = services.run_service.append_event(
+        run.run_id,
+        "run.cancelled",
+        "Agent run cancelled",
+        node_name="supervisor",
+    )
+
+    response = client.get(
+        f"/agent-runs/{run.run_id}/events/stream",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    assert f"id: {cancelled_event.event_id}" in response.text
+    assert '"event_type":"run.cancelled"' in response.text
+    assert '"status":"cancelled"' in response.text
     assert "event: run.closed" in response.text
 
 

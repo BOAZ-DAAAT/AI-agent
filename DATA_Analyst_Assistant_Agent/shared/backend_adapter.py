@@ -16,6 +16,8 @@ from data_agent_backend.models.policy import PolicyDecision
 from data_agent_backend.models.runs import RunEvent, RunRecord, RunStatus
 from data_agent_backend.services.factory import BackendServices, create_backend_services
 
+from DATA_Analyst_Assistant_Agent.shared.cancellation import RunCancellationRequested
+
 
 class BackendAdapter:
     """Thin orchestration-owned wrapper over the fixed data_agent_backend services."""
@@ -40,7 +42,20 @@ class BackendAdapter:
         metadata: dict[str, Any] | None = None,
         context: PolicyContext | None = None,
     ) -> RunRecord:
-        return self.services.run_service.update_status(run_id, status, metadata=metadata, context=context)
+        try:
+            return self.services.run_service.update_status(
+                run_id,
+                status,
+                metadata=metadata,
+                context=context,
+            )
+        except BackendError as exc:
+            if exc.code == "RUN_TERMINAL" and self.is_run_cancelled(run_id):
+                raise RunCancellationRequested(run_id) from exc
+            raise
+
+    def is_run_cancelled(self, run_id: str) -> bool:
+        return self.services.run_service.get_run(run_id).status == RunStatus.cancelled
 
     def append_run_event(
         self,
@@ -56,6 +71,9 @@ class BackendAdapter:
         metadata: dict[str, Any] | None = None,
         context: PolicyContext | None = None,
     ) -> RunEvent:
+        cancellation_events = {"agent.discarded", "run.cancelled"}
+        if event_type not in cancellation_events and self.is_run_cancelled(run_id):
+            raise RunCancellationRequested(run_id)
         return self.services.run_service.append_event(
             run_id,
             event_type,
@@ -84,6 +102,8 @@ class BackendAdapter:
         metadata: dict[str, Any] | None = None,
         preview: dict[str, Any] | None = None,
     ) -> ArtifactRef:
+        if self.is_run_cancelled(run_id):
+            raise RunCancellationRequested(run_id)
         # 차트(PNG) 등 바이너리 아티팩트는 content_bytes 로 등록한다.
         # (하위 계층 registry/모델은 이미 지원 — 이 어댑터 통로만 열어준다.)
         if content_text is None and content_bytes is None:

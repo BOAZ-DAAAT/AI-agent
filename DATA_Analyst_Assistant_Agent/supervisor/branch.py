@@ -26,6 +26,10 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AnalysisPlan,
     OrchestrationState,
 )
+from DATA_Analyst_Assistant_Agent.shared.cancellation import (
+    RunCancellationRequested,
+    raise_if_run_cancelled,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.insight.agent import InsightGenerator
 from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import emit_node_lifecycle_event
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -113,6 +117,7 @@ def branch_from(
     fake_state = {"current_run_id": run_id}
 
     for agent_name in stages_to_run:
+        raise_if_run_cancelled(backend_adapter, run_id)
         node_sequence += 1
         node_id = f"{run_id}:branch:{node_sequence}"
 
@@ -155,6 +160,17 @@ def branch_from(
 
         try:
             envelope = _run_agent(agent_name, state, runtime)
+            raise_if_run_cancelled(backend_adapter, run_id)
+        except RunCancellationRequested:
+            emit_node_lifecycle_event(
+                backend_adapter,
+                fake_state,
+                "agent.discarded",
+                active_node,
+                "사용자 요청으로 진행 중인 분기 작업을 중단했습니다.",
+                metadata={"reason_code": "run_cancelled", "branch": True},
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 - 분기 실행 실패는 그 지점에서 멈추고 사유를 알려야 함
             failed_node = FailedNodeExecution(
                 node_id=node_id,
