@@ -61,6 +61,9 @@ def get_chat_model(
         **kwargs,
     }
     params.setdefault("max_tokens", int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_LLM_MAX_TOKENS))))
+    reasoning_effort = os.getenv(f"{model_env}_REASONING_EFFORT") or os.getenv("LLM_REASONING_EFFORT")
+    if reasoning_effort:
+        params.setdefault("reasoning_effort", reasoning_effort)
     if base_url:
         params["base_url"] = base_url
     if headers:
