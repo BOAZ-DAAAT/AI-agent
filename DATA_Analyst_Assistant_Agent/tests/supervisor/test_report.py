@@ -257,10 +257,16 @@ def test_generate_report_retries_on_listing_style(adapter, runtime, monkeypatch)
     assert payload["title"] == "카테고리별 매출 원인 분석 여정"  # 두 번째(정상) 응답이 채택됨
 
 
-def test_generate_report_retries_on_invented_number(adapter, runtime, monkeypatch):
+def test_generate_report_does_not_retry_on_invented_number(adapter, runtime, monkeypatch):
+    """리포트는 숫자 검증(verify_texts)을 의도적으로 쓰지 않는다(팀 판단, 2026-07-23).
+
+    검증 실패로 원본 덤프 폴백에 떨어져 리포트 UX가 깨지는 것을, 근거에 없는 숫자가
+    드물게 섞여 들어올 리스크보다 우선 피하기로 했다. 그래서 첫 응답의 구조만 멀쩡하면
+    (JSON 파싱 성공, 필수 필드 존재, 나열식 아님) 숫자를 재검증하지 않고 그대로 채택한다.
+    """
     run = adapter.create_run(thread_id="thread_report_hallucination")
     ids = _seed_full_path(adapter, run.run_id)
-    hallucinated_response = json.dumps({
+    response_with_unverified_number = json.dumps({
         "title": "카테고리별 매출 원인 분석 여정",
         "executive_summary": "이번 분석 결과 매출이 42.7% 증가한 것으로 나타났습니다.",
         "background_and_question": "사용자는 카테고리별 매출 현황을 파악하고자 했습니다.",
@@ -270,16 +276,16 @@ def test_generate_report_retries_on_invented_number(adapter, runtime, monkeypatc
         "conclusion_and_recommendations": "성장세를 유지해야 합니다.",
         "key_finding": "매출 42.7% 증가",
     }, ensure_ascii=False)
-    fake_llm = _FakeLLM([hallucinated_response, _VALID_RESPONSE])
+    fake_llm = _FakeLLM([response_with_unverified_number, _VALID_RESPONSE])
     monkeypatch.setattr(generator_module, "get_chat_model", lambda **kwargs: fake_llm)
 
     ref = generate_report(list(ids.values()), runtime)
 
     payload = json.loads(adapter.read_artifact_text(ref.artifact_id))
-    assert len(fake_llm.calls) == 2  # 근거에 없는 42.7%가 걸려서 재시도됨
+    assert len(fake_llm.calls) == 1  # 재시도 없이 첫 응답 그대로 채택됨
     assert payload["fallback_used"] is False
     assert payload["title"] == "카테고리별 매출 원인 분석 여정"
-    assert "42.7" not in json.dumps(payload, ensure_ascii=False)
+    assert "42.7" in json.dumps(payload, ensure_ascii=False)
 
 
 def test_generate_report_falls_back_when_llm_fails(adapter, runtime, monkeypatch):

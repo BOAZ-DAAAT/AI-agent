@@ -17,8 +17,9 @@ import json
 import re
 from typing import Any
 
-_NUM_RE = re.compile(r"(?<!\d)-?\d[\d,]*(?:\.\d+)?")
+_NUM_RE = re.compile(r"(?<!\d)-?\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?")
 _SMALL_INT_SKIP = 12                                  # "상위 10개"류 서수 허용 상한
+_SCIENTIFIC_ABS_THRESHOLD = 1e-4                      # 이 이하 절대값은 반올림 비교가 늘 0으로 붕괴돼 상대오차로 비교
 
 
 def collect_numbers(obj: Any, out: set | None = None) -> set:
@@ -56,7 +57,12 @@ def build_evidence_corpus(pack, computes: list[Any]) -> tuple[set, str]:
 
 
 def extract_claims(text: str) -> list[tuple[str, float, int]]:
-    """문장에서 검증 대상 수치 토큰을 뽑는다. 반환: (토큰, 값, 주장 소수 자릿수)."""
+    """문장에서 검증 대상 수치 토큰을 뽑는다. 반환: (토큰, 값, 주장 소수 자릿수).
+
+    "7.76e-315" 같은 과학적 표기는 정규식이 지수부까지 통째로 잡으므로, 자릿수(decimals)는
+    지수부를 뺀 가수(mantissa) 부분만 보고 계산한다 — 아니면 "e-315"의 "-315"를 소수
+    자릿수로 오인하거나, float() 이전에 토큰이 쪼개져 지수부가 별도 숫자로 취급된다.
+    """
     claims: list[tuple[str, float, int]] = []
     for m in _NUM_RE.finditer(text or ""):
         token = m.group()
@@ -65,10 +71,12 @@ def extract_claims(text: str) -> list[tuple[str, float, int]]:
             value = float(cleaned)
         except ValueError:
             continue
-        decimals = len(cleaned.split(".")[1]) if "." in cleaned else 0
+        mantissa = re.split(r"[eE]", cleaned)[0]
+        decimals = len(mantissa.split(".")[1]) if "." in mantissa else 0
         is_percent = text[m.end():m.end() + 1] in {"%", "％"}
-        # 서수/개수용 소형 정수는 스킵 — 단 "10%" 처럼 %가 붙으면 주장이므로 검증
-        if decimals == 0 and abs(value) <= _SMALL_INT_SKIP and not is_percent:
+        is_scientific = "e" in cleaned.lower()
+        # 서수/개수용 소형 정수는 스킵 — 단 "10%"처럼 %가 붙거나 과학적 표기면 주장이므로 검증
+        if decimals == 0 and abs(value) <= _SMALL_INT_SKIP and not is_percent and not is_scientific:
             continue
         claims.append((token, value, decimals))
     return claims
@@ -85,6 +93,18 @@ def _matches(value: float, decimals: int, evidence_numbers: set) -> bool:
                 return True
         except (OverflowError, ValueError):
             continue
+        # p=7.76e-315처럼 절대값이 극히 작은 값은 자릿수 반올림이 항상 0으로 붕괴되므로,
+        # 가수(mantissa) 정밀도에 맞춘 상대오차로 대신 비교한다.
+        if (
+            value != 0
+            and e != 0
+            and (abs(value) < _SCIENTIFIC_ABS_THRESHOLD or abs(e) < _SCIENTIFIC_ABS_THRESHOLD)
+        ):
+            try:
+                if abs((value - e) / e) <= 0.5 * (10 ** -decimals):
+                    return True
+            except (OverflowError, ValueError, ZeroDivisionError):
+                continue
     return False
 
 
