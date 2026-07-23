@@ -94,7 +94,7 @@ def classify_intent(
 ) -> AnalysisIntent:
     """LLM extracts intent; the node fixes the time grain deterministically."""
 
-    chat_model = model or get_chat_model(temperature=0)
+    chat_model = model or get_chat_model(model_env="ANALYSIS_MODEL", temperature=0)
     structured_model = chat_model.with_structured_output(AnalysisIntent)
     human = (
         f"Domain labels:\n{domain_catalog_text()}\n\n"
