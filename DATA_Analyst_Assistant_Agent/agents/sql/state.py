@@ -68,6 +68,21 @@ class MartColumnPlan(BaseModel):
             raise ValueError("빈 문자열은 허용되지 않습니다")
         return value.strip()
 
+    @field_validator("aggregation_method", mode="before")
+    @classmethod
+    def normalize_aggregation_method(cls, value: object) -> object:
+        """LLM이 다른 옵션들의 대문자 표기에 이끌려 'NONE'처럼 잘못된 케이스로 내는 경우를 보정한다.
+
+        aggregation_method는 none만 소문자고 나머지(SUM/COUNT/...)는 전부 대문자라, LLM이
+        일관성을 맞추려다 none을 NONE으로 내는 재시도가 실제로 반복 관측됨.
+        """
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if stripped.lower() == "none":
+            return "none"
+        return stripped.upper()
+
     @field_validator("source_columns")
     @classmethod
     def validate_source_columns(cls, value: List[str]) -> List[str]:
