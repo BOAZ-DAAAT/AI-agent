@@ -62,6 +62,45 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
     return entries, refs
 
 
+def _relationship_shift_for_row_filter(
+    original_df: pd.DataFrame, filtered_df: pd.DataFrame, primary_hypothesis: dict[str, Any],
+) -> dict[str, Any] | None:
+    """row_filter 분기 전후로 EDA 주가설(target/feature)의 상관계수가 어떻게 바뀌었는지 계산한다.
+
+    Analysis는 필터링된 df만 받아서 원본과 비교할 방법이 없다(원래 있던 행이 이미 빠져있어
+    되살릴 수 없음, 2026-07-24). EDA는 필터링하는 바로 이 시점에 원본(original_df)과
+    필터본(filtered_df)을 둘 다 메모리에 갖고 있으니, 여기서 딱 한 번 계산해서 넘긴다 —
+    Analysis가 필터링된 df를 "원본"이라 잘못 부르거나 스스로 또 필터링하지 않도록.
+    """
+    target = str(primary_hypothesis.get("target") or "").strip()
+    feature = str(primary_hypothesis.get("feature") or "").strip()
+    if not target or not feature or target == feature:
+        return None
+    if target not in original_df.columns or feature not in original_df.columns:
+        return None
+
+    def _corr_pair(frame: pd.DataFrame) -> dict[str, Any] | None:
+        x = pd.to_numeric(frame[target], errors="coerce")
+        y = pd.to_numeric(frame[feature], errors="coerce")
+        valid = x.notna() & y.notna()
+        if int(valid.sum()) < 3:
+            return None
+        xs, ys = x[valid], y[valid]
+        if xs.std() == 0 or ys.std() == 0:
+            return None
+        return {
+            "n": int(valid.sum()),
+            "pearson": round(float(xs.corr(ys, method="pearson")), 4),
+            "spearman": round(float(xs.corr(ys, method="spearman")), 4),
+        }
+
+    before = _corr_pair(original_df)
+    after = _corr_pair(filtered_df)
+    if not before or not after:
+        return None
+    return {"target": target, "feature": feature, "before": before, "after": after}
+
+
 def _extract_branch_instruction(user_query: str) -> str:
     """Return only the follow-up branch instruction, not the original query."""
     markers = ("[추가 지시사항]", "[異붽? 吏?쒖궗??]")
@@ -275,17 +314,21 @@ class EDAAgent:
         finally:
             reset_context()
         if derived_input:
+            # row_filter만 다운스트림(Analysis/Insight)에 CSV로 넘긴다 — 원본과 스키마·그레인이
+            # 동일해서 안전하다. entity_comparison(판매자 집계 등)은 그레인이 바뀌어
+            # analysis_data_contract와 어긋나므로 EDA 내부용으로만 남겨둔다(2026-07-24).
+            if derived_input["metadata"].get("kind") == "row_filter":
+                shift = _relationship_shift_for_row_filter(
+                    df, graph_df, result.get("primary_hypothesis") or {})
+                if shift:
+                    derived_input["metadata"]["relationship_shift"] = shift
+                result["_row_filter_frame"] = graph_df
             statistical_metadata = dict(result.get("statistical_metadata", {}) or {})
             statistical_metadata["derived_group_comparison"] = derived_input["metadata"]
             result["statistical_metadata"] = statistical_metadata
             result["profile_override"] = profile_from_csv_artifacts([
                 CsvArtifactData(artifact_id="derived_group", text="", dataframe=graph_df)
             ])
-            # row_filter만 다운스트림(Analysis/Insight)에 CSV로 넘긴다 — 원본과 스키마·그레인이
-            # 동일해서 안전하다. entity_comparison(판매자 집계 등)은 그레인이 바뀌어
-            # analysis_data_contract와 어긋나므로 EDA 내부용으로만 남겨둔다(2026-07-24).
-            if derived_input["metadata"].get("kind") == "row_filter":
-                result["_row_filter_frame"] = graph_df
         return result
 
 # ─────────────────────────────

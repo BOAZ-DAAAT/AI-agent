@@ -154,6 +154,11 @@ def _slim_derived_group_result(value: dict[str, Any]) -> dict[str, Any]:
         "excluded_entities",
         "relationships",
         "findings",
+        # row_filter(2026-07-24): 원본 그레인 유지 필터 결과 + EDA가 미리 계산한 전후 상관계수.
+        "total_rows",
+        "eligible_rows",
+        "excluded_rows",
+        "relationship_shift",
     }
     return {key: value[key] for key in allowed if key in value}
 

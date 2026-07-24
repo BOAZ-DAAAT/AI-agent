@@ -89,6 +89,19 @@ _SAFE_BUILTIN_NAMES = (
 )
 
 
+# SQL 에이전트의 MySQL 방언 검사(self_check.py의 _MYSQL_BANNED_PATTERNS)와 같은 목적 —
+# 실제 설치된 numpy(2.4.6, requirements.txt 고정)에서 이미 제거된 API를 LLM이 옛 기억으로
+# 계속 생성하는 걸 실행 전에 잡는다(2026-07-23 실사례: np.math AttributeError로 실행이
+# 두 번 다 죽음). np.float64/np.int64 같은 유효한 접미사 붙은 이름은 단어경계(\b)로 안 걸림.
+_REMOVED_NUMPY_APIS: tuple[tuple[str, str], ...] = (
+    (r"\bnp\.math\b", "np.math은 설치된 numpy 버전에서 제거됨 — math 표준 모듈 또는 scipy.stats/scipy.special을 사용하라"),
+    (r"\bnp\.float\b", "np.float은 설치된 numpy 버전에서 제거됨 — 내장 float 또는 np.float64를 사용하라"),
+    (r"\bnp\.int\b", "np.int는 설치된 numpy 버전에서 제거됨 — 내장 int 또는 np.int64를 사용하라"),
+    (r"\bnp\.bool\b", "np.bool은 설치된 numpy 버전에서 제거됨 — 내장 bool 또는 np.bool_을 사용하라"),
+    (r"\bnp\.object\b", "np.object는 설치된 numpy 버전에서 제거됨 — 내장 object 또는 np.object_를 사용하라"),
+    (r"\bnp\.str\b", "np.str은 설치된 numpy 버전에서 제거됨 — 내장 str 또는 np.str_를 사용하라"),
+)
+
 REQUIRED_RESULT_KEYS = ("summary", "findings", "statistics", "limitations")
 DEFAULT_CODE_EXEC_TIMEOUT_SECONDS = 600.0
 SMALL_MODELING_ROW_LIMIT = 10_000
@@ -326,6 +339,15 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
             f"{json.dumps(context.eda_derived_group_results, ensure_ascii=False, sort_keys=True)}\n"
             "If you test the same entity-level relationship, use the same entity grain, "
             "sample-size threshold, and columns unless the user asks otherwise.\n"
+            "If an entry has kind=='row_filter', the `df` you received IS ALREADY that filtered "
+            "subset (fewer rows than the original mart) — do not call it 'original'/'원본' and do "
+            "not re-apply your own outlier/IQR filter on top of it (you cannot reconstruct the "
+            "removed rows). If the entry has a 'relationship_shift' field (before/after "
+            "pearson/spearman for EDA's primary target/feature pair, computed by EDA from the true "
+            "original rows), cite those precomputed numbers directly instead of recomputing a "
+            "before-state yourself. Summarize it as a single reflect-the-condition sentence in "
+            "Korean, e.g. \"이상치를 제거한 상태를 반영하여 분석한 결과 상관관계가 -0.32에서 "
+            "-0.24로 약해지는 경향이 나타났습니다.\", not as a fabricated two-state comparison.\n"
         )
     if context.known_data_quality_issues:
         # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.
@@ -487,6 +509,16 @@ def inspect_generated_code(
         if re.search(pattern, lowered):
             return CodeExecutionPlan(
                 decision="blocked_unsafe",
+                risk_level="high",
+                reasons=[reason],
+                row_count=row_count,
+                column_count=column_count,
+            )
+
+    for pattern, reason in _REMOVED_NUMPY_APIS:
+        if re.search(pattern, lowered):
+            return CodeExecutionPlan(
+                decision="blocked_incompatible_api",
                 risk_level="high",
                 reasons=[reason],
                 row_count=row_count,
