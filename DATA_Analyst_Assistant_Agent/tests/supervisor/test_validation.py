@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
     empty_supervisor_state,
@@ -304,6 +306,45 @@ def test_validate_retry_boundary_allows_before_limit_and_fails_at_limit() -> Non
     assert retry_decision.next_action == "call_sql_agent"
     assert fail_decision.valid is False
     assert fail_decision.next_action == "fail"
+
+
+@pytest.mark.parametrize("agent_name", ["eda_agent", "analysis_agent"])
+def test_eda_and_analysis_validation_retry_budget_is_capped_at_one(
+    agent_name: str,
+) -> None:
+    state = _state()
+    state["max_retry_per_agent"] = 10
+    state["retry_counts"] = {agent_name: 1}
+    result = AgentCompactResult(
+        agent=agent_name,
+        status="failed",
+        summary=f"{agent_name} 실패",
+        retryable=True,
+        error="검증 실패",
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "reject"
+    assert decision.next_action == "fail"
+
+
+def test_sql_keeps_common_validation_retry_budget() -> None:
+    agent_name = "sql_agent"
+    state = _state()
+    state["max_retry_per_agent"] = 3
+    state["retry_counts"] = {agent_name: 1}
+    result = AgentCompactResult(
+        agent=agent_name,
+        status="failed",
+        summary=f"{agent_name} 실패",
+        retryable=True,
+        error="검증 실패",
+    )
+
+    decision = validate_subagent_result(state, result)
+
+    assert decision.decision == "retry"
 
 
 def test_validate_retryable_failure_fails_after_retry_limit() -> None:

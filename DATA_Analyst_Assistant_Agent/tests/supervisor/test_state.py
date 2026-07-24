@@ -45,7 +45,8 @@ def test_empty_supervisor_state_uses_compact_defaults() -> None:
     assert "validation_results" not in state
     assert "evidence_validation_results" not in state
     assert "semantic_validation_results" not in state
-    assert state["state_schema_version"] == 7
+    assert state["state_schema_version"] == 8
+    assert state["agent_execution_counts"] == {}
     assert state["retrieval_query"] == ""
     assert state["retrieval_query_generation"] == {"status": "not_started"}
     assert state["clarification_answers"] == []
@@ -113,7 +114,8 @@ def test_normalize_v2_validation_arrays_into_v4_history() -> None:
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["analysis_selection_response"] is None
     assert normalized["analysis_selection_review_request"] is None
     assert normalized["analysis_review_decisions"] == []
@@ -172,7 +174,8 @@ def test_normalize_v2_pending_approval_preserves_candidate_hashes() -> None:
         "expected_resume": {"approved": "boolean"},
     }
     assert normalized["pending_result"] == state["pending_result"]
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
 
 
 def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_history() -> None:
@@ -196,11 +199,33 @@ def test_normalize_v3_checkpoint_adds_semantic_recovery_fields_without_losing_hi
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["semantic_retry_counts"] == {"candidate_001": 1}
     assert normalized["semantic_recovery_attempts"] == {}
     assert normalized["limitations"] == []
     assert normalized["validation_history"] == state["validation_history"]
+
+
+def test_normalize_v8_checkpoint_preserves_agent_execution_counts() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_sales_001",
+        run_id="run_001",
+        user_query="월별 매출 추이를 분석해줘",
+        datasource_id="ds_001",
+    )
+    state["agent_execution_counts"] = {
+        "eda_agent": 1,
+        "analysis_agent": 2,
+    }
+
+    normalized = normalize_supervisor_state(state)
+
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {
+        "eda_agent": 1,
+        "analysis_agent": 2,
+    }
 
 
 def test_normalize_v4_analysis_approval_does_not_retrofit_native_review() -> None:
@@ -225,7 +250,8 @@ def test_normalize_v4_analysis_approval_does_not_retrofit_native_review() -> Non
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["analysis_selection_response"] is None
     assert normalized["analysis_selection_review_request"] is None
     assert normalized["analysis_review_decisions"] == []
@@ -248,7 +274,8 @@ def test_normalize_v6_checkpoint_adds_retrieval_fields() -> None:
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["retrieval_query"] == ""
     assert normalized["retrieval_query_generation"] == {"status": "not_started"}
     assert normalized["clarification_answers"] == []
@@ -269,7 +296,8 @@ def test_normalize_v6_checkpoint_preserves_retrieval_and_clarification_fields() 
 
     normalized = normalize_supervisor_state(state)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["clarification_answers"] == ["단일 판매자 기준으로 해줘"]
     assert normalized["retrieval_query"] == "단일 판매자 기준 seller 리뷰 배송 분석"
     assert normalized["retrieval_query_generation"] == {
@@ -836,7 +864,8 @@ def test_normalize_v1_checkpoint_quarantines_legacy_artifacts_without_accepting_
     normalized = normalize_supervisor_state(legacy)
     normalized_twice = normalize_supervisor_state(normalized)
 
-    assert normalized["state_schema_version"] == 7
+    assert normalized["state_schema_version"] == 8
+    assert normalized["agent_execution_counts"] == {}
     assert normalized["accepted_evidence"] == {}
     assert normalized["artifacts"] == {}
     assert normalized["completed_agents"] == []

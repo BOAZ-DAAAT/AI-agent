@@ -58,6 +58,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.state import (
     artifact_ids_by_agent,
     begin_or_retry_agent_node,
     fail_active_node,
+    normalize_supervisor_state,
     reject_pending_result,
     stage_candidate_result,
 )
@@ -78,6 +79,10 @@ from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
 )
 
 MAX_ANALYSIS_REVIEW_RESOLUTIONS = 2
+AGENT_EXECUTION_LIMITS: dict[AgentName, int] = {
+    "eda_agent": 2,
+    "analysis_agent": 2,
+}
 
 
 def _run_id_from_state(state: SupervisorState) -> str:
@@ -1217,9 +1222,76 @@ def make_execute_subagent_node(subagent_adapter: Any, model: Any | None):
                 f"지원하지 않는 subagent action입니다: {action}",
             )
 
+        normalized_state = normalize_supervisor_state(state)
+        execution_limit = AGENT_EXECUTION_LIMITS.get(agent_name)
+        execution_counts = dict(normalized_state.get("agent_execution_counts", {}))
+        execution_count = int(execution_counts.get(agent_name, 0))
+        if execution_limit is not None and execution_count >= execution_limit:
+            message = (
+                f"{agent_name} 실행 횟수 한도 {execution_limit}회에 도달해 "
+                "추가 호출을 차단했습니다."
+            )
+            limited_state = normalized_state
+            active_node_payload = limited_state.get("active_node")
+            if (
+                isinstance(active_node_payload, dict)
+                and active_node_payload.get("agent_name") == agent_name
+            ):
+                limited_state, failed_node, failed_event_type = fail_active_node(
+                    limited_state,
+                    agent_name=agent_name,
+                    reason=message,
+                    reason_code="agent_execution_limit_reached",
+                )
+                emit_node_lifecycle_event(
+                    getattr(subagent_adapter, "backend_adapter", None),
+                    limited_state,
+                    failed_event_type,
+                    failed_node,
+                    message,
+                    action=action,
+                    metadata={
+                        "reason_code": "agent_execution_limit_reached",
+                        "execution_count": execution_count,
+                        "execution_limit": execution_limit,
+                    },
+                )
+            failed_agents = list(limited_state.get("failed_agents", []))
+            if agent_name not in failed_agents:
+                failed_agents.append(agent_name)
+            return {
+                **limited_state,
+                **_terminal_failure_updates(
+                    limited_state,
+                    "execute_subagent",
+                    message,
+                    extra_updates={
+                        "terminal_state": (
+                            SupervisorTerminalState.failed_with_recoverable_context.value
+                        ),
+                        "pending_result": None,
+                        "last_agent_result": {},
+                        "failed_agents": failed_agents,
+                        "error_state": {
+                            "node": "execute_subagent",
+                            "message": message,
+                            "reason_code": "agent_execution_limit_reached",
+                            "agent": agent_name,
+                            "execution_count": execution_count,
+                            "execution_limit": execution_limit,
+                            "retryable": False,
+                        },
+                    },
+                ),
+            }
+
+        if execution_limit is not None:
+            execution_counts[agent_name] = execution_count + 1
+            normalized_state["agent_execution_counts"] = execution_counts
+
         working_state, active_node, activation_event_type = (
             begin_or_retry_agent_node(
-                state,
+                normalized_state,
                 agent_name,
             )
         )

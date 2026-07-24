@@ -51,6 +51,8 @@ def _capped_fail_state() -> dict:
 
 
 def test_capped_deterministic_failure_surfaces_as_caution() -> None:
+    assert MAX_VALIDATION_RETRIES == 1
+
     update = validator_node(_capped_fail_state())
 
     assert update["validation_result"]["status"] == "pass"

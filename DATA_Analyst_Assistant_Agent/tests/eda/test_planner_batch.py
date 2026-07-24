@@ -95,6 +95,8 @@ def test_empty_batch_rejects_invalid_single_choice(monkeypatch):
 
 
 def test_batch_filters_invalid_items_and_caps_at_max_analyses(monkeypatch):
+    assert planner_mod.MAX_ANALYSES == 5
+
     fake_llm = _FakeLLM([json.dumps({
         "next_batch": ["comparison", "not_a_real_tool", "distribution", "relationship",
                        "clustering", "quality", "time"],  # 존재하지 않는 카드 + feasible 아닌 time 섞임

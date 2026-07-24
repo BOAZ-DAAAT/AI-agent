@@ -115,7 +115,7 @@ def analyze_node(state: AnalysisWorkflowState) -> dict[str, Any]:
             state["dataframe"],
             code_generator_model=state.get("code_generator_model"),
             critic_model=state.get("critic_model"),
-            max_attempts=state["orchestration_state"].max_retry_per_agent + 1,
+            max_attempts=2,
             progress_callback=state.get("progress_callback"),
         )
         return {"outcome": outcome, "error": "", "terminal_reason": ""}

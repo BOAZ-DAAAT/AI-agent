@@ -121,6 +121,17 @@ _AGENT_CALL_ACTIONS: dict[AgentName, NextAction] = {
     "analysis_agent": "call_analysis_agent",
     "insight": "call_insight",
 }
+_SUPERVISOR_RETRY_LIMITS: dict[AgentName, int] = {
+    "eda_agent": 1,
+    "analysis_agent": 1,
+}
+
+
+def _max_retry_for_agent(state: SupervisorState, agent: AgentName) -> int:
+    common_limit = max(int(state.get("max_retry_per_agent", 0)), 0)
+    agent_limit = _SUPERVISOR_RETRY_LIMITS.get(agent)
+    return common_limit if agent_limit is None else min(common_limit, agent_limit)
+
 
 _KNOWN_AGENTS: set[AgentName] = {
     "sql_agent", "eda_agent", "analysis_agent", "insight",
@@ -271,7 +282,7 @@ def validate_subagent_result(
 
     if retry_findings:
         retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
-        max_retry = int(state.get("max_retry_per_agent", 0))
+        max_retry = _max_retry_for_agent(state, result.agent)
         if retry_count < max_retry:
             return ResultValidationDecision(
                 valid=False,
@@ -379,7 +390,7 @@ def _route_explicit_failure(
         )
 
     retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
-    max_retry = int(state.get("max_retry_per_agent", 0))
+    max_retry = _max_retry_for_agent(state, result.agent)
     retryable = bool(result.retryable or result.retry_hint.retryable)
     if not repeated_failure and retryable and retry_count < max_retry:
         next_action = _AGENT_CALL_ACTIONS[result.agent]
@@ -460,7 +471,7 @@ def _route_invalid_result(
     fallback_used: bool,
 ) -> ResultValidationDecision:
     retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
-    max_retry = int(state.get("max_retry_per_agent", 0))
+    max_retry = _max_retry_for_agent(state, result.agent)
     detail = _invalid_reason_detail(
         result,
         has_validation_errors=has_validation_errors,

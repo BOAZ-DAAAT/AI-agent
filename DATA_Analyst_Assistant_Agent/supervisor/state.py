@@ -187,6 +187,7 @@ class SupervisorState(TypedDict, total=False):
     generated_sql: str
     error_state: dict[str, Any]
     retry_counts: dict[str, int]
+    agent_execution_counts: dict[str, int]
     failure_streaks: dict[str, dict[str, Any]]
     max_retry_per_agent: int
     llm_decisions: list[dict[str, Any]]
@@ -264,6 +265,7 @@ def empty_supervisor_state(
         "generated_sql": "",
         "error_state": {},
         "retry_counts": {},
+        "agent_execution_counts": {},
         "failure_streaks": {},
         "max_retry_per_agent": 2,
         "llm_decisions": [],
@@ -274,7 +276,7 @@ def empty_supervisor_state(
         "accepted_evidence": {},
         "rejected_results": [],
         "quarantined_artifacts": [],
-        "state_schema_version": 7,
+        "state_schema_version": 8,
         "semantic_retry_counts": {},
         "semantic_recovery_attempts": {},
         "limitations": [],
@@ -515,6 +517,14 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             0,
         )
 
+        agent_execution_counts = (
+            {
+                str(agent): max(int(count or 0), 0)
+                for agent, count in state.get("agent_execution_counts", {}).items()
+            }
+            if schema_version >= 8
+            else {}
+        )
 
         normalized: SupervisorState = {
             **state,
@@ -536,7 +546,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
             },
             "run_events": list(state.get("run_events", [])),
             "validation_history": validation_history,
-            "state_schema_version": 7,
+            "state_schema_version": 8,
+            "agent_execution_counts": agent_execution_counts,
             "artifacts": {agent: list(items) for agent, items in accepted_evidence.items()},
             "completed_agents": completed_agents,
             "analysis_selection_response": (
@@ -583,7 +594,8 @@ def normalize_supervisor_state(state: SupervisorState) -> SupervisorState:
         "active_node": None,
         "last_completed_node_id": None,
         "node_sequence": 0,
-        "state_schema_version": 7,
+        "state_schema_version": 8,
+        "agent_execution_counts": {},
         "validation_history": [],
         "pending_result": None,
         "result_history": list(state.get("result_history", [])),

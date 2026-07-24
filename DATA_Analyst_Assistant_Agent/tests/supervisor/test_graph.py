@@ -1395,6 +1395,81 @@ def test_execute_subagent_emits_agent_lifecycle_events() -> None:
     assert result["active_node"]["status"] == "running"
 
 
+@pytest.mark.parametrize(
+    ("agent_name", "action"),
+    [
+        ("eda_agent", "call_eda_agent"),
+        ("analysis_agent", "call_analysis_agent"),
+    ],
+)
+@pytest.mark.parametrize("status", ["success", "failed"])
+def test_execute_subagent_allows_two_calls_and_blocks_third(
+    agent_name: str,
+    action: str,
+    status: str,
+) -> None:
+    adapter = FakeSubAgentAdapter(
+        {
+            agent_name: AgentToolResult(
+                agent_result=AgentCompactResult(
+                    agent=agent_name,
+                    status=status,
+                    summary=f"{agent_name} {status}",
+                )
+            )
+        }
+    )
+    node = make_execute_subagent_node(adapter, None)
+    state = _state()
+
+    for expected_count in (1, 2):
+        state["next_action"] = action
+        result = node(state)
+        assert result["agent_execution_counts"][agent_name] == expected_count
+        state = {
+            **result,
+            "pending_result": None,
+            "active_node": None,
+            "terminal_state": "running",
+        }
+
+    state["next_action"] = action
+    blocked = node(state)
+
+    assert adapter.calls == [agent_name, agent_name]
+    assert blocked["terminal_state"] == "failed_with_recoverable_context"
+    assert blocked["error_state"]["reason_code"] == "agent_execution_limit_reached"
+    assert blocked["agent_execution_counts"][agent_name] == 2
+
+
+@pytest.mark.parametrize(
+    "active_status",
+    ["running", "waiting"],
+    ids=["semantic_recovery", "analysis_review"],
+)
+def test_analysis_execution_limit_blocks_review_and_semantic_recovery_paths(
+    active_status: str,
+) -> None:
+    adapter = FakeSubAgentAdapter()
+    state = _state()
+    state["next_action"] = "call_analysis_agent"
+    state["agent_execution_counts"] = {"analysis_agent": 2}
+    state, _, _ = begin_or_retry_agent_node(state, "analysis_agent")
+    if active_status == "waiting":
+        state, _, _ = wait_active_node(
+            state,
+            agent_name="analysis_agent",
+            reason="사용자 분석 검토 응답 대기",
+        )
+
+    result = make_execute_subagent_node(adapter, None)(state)
+
+    assert adapter.calls == []
+    assert result["terminal_state"] == "failed_with_recoverable_context"
+    assert result["error_state"]["reason_code"] == "agent_execution_limit_reached"
+    assert result["active_node"] is None
+
+
 def test_execute_subagent_discards_active_node_when_cancelled_after_call() -> None:
     backend = CancellableRecordingBackendAdapter()
     adapter = FakeSubAgentAdapter()
@@ -1469,6 +1544,7 @@ def test_execute_subagent_general_exception_emits_failed_lifecycle_event() -> No
     assert result["next_action"] == "finalize"
     assert result["error_state"]["reason_code"] == "agent_execution_error"
     assert result["error_state"]["exception_type"] == "TimeoutError"
+    assert result["agent_execution_counts"] == {"eda_agent": 1}
     event_pairs = [
         (event["event_type"], event["node_name"])
         for event in adapter.backend_adapter.events
