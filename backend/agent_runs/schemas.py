@@ -57,6 +57,13 @@ class AgentRunDeleteResponse(BaseModel):
     deleted_artifact_count: int
 
 
+class AgentSessionRunsDeleteResponse(BaseModel):
+    session_id: str
+    deleted_run_count: int
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
 class AgentRunCancelResponse(BaseModel):
     run_id: str
     status: Literal["cancelled"]

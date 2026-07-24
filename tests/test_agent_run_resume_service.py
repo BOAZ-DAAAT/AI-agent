@@ -124,9 +124,27 @@ def test_resume_agent_run_approval_passes_approved_true(tmp_path, monkeypatch) -
     run = services.run_service.create_run(
         thread_id="thread_approval",
         project_id="sess_001",
-        metadata={"resumed_from": "approval"},
+        metadata={
+            "resumed_from": "approval",
+            "approval_id": "run_x:analysis_agent:approval",
+        },
     )
     services.run_service.update_status(run.run_id, "running")
+    services.run_service.append_event(
+        run.run_id,
+        "agent.waiting",
+        "분석 기준을 승인해 주세요.",
+        node_name="analysis_agent",
+        approval_id="run_x:analysis_agent:approval",
+        metadata={
+            "node_id": f"{run.run_id}:node:3",
+            "agent_name": "analysis_agent",
+            "parent_node_id": f"{run.run_id}:node:2",
+            "node_sequence": 3,
+            "attempt": 1,
+            "status": "waiting",
+        },
+    )
     session = SimpleNamespace(id="sess_001", session_db="session_db")
     seen: dict[str, object] = {}
 
@@ -156,11 +174,14 @@ def test_resume_agent_run_approval_passes_approved_true(tmp_path, monkeypatch) -
     )
 
     assert seen["payload"] == {"approved": True}
-    event = services.run_service.list_events(run.run_id)[0]
+    event = services.run_service.list_events(run.run_id)[-1]
     assert event.event_type == "human_input.resumed"
-    # 승인 대기는 노드 이름을 metadata에 안 남기니 기본값(supervisor)으로 떨어진다.
-    assert event.node_name == "supervisor"
+    assert event.node_name == "analysis_agent"
+    assert event.approval_id == "run_x:analysis_agent:approval"
     assert event.metadata["interrupt_type"] == "approval"
+    assert event.metadata["node_id"] == f"{run.run_id}:node:3"
+    assert event.metadata["parent_node_id"] == f"{run.run_id}:node:2"
+    assert event.metadata["approved"] is True
 
 
 def test_resume_agent_run_approval_passes_approved_false_with_reason(tmp_path, monkeypatch) -> None:

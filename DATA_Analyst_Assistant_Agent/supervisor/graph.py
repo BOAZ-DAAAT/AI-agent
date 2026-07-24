@@ -38,6 +38,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.decision import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import (
     emit_node_lifecycle_event,
+    emit_supervisor_selection_started,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.prompts import (
     ANALYSIS_RULE_EXTRACTION_PROMPT,
@@ -1110,10 +1111,23 @@ def _fallback_analysis_plan_from_state(state: SupervisorState) -> dict[str, Any]
     }
 
 
-def make_decide_next_action_node(model: Any | None):
+def make_decide_next_action_node(
+    model: Any | None,
+    backend_adapter: Any | None = None,
+):
     def decide_next_action_node(state: SupervisorState) -> SupervisorState:
         if state.get("terminal_state") in TERMINAL_STATES:
             return {"next_action": "finalize", "current_step": "decide_next_action"}
+
+        run_id = _run_id_from_state(state)
+        if run_id:
+            emit_supervisor_selection_started(
+                backend_adapter,
+                run_id=run_id,
+                node_sequence=int(state.get("node_sequence", 0) or 0) + 1,
+                parent_node_id=state.get("last_completed_node_id"),
+                selection_reason="next_action",
+            )
 
         try:
             decision = invoke_supervisor_decision(
@@ -1705,7 +1719,10 @@ def build_graph(
     add_node("clarify_query", make_clarify_query_node(model))
     add_node("collect_clarification", make_collect_clarification_node())
     add_node("create_analysis_plan", make_create_analysis_plan_node(model))
-    add_node("decide_next_action", make_decide_next_action_node(model))
+    add_node(
+        "decide_next_action",
+        make_decide_next_action_node(model, backend_adapter),
+    )
     add_node("completion_guard", make_completion_guard_node())
     add_node("execute_subagent", make_execute_subagent_node(subagent_adapter, model))
     add_node("generate_insight", make_generate_insight_node(insight_generator))
