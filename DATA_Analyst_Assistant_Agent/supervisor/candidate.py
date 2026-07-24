@@ -163,7 +163,7 @@ def validate_candidate(
     contract_decision = validate_subagent_result(state, result)
     checks.append(contract_check_from_decision(result, contract_decision))
     outcome = outcome_from_contract_decision(result.agent, contract_decision)
-    if outcome.disposition in {"retry", "reject"}:
+    if outcome.disposition in {"retry", "clarify", "reject"}:
         return _validation_updates(pending, result, checks, outcome)
 
     updated_pending = dict(pending)
@@ -567,6 +567,37 @@ def commit_candidate(
             backend_adapter,
             already_committed=already_committed,
         )
+
+    if disposition == "clarify":
+        rejected = reject_pending_result(
+            working,
+            record.outcome.reason,
+            metadata={
+                "agent": record.agent,
+                "reason_code": record.outcome.reason_code,
+                "disposition": disposition,
+            },
+        )
+        question = str(
+            result.retry_hint.details.get("clarification_question")
+            or "분석할 기간, 핵심 지표, 집계 단위를 구체적으로 알려주세요."
+        ).strip()
+        rejected.update(
+            {
+                "pending_validation": None,
+                "current_step": "commit_candidate",
+                "active_node": None,
+                "next_action": "clarify",
+                "terminal_state": "running",
+                "needs_clarification": True,
+                "clarification_question": question,
+                "clarification_input_mode": "free_text",
+                "clarification_options": [],
+                "clarification_allow_free_text": True,
+                "sql_clarification_count": int(working.get("sql_clarification_count", 0) or 0) + 1,
+            }
+        )
+        return rejected
 
     if disposition in {"retry", "reject"}:
         rejected = reject_pending_result(

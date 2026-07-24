@@ -52,6 +52,24 @@ def _normalize_mart_design_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if str(table).strip()
         }
     normalized["column_plan"] = _repair_empty_source_columns(normalized.get("column_plan"))
+    unimplemented = normalized.get("unimplemented_derivations")
+    if isinstance(unimplemented, list):
+        normalized["unimplemented_derivations"] = [
+            {
+                **item,
+                "name": str(
+                    item.get("name")
+                    or item.get("preferred_name")
+                    or item.get("output_column")
+                    or ""
+                ).strip(),
+                "required_columns": _normalize_column_list(
+                    item.get("required_columns") or item.get("source_columns")
+                ),
+            }
+            for item in unimplemented
+            if isinstance(item, dict)
+        ]
     return normalized
 
 
@@ -123,10 +141,48 @@ def _validate_target_metric_support(design: MartDesign, plan: dict[str, Any]) ->
         )
 
 
-def validate_mart_design_state(payload: dict[str, Any], plan: dict[str, Any]) -> MartDesign:
+def _validate_required_derivation_coverage(
+    design: MartDesign,
+    required_derivations: list[dict[str, Any]],
+) -> None:
+    expected_names = [
+        str(item.get("preferred_name") or item.get("name") or "").strip()
+        for item in required_derivations
+    ]
+    if any(not name for name in expected_names):
+        raise ValueError("required_derivations의 name 또는 preferred_name이 비어 있습니다")
+    if len(set(expected_names)) != len(expected_names):
+        raise ValueError("required_derivations의 preferred_name은 중복될 수 없습니다")
+
+    implemented_names = {item.output_column for item in design.column_plan}
+    unimplemented_names = {item.name for item in design.unimplemented_derivations}
+    missing = [
+        name
+        for name in expected_names
+        if name not in implemented_names and name not in unimplemented_names
+    ]
+    duplicated = [
+        name
+        for name in expected_names
+        if name in implemented_names and name in unimplemented_names
+    ]
+    if missing or duplicated:
+        raise ValueError(
+            "required_derivations는 column_plan.output_column 또는 "
+            "unimplemented_derivations 중 정확히 한 곳에 있어야 합니다: "
+            f"missing={missing}, duplicated={duplicated}"
+        )
+
+
+def validate_mart_design_state(
+    payload: dict[str, Any],
+    plan: dict[str, Any],
+    required_derivations: list[dict[str, Any]] | None = None,
+) -> MartDesign:
     """저장되었거나 새로 생성된 마트 설계가 현재 계약과 계획을 만족하는지 확인한다."""
     design = MartDesign(**_normalize_mart_design_payload(payload))
     _validate_target_metric_support(design, plan)
+    _validate_required_derivation_coverage(design, list(required_derivations or []))
     return design
 
 
@@ -214,7 +270,11 @@ def design_mart(state: AgentState):
 
     normalized = normalize_mart_column_lists(_normalize_mart_design_payload(parsed))
     try:
-        design = validate_mart_design_state(normalized, state.get("plan") or {})
+        design = validate_mart_design_state(
+            normalized,
+            state.get("plan") or {},
+            list(state.get("required_derivations") or []),
+        )
     except Exception as exc:
         return _mart_design_failure(
             reason_code="invalid_mart_design_payload",

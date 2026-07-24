@@ -13,6 +13,7 @@ REPAIR_STRATEGY_BY_MYSQL_CODE = {
     1055: "rewrite_aggregation",  # GROUP BY 계약 위반
     1111: "rewrite_aggregation",  # Invalid use of group function
     1140: "rewrite_aggregation",  # 집계 컬럼과 비집계 컬럼 혼용
+    1235: "rewrite_aggregation",  # This MySQL version does not support the requested aggregate/window syntax
     1064: "rewrite_syntax",  # SQL syntax error
     1066: "rewrite_syntax",  # Not unique table/alias
     1109: "rewrite_syntax",  # Unknown table(alias 참조 오류 포함)
@@ -46,6 +47,9 @@ STRATEGY_PATTERNS = {
         r"mixing of group columns",
         r"isn't in group by",
         r"not in group by",
+        r"doesn't yet support .*window function",
+        r"does not support .*window function",
+        r"unsupported .*window function",
     ),
     "rewrite_syntax": (
         r"not unique table/alias",

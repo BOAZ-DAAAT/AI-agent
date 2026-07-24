@@ -153,6 +153,8 @@ def repair_sql_prompt(state: dict[str, Any], previous_sql_draft: dict[str, Any])
 - simple 다중 statement에서는 성공한 statement를 유지하고 실패 statement만 우선 수정할 것
 - 전체 SQLDraft를 반환하되 실패와 무관한 필드는 가능한 한 유지할 것
 - MySQL 문법만 사용하고 반드시 JSON object만 출력할 것
+- MySQL에서 지원하지 않는 문법 또는 기능 오류가 발생하면 같은 grain과 출력 컬럼을 유지하면서 보수적인 CTE / 서브쿼리 / GROUP BY 구조로 재작성할 것
+- row-level 출력과 grouped metric이 함께 필요하면 grouped metric을 별도 CTE에서 먼저 계산하고 JOIN할 것
 
 출력 형식은 이전 SQLDraft와 동일하다.
 """.strip()
