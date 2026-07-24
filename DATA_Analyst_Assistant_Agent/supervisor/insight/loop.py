@@ -20,10 +20,12 @@ from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import run_chart, run
 from DATA_Analyst_Assistant_Agent.supervisor.insight.validator import validate_result
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
-MAX_ROUNDS = 8                                        # LLM 호출 상한 (배회 방지)
+MAX_ROUNDS = 4                                        # LLM 호출 상한 (배회 방지)
 MAX_EMPTY_FINISH = 2                                  # 빈 answer 로 finish 시도 허용 횟수
 MAX_FAIL_STREAK = 3                                   # 연속 실패(거부·반복·파싱) 시 조기 폴백 — 토큰 낭비 방지
 _OBS_CHARS = 700                                      # 관찰 1건당 프롬프트 상한
+KEY_INSIGHTS_TARGET = "4~6"
+MAX_KEY_INSIGHTS = 10
 
 # 게이트 거부 시 교정 힌트(거부당할 관용구는 미리/즉시 알려준다)
 _GATE_FIX_HINT = ("→ 수정: 단일 표현식만. comprehension·lambda·query·eval·apply·merge 금지. "
@@ -131,7 +133,7 @@ def _try_finish(pack: EvidencePack, args: dict, computes: list, charts: list[Cha
                 steps: list[dict], round_idx: int) -> tuple[InsightResult | None, list[str]]:
     """finish 제안을 결과로 변환한다. answer 가 비어 있을 때만 거부한다(숫자 검증 없음)."""
     answer = str(args.get("answer", "")).strip()
-    key_insights = [str(s) for s in (args.get("key_insights") or [])]
+    key_insights = [str(s) for s in (args.get("key_insights") or [])][:MAX_KEY_INSIGHTS]
     action_plan = [str(s) for s in (args.get("action_plan") or [])]
     limitations = [str(s) for s in (args.get("limitations") or [])]
     if not answer:
@@ -166,7 +168,8 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
     pressure = ("\n⚠️ 라운드가 거의 소진됐다. look 을 더 하지 말고, 필요하면 compute 한 번 뒤 즉시 finish 하라."
                 if round_idx >= MAX_ROUNDS - 3 else "")
     return f"""너는 데이터 분석 파이프라인 '마지막'의 인사이트 에이전트다. 상류(SQL/EDA/분석)가 만든
-검증된 증거를 읽고 사용자 질문에 직답하는 결론을 구성한다. 새 통계분석을 하는 자리가 아니다.
+검증된 증거를 읽고 사용자 질문에 답하되, 단순 직답을 넘어 분석 결과에서 드러난 의미 있는 패턴·차이·세그먼트·이상치·불확실성·함의를 종합한다.
+새 통계분석을 하는 자리는 아니며, 상류 SQL/EDA/분석 결과를 해석 가능한 인사이트로 번역하는 마지막 단계다.
 
 [사용자 질문] {pack.user_question}
 [경로] {pack.route_kind}
@@ -188,18 +191,23 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
   · 조건 필터는 불리언 마스크 + df.loc[...]. '그룹 N건 이상' 필터는
     df.loc[df.groupby('그룹컬럼')['컬럼'].transform('size')>=N] 패턴을 쓰라.
   · 'X 이상 비율' 류는 lambda 없이 df['수치'].ge(X).groupby(df['그룹컬럼']).mean() 패턴을 쓰라.
-- chart: 답을 뒷받침하는 차트 주문(렌더는 코드가 함).
+- chart: 분석 기법 결과를 보고서에서 이해할 수 있게 표현하는 차트 주문(렌더는 코드가 함).
   args={{"expression":"차트 데이터 표현식","kind":"line|bar|grouped_bar|table","title":"제목",
   "x":"라벨 컬럼(선택)","y":"그릴 값 컬럼명 또는 리스트(선택)"}}
+  · 클러스터링의 군집 프로파일, 로지스틱 회귀의 계수/odds ratio, 생존분석의 생존곡선처럼 분석 결과를 설명하는 시각화가 필요할 때만 만든다.
+  · 단순 요약/순위 차트는 기존 EDA/분석 차트가 충분하면 새로 만들지 않는다.
+  · 차트는 최대 1개를 우선하고, 실패하면 재시도하지 말고 차트 없이 finish 한다.
   · **y는 제목이 말하는 지표와 반드시 일치시켜라** (제목 '총 금액'인데 건수 컬럼을 그리는 사고 방지)
   · 여러 지표의 '특성' 비교면 grouped_bar 또는 table, 시간 컬럼이 있으면 추세 line 도 고려하라
-- finish: 답 제출. args={{"answer":"질문 직답 1~3문장","key_insights":["핵심 인사이트"],"action_plan":["근거 있는 권고(없으면 빈 배열)"],"limitations":["해석 한계"]}}
+- finish: 답 제출. args={{"answer":"질문에 대한 핵심 결론 1~3문장","key_insights":["분석 인사이트"],"action_plan":["근거 있는 권고(없으면 빈 배열)"],"limitations":["해석 한계"]}}
 
 [정책 — 품질 심사(validate_result)가 이걸 본다]
 - 가급적 위 증거 요약·look·compute 결과에 등장한 숫자를 써라. 새 숫자가 필요하면 compute 로 계산하라.
   (예: df.groupby('범주컬럼')['수치컬럼'].mean().nlargest(10) — look 을 반복하는 대신 계산하라)
 - 상관을 인과로 단정하지 마라("~때문에" 대신 "~와 연관").
 - action_plan 은 증거로 뒷받침될 때만 채워라. 억지로 만들지 마라.
+- key_insights는 보통 {KEY_INSIGHTS_TARGET}개를 목표로 하고 최대 {MAX_KEY_INSIGHTS}개까지 작성한다. 개수를 채우기 위해 중복되거나 근거 약한 항목을 만들지 마라.
+- key_insights는 answer의 반복이 아니라 사용자가 새롭게 알 수 있는 분석적 발견이어야 한다. 단순 수치 나열보다 패턴·차이·세그먼트·이상치·불확실성·비즈니스적 함의를 우선한다.
 - answer 가 비교·순위·추세라면 finish 전에 그것을 증명하는 chart 를 1개 만들어라. 그 외엔 생략 가능.
 - 차트는 answer 의 핵심 주장과 1:1 로 대응해야 한다: answer 가 여러 지표(평균·중앙값·건수·비율 등)의
   '특성'을 말하면 단일 지표 bar 가 아니라 **다지표 table 또는 grouped 형태**로 그 특성이 보이게 하라.
