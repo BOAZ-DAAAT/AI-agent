@@ -72,6 +72,84 @@ def test_resume_agent_run_uses_existing_thread_checkpoint_and_emits_resumed_even
     assert "answer" not in event.metadata
 
 
+def test_resume_agent_run_clarification_preserves_active_node_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path)
+    run = services.run_service.create_run(
+        thread_id="thread_resume",
+        project_id="sess_001",
+        metadata={
+            "interrupt_type": "clarification",
+            "node": "collect_clarification",
+            "resumed_from": "clarification",
+        },
+    )
+    services.run_service.update_status(run.run_id, "running")
+    node_id = f"{run.run_id}:node:2"
+    parent_node_id = f"{run.run_id}:node:1"
+    services.run_service.append_event(
+        run.run_id,
+        "agent.progress",
+        "SQL 조건을 확인하고 있습니다.",
+        node_name="sql_agent",
+        metadata={
+            "node_id": node_id,
+            "agent_name": "sql_agent",
+            "parent_node_id": parent_node_id,
+            "node_sequence": 2,
+            "attempt": 1,
+            "status": "running",
+        },
+    )
+    required_event = services.run_service.append_event(
+        run.run_id,
+        "human_input.required",
+        "분석 기간을 알려주세요.",
+        node_name="collect_clarification",
+        metadata={
+            "interrupt_type": "clarification",
+            "node": "collect_clarification",
+        },
+    )
+    session = SimpleNamespace(id="sess_001", session_db="session_db")
+
+    class FakeAdapter:
+        def __init__(self, *, services, session, catalog_summary) -> None:
+            self.base_data_dir = tmp_path / ".data_agent"
+
+    class FakeSupervisor:
+        def __init__(self, adapter, checkpoint_path) -> None:
+            pass
+
+        def resume(self, thread_id, payload):
+            return {"terminal_state": "running"}
+
+    monkeypatch.setattr("backend.agent_runs.service.build_session_catalog_summary", lambda session: {"orders": {}})
+    monkeypatch.setattr("backend.agent_runs.service.SessionBoundBackendAdapter", FakeAdapter)
+    monkeypatch.setattr("backend.agent_runs.service.SupervisorAgent", FakeSupervisor)
+    monkeypatch.setattr("backend.agent_runs.service.bind_session_database", lambda session: nullcontext())
+
+    resume_agent_run(
+        services=services,
+        session=session,
+        resume_payload={"answer": "최근 6개월"},
+        run_id=run.run_id,
+        thread_id="thread_resume",
+    )
+
+    event = services.run_service.list_events(run.run_id)[-1]
+    assert event.event_type == "human_input.resumed"
+    assert event.event_key == f"human-input:{required_event.event_id}:resumed"
+    assert event.node_name == "sql_agent"
+    assert event.metadata["node_id"] == node_id
+    assert event.metadata["parent_node_id"] == parent_node_id
+    assert event.metadata["node_sequence"] == 2
+    assert event.metadata["agent_name"] == "sql_agent"
+    assert event.metadata["interrupt_type"] == "clarification"
+
+
 def test_resume_agent_run_analysis_review_passes_selection_payload(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     run = services.run_service.create_run(
