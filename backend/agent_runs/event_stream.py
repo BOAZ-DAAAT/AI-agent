@@ -13,6 +13,7 @@ from data_agent_backend.models.runs import TERMINAL_RUN_STATUSES, RunEvent
 
 EVENT_STREAM_POLL_INTERVAL_SECONDS = 0.5
 EVENT_STREAM_HEARTBEAT_SECONDS = 15.0
+EVENT_STREAM_MAX_CONNECTION_SECONDS = 10.0
 
 
 def sse_message(
@@ -55,11 +56,13 @@ async def stream_run_events(
     last_event_id: str | None,
     *,
     poll_interval: float,
+    max_connection_seconds: float = EVENT_STREAM_MAX_CONNECTION_SECONDS,
 ) -> AsyncIterator[str]:
     initial_events = await asyncio.to_thread(run_service.list_events, run_id)
     seen_ids = seen_event_ids(initial_events, last_event_id)
     terminal_idle_polls = 0
-    last_heartbeat = time.monotonic()
+    connection_started = time.monotonic()
+    last_heartbeat = connection_started
 
     while True:
         if await request.is_disconnected():
@@ -88,6 +91,10 @@ async def stream_run_events(
             terminal_idle_polls = 0
 
         now = time.monotonic()
+        # Uvicorn reload가 장기 SSE 종료를 무한히 기다리지 않도록 연결을 주기적으로 교체한다.
+        # 클라이언트는 마지막 event_id를 커서로 자동 재연결하므로 이벤트는 유실되지 않는다.
+        if now - connection_started >= max_connection_seconds:
+            return
         if now - last_heartbeat >= EVENT_STREAM_HEARTBEAT_SECONDS:
             yield ": heartbeat\n\n"
             last_heartbeat = now
