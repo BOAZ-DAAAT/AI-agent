@@ -6,9 +6,16 @@ from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model, get_model_na
 
 def test_get_model_name_prefers_specific_env(monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("CHART_READER_MODEL", "openai/gpt-5")
+    monkeypatch.setenv("CHART_READER_MODEL", "env-chart-model")
 
-    assert get_model_name("CHART_READER_MODEL", "fallback-model") == "openai/gpt-5"
+    assert get_model_name("CHART_READER_MODEL", "fallback-model") == "env-chart-model"
+
+
+def test_get_model_name_falls_back_to_llm_model_for_role_env(monkeypatch) -> None:
+    monkeypatch.delenv("CHART_READER_MODEL", raising=False)
+    monkeypatch.setenv("LLM_MODEL", "env-default-model")
+
+    assert get_model_name("CHART_READER_MODEL") == "env-default-model"
 
 
 def test_get_model_name_falls_back_to_default(monkeypatch) -> None:
@@ -16,6 +23,17 @@ def test_get_model_name_falls_back_to_default(monkeypatch) -> None:
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
     assert get_model_name("LLM_MODEL", "fallback-model") == "fallback-model"
+
+
+def test_get_model_name_requires_env_without_default(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    try:
+        get_model_name("LLM_MODEL")
+    except ValueError as exc:
+        assert "LLM_MODEL" in str(exc)
+    else:
+        raise AssertionError("expected missing model env to raise ValueError")
 
 
 def test_get_chat_model_sets_default_request_timeout(monkeypatch) -> None:

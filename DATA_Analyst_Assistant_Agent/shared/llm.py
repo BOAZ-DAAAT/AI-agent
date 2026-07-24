@@ -12,23 +12,33 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_LLM_MODEL = "~openai/gpt-5"
+DEFAULT_LLM_MODEL = ""
 DEFAULT_LLM_TIMEOUT_SECONDS = 90.0
 DEFAULT_LLM_MAX_TOKENS = 12288
 
 
-def get_model_name(env_name: str = "LLM_MODEL", default: str = DEFAULT_LLM_MODEL) -> str:
-    return os.getenv(env_name) or default
+def get_model_name(env_name: str = "LLM_MODEL", default: str | None = DEFAULT_LLM_MODEL) -> str:
+    model_name = os.getenv(env_name)
+    if model_name:
+        return model_name
+    if env_name != "LLM_MODEL":
+        model_name = os.getenv("LLM_MODEL")
+        if model_name:
+            return model_name
+    if default:
+        return default
+    raise ValueError(f"{env_name} or LLM_MODEL must be set for LLM calls.")
 
 
 def get_chat_model(
     *,
     model: str | None = None,
     model_env: str = "LLM_MODEL",
-    default_model: str = DEFAULT_LLM_MODEL,
+    default_model: str | None = DEFAULT_LLM_MODEL,
     temperature: float = 0,
     **kwargs: Any,
 ) -> Any:
+    resolved_model = model or get_model_name(model_env, default_model)
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
     google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -36,7 +46,7 @@ def get_chat_model(
     if not api_key:
         if google_key:
             return ChatGoogleGenerativeAI(
-                model=model or get_model_name(model_env, default_model),
+                model=resolved_model,
                 temperature=temperature,
                 google_api_key=google_key,
                 **kwargs,
@@ -54,7 +64,7 @@ def get_chat_model(
         headers["X-OpenRouter-Title"] = os.getenv("OPENROUTER_APP_TITLE", "")
 
     params: dict[str, Any] = {
-        "model": model or get_model_name(model_env, default_model),
+        "model": resolved_model,
         "temperature": temperature,
         "api_key": api_key,
         "request_timeout": float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),

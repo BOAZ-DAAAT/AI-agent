@@ -224,7 +224,7 @@ def _default_multimodal_chart_reader(
                                "GPT multimodal chart reader is not configured.")
                 for item in chart_images]
 
-    model = get_chat_model(model_env="CHART_READER_MODEL", default_model="gpt-5")
+    model = get_chat_model(model_env="CHART_READER_MODEL")
     prompt = (
         "아래 차트들을 각각 데이터 분석 근거로 읽어줘. "
         "차트 유형, 축/범례, 눈에 띄는 패턴, 이상치/군집/꺾이는 지점, "
