@@ -738,7 +738,8 @@ def resume_agent_run(
 ) -> None:
     try:
         run = services.run_service.get_run(run_id)
-        active_event = _active_node_event(services.run_service.list_events(run_id))
+        run_events = services.run_service.list_events(run_id)
+        active_event = _active_node_event(run_events)
         interrupt_node = run.metadata.get("node")
         node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
         resumed_from = str(run.metadata.get("resumed_from") or "clarification")
@@ -749,40 +750,66 @@ def resume_agent_run(
         }
         approval_id: str | None = None
         event_key: str | None = None
-        if resumed_from == "approval":
-            if active_event is not None:
-                node_name = active_event.node_name or node_name
-                resume_metadata.update(
-                    {
-                        key: active_event.metadata[key]
-                        for key in (
-                            "node_id",
-                            "parent_node_id",
-                            "node_sequence",
-                            "agent_name",
-                        )
-                        if key in active_event.metadata
-                    }
-                )
-                approval_id = active_event.approval_id
-            if approval_id is None:
-                raw_approval_id = run.metadata.get("approval_id")
-                approval_id = (
-                    raw_approval_id
-                    if isinstance(raw_approval_id, str) and raw_approval_id
-                    else None
-                )
+        if active_event is not None:
+            node_name = active_event.node_name or node_name
+            resume_metadata.update(
+                {
+                    key: active_event.metadata[key]
+                    for key in (
+                        "node_id",
+                        "parent_node_id",
+                        "node_sequence",
+                        "agent_name",
+                        "attempt",
+                    )
+                    if key in active_event.metadata
+                }
+            )
             resume_metadata.update(
                 {
                     "node": node_name,
                     "agent_name": resume_metadata.get("agent_name") or node_name,
-                    "approval_id": approval_id,
+                }
+            )
+            approval_id = active_event.approval_id
+
+        pending_input_event: RunEvent | None = None
+        for event in reversed(run_events):
+            if event.event_type != "human_input.required":
+                continue
+            if event.metadata.get("interrupt_type") == resumed_from:
+                pending_input_event = event
+                break
+
+        payload_approval_id = resume_payload.get("approval_id")
+        if isinstance(payload_approval_id, str) and payload_approval_id:
+            approval_id = payload_approval_id
+        elif approval_id is None and pending_input_event is not None:
+            approval_id = pending_input_event.approval_id
+        if approval_id is None:
+            raw_approval_id = run.metadata.get("approval_id")
+            approval_id = (
+                raw_approval_id
+                if isinstance(raw_approval_id, str) and raw_approval_id
+                else None
+            )
+
+        if approval_id is not None:
+            resume_metadata["approval_id"] = approval_id
+        if resumed_from == "approval":
+            resume_metadata.update(
+                {
                     "approved": bool(resume_payload.get("approved")),
                 }
             )
-            event_identity = approval_id or resume_metadata.get("node_id")
-            if isinstance(event_identity, str) and event_identity:
-                event_key = f"human-input:{event_identity}:resumed"
+
+        event_identity: object = (
+            pending_input_event.event_id
+            if pending_input_event is not None
+            else approval_id or resume_metadata.get("node_id")
+        )
+        if isinstance(event_identity, str) and event_identity:
+            event_key = f"human-input:{event_identity}:resumed"
 
         event_adapter = BackendAdapter(services=services)
         event_adapter.append_run_event(
