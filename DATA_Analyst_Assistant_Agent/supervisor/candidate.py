@@ -255,11 +255,26 @@ def validate_candidate(
         semantic_decision.severity == "error"
         or not semantic_decision.semantic_valid
     )
+    same_agent_action = _ACTION_BY_AGENT[result.agent]
+    same_agent_retry_requested = (
+        semantic_decision.recommended_next_action == same_agent_action
+    )
+    retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
+    max_retry = int(state.get("max_retry_per_agent", 0))
+    same_agent_retry_available = (
+        same_agent_retry_requested
+        and retry_count < max_retry
+        and contract_decision.decision != "await_approval"
+    )
     semantic_recover = semantic_decision.severity == "error" or (
         semantic_decision.severity == "info"
         and not semantic_decision.semantic_valid
     )
-    accept_analysis_limitation = result.agent == "analysis_agent" and semantic_invalid
+    accept_analysis_limitation = (
+        result.agent == "analysis_agent"
+        and semantic_invalid
+        and not same_agent_retry_available
+    )
     if accept_analysis_limitation:
         semantic_recover = False
     semantic_advisory = (
@@ -273,7 +288,27 @@ def validate_candidate(
             "누락 근거: "
             + ", ".join(str(item) for item in semantic_decision.missing_evidence)
         )
-    if semantic_recover:
+    if same_agent_retry_available:
+        semantic_findings = [
+            ValidationFinding(
+                code="semantic_same_agent_retry",
+                source="supervisor",
+                severity=semantic_decision.severity,
+                disposition="error",
+                message=(
+                    semantic_decision.reason
+                    or f"{result.agent} 결과를 같은 노드에서 다시 검증해야 합니다."
+                ),
+                retryable=True,
+                suggested_action=same_agent_action,
+                details={
+                    "missing_evidence": list(semantic_decision.missing_evidence),
+                    "retry_count": retry_count,
+                    "max_retry": max_retry,
+                },
+            )
+        ]
+    elif semantic_recover:
         semantic_findings = [
             ValidationFinding(
                 code="semantic_validation_failed",
@@ -307,13 +342,23 @@ def validate_candidate(
     checks.append(
         ValidationCheckResult(
             name="semantic",
-            passed=not semantic_recover,
+            passed=not semantic_recover and not same_agent_retry_available,
             findings=semantic_findings,
             details=semantic_decision.model_dump(mode="json"),
         )
     )
     if contract_decision.decision == "await_approval":
         outcome = outcome_from_contract_decision(result.agent, contract_decision)
+    elif same_agent_retry_available:
+        outcome = ValidationOutcome(
+            disposition="retry",
+            reason=(
+                semantic_decision.reason
+                or f"{result.agent} 결과의 Semantic 검증을 다시 수행합니다."
+            ),
+            reason_code="semantic_same_agent_retry",
+            retry_target=result.agent,
+        )
     elif semantic_recover:
         outcome = ValidationOutcome(
             disposition="recover",
@@ -1228,6 +1273,8 @@ def _next_action(result: AgentCompactResult, record: ValidationRecord) -> NextAc
         return "finalize"
     semantic = next((check.details for check in record.checks if check.name == "semantic"), {})
     recommendation = str(semantic.get("recommended_next_action") or "")
+    if recommendation == _ACTION_BY_AGENT[result.agent]:
+        return "decide_next_action"
     if _semantic_action_allowed(result.agent, recommendation):
         return recommendation or "decide_next_action"  # type: ignore[return-value]
     return "decide_next_action"
