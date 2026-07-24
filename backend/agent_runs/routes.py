@@ -27,6 +27,7 @@ from .schemas import (
     AgentNodeSummaryResponse,
     AgentReportListItem,
     AgentReportListResponse,
+    AgentSessionRunsDeleteResponse,
     AgentRunCancelResponse,
     AgentRunBranchRequest,
     AgentRunBranchResponse,
@@ -43,6 +44,7 @@ from .service import (
     RunCancellationConflictError,
     RunDeletionConflictError,
     cancel_agent_run,
+    delete_session_run_data,
     delete_terminal_run_data,
     get_node_summary,
     generate_node_report,
@@ -170,6 +172,28 @@ def list_agent_session_events(
         session_id=session_id,
     )
     return [event.model_dump(mode="json") for event in events]
+
+
+@router.delete("/session-runs", response_model=AgentSessionRunsDeleteResponse)
+def delete_agent_session_runs(
+    request: Request,
+    session_id: str = Query(...),
+    user: dict = Depends(get_current_user),
+) -> AgentSessionRunsDeleteResponse:
+    get_owned_session(session_id, str(user["sub"]))
+    try:
+        result = delete_session_run_data(
+            services=request.app.state.services,
+            session_id=session_id,
+        )
+    except RunDeletionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return AgentSessionRunsDeleteResponse(
+        session_id=result.session_id,
+        deleted_run_count=result.deleted_run_count,
+        deleted_event_count=result.deleted_event_count,
+        deleted_artifact_count=result.deleted_artifact_count,
+    )
 
 
 @router.delete("/{run_id}", response_model=AgentRunDeleteResponse)

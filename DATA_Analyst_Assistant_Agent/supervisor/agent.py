@@ -486,11 +486,65 @@ class SupervisorAgent:
 
     def _update_run_from_terminal_output(self, run_id: str, output: SupervisorState) -> SupervisorRunResult:
         orchestration_state = to_orchestration_state(output)
+        terminal_metadata: dict[str, Any] = {
+            "terminal_state": output.get("terminal_state"),
+        }
+        pending_approval = output.get("pending_approval")
+        active_node = output.get("active_node")
+        approval_reason: str | None = None
+        if (
+            orchestration_state.terminal_state == SupervisorTerminalState.needs_user_approval
+            and isinstance(pending_approval, dict)
+        ):
+            active_node = active_node if isinstance(active_node, dict) else {}
+            approval_id = str(pending_approval.get("approval_id") or "").strip()
+            node_name = str(
+                active_node.get("agent_name")
+                or pending_approval.get("agent")
+                or "supervisor"
+            )
+            node_id = str(active_node.get("node_id") or "").strip()
+            approval_reason = str(
+                pending_approval.get("reason")
+                or output.get("final_answer")
+                or "결과를 승인해 주세요."
+            )
+            approval_metadata = {
+                **pending_approval,
+                "interrupt_type": "approval",
+                "type": "approval",
+                "node": node_name,
+                "agent_name": node_name,
+                "node_id": node_id or None,
+                "parent_node_id": active_node.get("parent_node_id"),
+                "node_sequence": active_node.get("node_sequence"),
+                "expected_resume": {"approved": "boolean", "reason": "string?"},
+            }
+            terminal_metadata.update(approval_metadata)
+
         self.adapter.update_run_status(
             run_id,
             self._run_status_for_terminal(orchestration_state.terminal_state),
-            metadata={"terminal_state": output.get("terminal_state")},
+            metadata=terminal_metadata,
         )
+        if (
+            orchestration_state.terminal_state == SupervisorTerminalState.needs_user_approval
+            and isinstance(pending_approval, dict)
+        ):
+            append_event = getattr(self.adapter, "append_run_event", None)
+            if append_event is not None:
+                approval_id = str(pending_approval.get("approval_id") or "").strip()
+                node_id = str(terminal_metadata.get("node_id") or "").strip()
+                event_identity = approval_id or node_id or run_id
+                append_event(
+                    run_id,
+                    "human_input.required",
+                    approval_reason or "결과를 승인해 주세요.",
+                    event_key=f"human-input:{event_identity}:required",
+                    node_name=str(terminal_metadata["node"]),
+                    approval_id=approval_id or None,
+                    metadata=terminal_metadata,
+                )
         return SupervisorRunResult(kind="state", state=orchestration_state)
 
     def _update_run_from_interrupt(

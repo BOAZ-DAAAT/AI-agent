@@ -622,7 +622,94 @@ def test_delete_completed_agent_run_removes_events_artifacts_and_files(tmp_path,
     assert client.get(f"/agent-runs/{run.run_id}", headers=_user_header()).status_code == 404
 
 
-def test_delete_running_agent_run_is_rejected_without_deleting_data(tmp_path, monkeypatch) -> None:
+def test_delete_agent_run_also_removes_descendant_branch_runs(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    root = services.run_service.create_run(thread_id="thread_tree", project_id="sess_001")
+    branch = services.run_service.create_run(
+        thread_id="thread_tree",
+        project_id="sess_001",
+        metadata={"branched_from_run_id": root.run_id},
+    )
+    for run in (root, branch):
+        services.run_service.append_event(
+            run.run_id,
+            "agent.completed",
+            "completed",
+            node_name="sql_agent",
+            metadata={"node_id": f"{run.run_id}:node:1"},
+        )
+        services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.delete(f"/agent-runs/{root.run_id}", headers=_user_header())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": root.run_id,
+        "deleted_event_count": 2,
+        "deleted_artifact_count": 0,
+    }
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM runs WHERE run_id IN (?, ?)",
+        (root.run_id, branch.run_id),
+    ) is None
+
+
+def test_delete_agent_session_runs_removes_all_historical_runs(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id),
+    )
+    runs = [
+        services.run_service.create_run(
+            thread_id=f"thread_session_{index}",
+            project_id="sess_001",
+        )
+        for index in range(3)
+    ]
+    other_session_run = services.run_service.create_run(
+        thread_id="thread_other",
+        project_id="sess_other",
+    )
+    services.run_service.update_status(runs[0].run_id, "running")
+    for run in [*runs[1:], other_session_run]:
+        services.run_service.append_event(
+            run.run_id,
+            "run.completed",
+            "completed",
+            node_name="supervisor",
+        )
+        services.run_service.update_status(run.run_id, "succeeded")
+
+    response = client.delete(
+        "/agent-runs/session-runs?session_id=sess_001",
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "sess_001",
+        "deleted_run_count": 3,
+        "deleted_event_count": 3,
+        "deleted_artifact_count": 0,
+    }
+    assert services.run_service.list_runs(project_id="sess_001") == []
+    assert services.run_service.get_run(other_session_run.run_id).run_id == other_session_run.run_id
+
+
+def test_delete_running_agent_run_cancels_and_removes_all_data(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)
     client = TestClient(app)
@@ -637,8 +724,16 @@ def test_delete_running_agent_run_is_rejected_without_deleting_data(tmp_path, mo
 
     response = client.delete(f"/agent-runs/{run.run_id}", headers=_user_header())
 
-    assert response.status_code == 409
-    assert services.run_service.get_run(run.run_id).status.value == "running"
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": run.run_id,
+        "deleted_event_count": 1,
+        "deleted_artifact_count": 0,
+    }
+    assert services.run_service.sqlite.query_one(
+        "SELECT 1 FROM runs WHERE run_id = ?",
+        (run.run_id,),
+    ) is None
 
 
 def test_delete_agent_run_keeps_checkpoint_used_by_another_run(tmp_path, monkeypatch) -> None:

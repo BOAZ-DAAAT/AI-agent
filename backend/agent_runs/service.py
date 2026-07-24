@@ -31,6 +31,9 @@ from DATA_Analyst_Assistant_Agent.shared.cancellation import (
 from DATA_Analyst_Assistant_Agent.shared.contracts import SupervisorRunResult, SupervisorTerminalState
 from DATA_Analyst_Assistant_Agent.supervisor.agent import SupervisorAgent
 from DATA_Analyst_Assistant_Agent.supervisor.branch import BranchStage, branch_from
+from DATA_Analyst_Assistant_Agent.supervisor.lifecycle import (
+    emit_supervisor_selection_started,
+)
 from DATA_Analyst_Assistant_Agent.supervisor.report.generator import generate_report
 from DATA_Analyst_Assistant_Agent.supervisor.report.schemas import ReportResult
 from DATA_Analyst_Assistant_Agent.supervisor.state import empty_supervisor_state, to_orchestration_state
@@ -60,6 +63,14 @@ class RunCancellationConflictError(Exception):
 @dataclass(frozen=True)
 class RunDeletionResult:
     run_id: str
+    deleted_event_count: int
+    deleted_artifact_count: int
+
+
+@dataclass(frozen=True)
+class SessionRunDeletionResult:
+    session_id: str
+    deleted_run_count: int
     deleted_event_count: int
     deleted_artifact_count: int
 
@@ -144,10 +155,82 @@ def delete_terminal_run_data(
     services: BackendServices,
     run_id: str,
 ) -> RunDeletionResult:
-    run = services.run_service.get_run(run_id)
-    if run.status not in TERMINAL_RUN_STATUSES:
-        raise RunDeletionConflictError("완료되거나 실패한 실행만 삭제할 수 있습니다.")
+    root_run = services.run_service.get_run(run_id)
+    session_runs = services.run_service.list_runs(project_id=root_run.project_id)
+    runs_by_parent: dict[str, list[RunRecord]] = {}
+    for candidate in session_runs:
+        parent_run_id = candidate.metadata.get("branched_from_run_id")
+        if isinstance(parent_run_id, str) and parent_run_id:
+            runs_by_parent.setdefault(parent_run_id, []).append(candidate)
 
+    run_tree: list[RunRecord] = []
+    pending = [root_run]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current.run_id in seen:
+            continue
+        seen.add(current.run_id)
+        run_tree.append(current)
+        pending.extend(runs_by_parent.get(current.run_id, []))
+
+    for run in run_tree:
+        if run.status not in TERMINAL_RUN_STATUSES:
+            cancel_agent_run(
+                services=services,
+                run_id=run.run_id,
+                cancelled_by="run_delete",
+            )
+
+    deleted_event_count = 0
+    deleted_artifact_count = 0
+    for run in reversed(run_tree):
+        result = _delete_single_terminal_run_data(services=services, run=run)
+        deleted_event_count += result.deleted_event_count
+        deleted_artifact_count += result.deleted_artifact_count
+
+    return RunDeletionResult(
+        run_id=root_run.run_id,
+        deleted_event_count=deleted_event_count,
+        deleted_artifact_count=deleted_artifact_count,
+    )
+
+
+def delete_session_run_data(
+    *,
+    services: BackendServices,
+    session_id: str,
+) -> SessionRunDeletionResult:
+    runs = services.run_service.list_runs(project_id=session_id)
+    for run in runs:
+        if run.status not in TERMINAL_RUN_STATUSES:
+            cancel_agent_run(
+                services=services,
+                run_id=run.run_id,
+                cancelled_by="session_delete",
+            )
+
+    deleted_event_count = 0
+    deleted_artifact_count = 0
+    for run in reversed(runs):
+        result = _delete_single_terminal_run_data(services=services, run=run)
+        deleted_event_count += result.deleted_event_count
+        deleted_artifact_count += result.deleted_artifact_count
+
+    return SessionRunDeletionResult(
+        session_id=session_id,
+        deleted_run_count=len(runs),
+        deleted_event_count=deleted_event_count,
+        deleted_artifact_count=deleted_artifact_count,
+    )
+
+
+def _delete_single_terminal_run_data(
+    *,
+    services: BackendServices,
+    run: RunRecord,
+) -> RunDeletionResult:
+    run_id = run.run_id
     artifacts = services.artifact_registry.list_artifacts(run_id=run_id)
     artifact_ids = [artifact.artifact_id for artifact in artifacts]
     event_count_row = services.run_service.sqlite.query_one(
@@ -600,6 +683,13 @@ def launch_agent_run(
             node_name="supervisor",
             metadata={"session_id": session.id, "thread_id": thread_id},
         )
+        emit_supervisor_selection_started(
+            event_adapter,
+            run_id=run_id,
+            node_sequence=1,
+            parent_node_id=None,
+            selection_reason="initial",
+        )
         catalog_summary = build_session_catalog_summary(session)
         adapter = SessionBoundBackendAdapter(
             services=services,
@@ -648,20 +738,61 @@ def resume_agent_run(
 ) -> None:
     try:
         run = services.run_service.get_run(run_id)
+        active_event = _active_node_event(services.run_service.list_events(run_id))
         interrupt_node = run.metadata.get("node")
         node_name = interrupt_node if isinstance(interrupt_node, str) and interrupt_node else "supervisor"
         resumed_from = str(run.metadata.get("resumed_from") or "clarification")
+        resume_metadata: dict[str, Any] = {
+            "interrupt_type": resumed_from,
+            "thread_id": thread_id,
+            "node": node_name,
+        }
+        approval_id: str | None = None
+        event_key: str | None = None
+        if resumed_from == "approval":
+            if active_event is not None:
+                node_name = active_event.node_name or node_name
+                resume_metadata.update(
+                    {
+                        key: active_event.metadata[key]
+                        for key in (
+                            "node_id",
+                            "parent_node_id",
+                            "node_sequence",
+                            "agent_name",
+                        )
+                        if key in active_event.metadata
+                    }
+                )
+                approval_id = active_event.approval_id
+            if approval_id is None:
+                raw_approval_id = run.metadata.get("approval_id")
+                approval_id = (
+                    raw_approval_id
+                    if isinstance(raw_approval_id, str) and raw_approval_id
+                    else None
+                )
+            resume_metadata.update(
+                {
+                    "node": node_name,
+                    "agent_name": resume_metadata.get("agent_name") or node_name,
+                    "approval_id": approval_id,
+                    "approved": bool(resume_payload.get("approved")),
+                }
+            )
+            event_identity = approval_id or resume_metadata.get("node_id")
+            if isinstance(event_identity, str) and event_identity:
+                event_key = f"human-input:{event_identity}:resumed"
+
         event_adapter = BackendAdapter(services=services)
         event_adapter.append_run_event(
             run_id,
             "human_input.resumed",
             _RESUME_MESSAGES.get(resumed_from, _RESUME_MESSAGES["clarification"]),
+            event_key=event_key,
             node_name=node_name,
-            metadata={
-                "interrupt_type": resumed_from,
-                "thread_id": thread_id,
-                "node": node_name,
-            },
+            approval_id=approval_id,
+            metadata=resume_metadata,
         )
         catalog_summary = build_session_catalog_summary(session)
         adapter = SessionBoundBackendAdapter(
