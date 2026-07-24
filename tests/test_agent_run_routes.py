@@ -364,6 +364,69 @@ def test_related_events_returns_branch_family_siblings(tmp_path, monkeypatch) ->
     assert unrelated_event.event_id not in event_ids
 
 
+def test_session_events_returns_every_run_in_the_session(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path)
+    app = create_app(services=services)
+    client = TestClient(app)
+
+    monkeypatch.setattr("backend.auth.deps.Auth.ENABLED", False)
+    monkeypatch.setattr(
+        "backend.agent_runs.routes.get_owned_session",
+        lambda session_id, username: SimpleNamespace(id=session_id, session_db="session_db", mart_db="mart_db"),
+    )
+
+    root = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    branch = services.run_service.create_run(
+        thread_id="thread_branch_family",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001", "branched_from_run_id": root.run_id},
+    )
+    second_main_query = services.run_service.create_run(
+        thread_id="thread_other",
+        project_id="sess_001",
+        metadata={"session_id": "sess_001"},
+    )
+    other_session_run = services.run_service.create_run(
+        thread_id="thread_other_session",
+        project_id="sess_002",
+        metadata={"session_id": "sess_002"},
+    )
+
+    root_event = services.run_service.append_event(
+        root.run_id, "agent.completed", "SQL Agent completed", node_name="sql_agent",
+        metadata={"node_id": "root_sql"},
+    )
+    branch_event = services.run_service.append_event(
+        branch.run_id, "agent.completed", "EDA branch completed", node_name="eda_agent",
+        metadata={"node_id": "branch_eda"},
+    )
+    second_main_event = services.run_service.append_event(
+        second_main_query.run_id, "agent.started", "SQL Agent started", node_name="sql_agent",
+        metadata={"node_id": "second_sql"},
+    )
+    other_session_event = services.run_service.append_event(
+        other_session_run.run_id, "agent.started", "SQL Agent started", node_name="sql_agent",
+        metadata={"node_id": "other_session_sql"},
+    )
+
+    response = client.get(
+        "/agent-runs/session-events",
+        params={"session_id": "sess_001"},
+        headers=_user_header(),
+    )
+
+    assert response.status_code == 200
+    event_ids = {event["event_id"] for event in response.json()}
+    assert root_event.event_id in event_ids
+    assert branch_event.event_id in event_ids
+    assert second_main_event.event_id in event_ids
+    assert other_session_event.event_id not in event_ids
+
+
 def test_get_completed_node_summary_returns_registered_summary(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path)
     app = create_app(services=services)

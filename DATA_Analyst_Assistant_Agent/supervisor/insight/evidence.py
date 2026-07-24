@@ -14,6 +14,7 @@ import pandas as pd
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import (
     generated_sql_from_artifacts,
+    load_eda_derived_frame,
     read_json_artifact,
     read_sql_result_csvs,
 )
@@ -40,10 +41,17 @@ class EvidencePack:
 
 def build_evidence_pack(state: OrchestrationState, runtime: AgentRuntime) -> EvidencePack:
     """상류 아티팩트를 읽어 증거팩을 조립한다. 없는 재료는 빈 채로 둔다(루프가 알아서 판단)."""
-    csvs = read_sql_result_csvs(state, runtime)
+    # EDA 분기가 남긴 필터링 결과(row_filter)가 있으면 우선 쓴다 — 없으면 SQL 결과 원본
+    # 그대로(2026-07-24, EDA에서 건 필터가 Insight까지 안 이어지던 문제 수정).
+    derived = load_eda_derived_frame(state, runtime)
+    if derived is not None:
+        csvs = [derived]
+        labels = {derived.artifact_id: "EDA 필터링 결과 테이블"}
+    else:
+        csvs = read_sql_result_csvs(state, runtime)
+        labels = {c.artifact_id: "SQL 결과 테이블" for c in csvs if c.error is None}
     df = _best_dataframe(csvs)
     source_ids = [c.artifact_id for c in csvs if c.error is None]
-    labels = {c.artifact_id: "SQL 결과 테이블" for c in csvs if c.error is None}
 
     eda_id, eda = _read_first_json_artifact(state, runtime, "eda_agent", source_ids)
     analysis_id, analysis = _read_first_json_artifact(state, runtime, "analysis_agent", source_ids)

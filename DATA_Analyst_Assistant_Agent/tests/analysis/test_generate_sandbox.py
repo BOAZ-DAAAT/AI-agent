@@ -227,6 +227,37 @@ def test_preflight_flags_large_fit() -> None:
     assert any("large" in reason for reason in plan.reasons)
 
 
+def test_preflight_flags_removed_numpy_math() -> None:
+    """실사례(2026-07-23): np.math는 설치된 numpy(2.4.6)에서 제거되어 실행 중 AttributeError로
+
+    죽는다. SQL 에이전트의 MySQL 방언 검사와 같은 목적으로, 실행해서 알아내는 대신 preflight
+    에서 미리 잡아 구체적인 대안(math 모듈/scipy)까지 피드백한다.
+    """
+    code = _code(
+        "p = np.math.erf(1.0)\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'p': p}, 'limitations': []}"
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "blocked_incompatible_api"
+    assert any("np.math" in reason for reason in plan.reasons)
+
+
+def test_preflight_allows_valid_numpy_dtype_suffixes() -> None:
+    """np.float64/np.int64처럼 접미사가 붙은 유효한 이름은 제거 대상이 아니므로 통과해야 한다."""
+    code = _code(
+        "value = np.float64(df['x'].mean())\n"
+        "count = np.int64(len(df))\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'value': float(value), 'count': int(count)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(50)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
 def test_preflight_flags_while_loop() -> None:
     code = _code(
         "while True:\n"
@@ -280,6 +311,28 @@ def test_preflight_flags_actual_nested_loop_on_non_small_dataframe() -> None:
 
     assert plan.decision == "manual_run_recommended"
     assert any("nested loop" in reason for reason in plan.reasons)
+
+
+def test_preflight_allows_nested_loop_over_derived_groupby_result() -> None:
+    """실사례(2026-07-23): groupby 결과처럼 이미 작게 뭉쳐진 대상을 도는 중첩 루프는
+
+    row_count가 커도 안전해야 한다 — df를 직접 참조하지 않기 때문. 이 오탐 때문에
+    P99 제외 재분석 코드가 통째로 스킵된 실제 사례를 재현한다.
+    """
+    code = _code(
+        "rows = []\n"
+        "grp = df.groupby('bucket')\n"
+        "for name, g in grp:\n"
+        "    counts = g['score'].value_counts()\n"
+        "    for score, count in counts.items():\n"
+        "        rows.append({'bucket': name, 'score': score, 'count': int(count)})\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'rows': len(rows)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"bucket": ["a", "b"] * 10_261, "score": [1, 2] * 10_261})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
 
 
 def test_preflight_flags_dataframe_row_iteration_on_non_small_dataframe() -> None:

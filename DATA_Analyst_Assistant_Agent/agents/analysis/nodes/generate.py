@@ -89,6 +89,19 @@ _SAFE_BUILTIN_NAMES = (
 )
 
 
+# SQL 에이전트의 MySQL 방언 검사(self_check.py의 _MYSQL_BANNED_PATTERNS)와 같은 목적 —
+# 실제 설치된 numpy(2.4.6, requirements.txt 고정)에서 이미 제거된 API를 LLM이 옛 기억으로
+# 계속 생성하는 걸 실행 전에 잡는다(2026-07-23 실사례: np.math AttributeError로 실행이
+# 두 번 다 죽음). np.float64/np.int64 같은 유효한 접미사 붙은 이름은 단어경계(\b)로 안 걸림.
+_REMOVED_NUMPY_APIS: tuple[tuple[str, str], ...] = (
+    (r"\bnp\.math\b", "np.math은 설치된 numpy 버전에서 제거됨 — math 표준 모듈 또는 scipy.stats/scipy.special을 사용하라"),
+    (r"\bnp\.float\b", "np.float은 설치된 numpy 버전에서 제거됨 — 내장 float 또는 np.float64를 사용하라"),
+    (r"\bnp\.int\b", "np.int는 설치된 numpy 버전에서 제거됨 — 내장 int 또는 np.int64를 사용하라"),
+    (r"\bnp\.bool\b", "np.bool은 설치된 numpy 버전에서 제거됨 — 내장 bool 또는 np.bool_을 사용하라"),
+    (r"\bnp\.object\b", "np.object는 설치된 numpy 버전에서 제거됨 — 내장 object 또는 np.object_를 사용하라"),
+    (r"\bnp\.str\b", "np.str은 설치된 numpy 버전에서 제거됨 — 내장 str 또는 np.str_를 사용하라"),
+)
+
 REQUIRED_RESULT_KEYS = ("summary", "findings", "statistics", "limitations")
 DEFAULT_CODE_EXEC_TIMEOUT_SECONDS = 600.0
 SMALL_MODELING_ROW_LIMIT = 10_000
@@ -326,6 +339,24 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
             f"{json.dumps(context.eda_derived_group_results, ensure_ascii=False, sort_keys=True)}\n"
             "If you test the same entity-level relationship, use the same entity grain, "
             "sample-size threshold, and columns unless the user asks otherwise.\n"
+            "If an entry has kind=='row_filter', the `df` you received IS ALREADY that filtered "
+            "subset (fewer rows than the original mart) — do not call it 'original'/'원본' and do "
+            "not re-apply your own outlier/IQR filter on top of it (you cannot reconstruct the "
+            "removed rows). If the entry has a 'relationship_shift' field (before/after "
+            "pearson/spearman for EDA's primary target/feature pair, computed by EDA from the true "
+            "original rows), cite those precomputed numbers directly instead of recomputing a "
+            "before-state yourself. Summarize it as a single reflect-the-condition sentence in "
+            "Korean, e.g. \"이상치를 제거한 상태를 반영하여 분석한 결과 상관관계가 -0.32에서 "
+            "-0.24로 약해지는 경향이 나타났습니다.\", not as a fabricated two-state comparison.\n"
+            "If there is no 'relationship_shift' field, you still computed real statistics on the "
+            "row-filtered `df` you received — state that applied-condition result as a direct, "
+            "confident Korean sentence (e.g. \"이상치를 제거한 조건을 적용한 결과, 상관관계는 "
+            "-0.24로 나타나 음의 관계가 유지되는 경향을 보였습니다\"). Do not phrase it as a "
+            "limitation or say things like '증거가 제공되지 않았습니다'/'비교를 수행하지 않았습니다' "
+            "when you actually have real computed numbers to report — lead with the finding, not "
+            "with what you could not do. Reserve 'cannot be computed' language strictly for columns "
+            "that are genuinely absent from `df` (never invent a number for a column that does not "
+            "exist).\n"
         )
     if context.known_data_quality_issues:
         # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.
@@ -493,6 +524,16 @@ def inspect_generated_code(
                 column_count=column_count,
             )
 
+    for pattern, reason in _REMOVED_NUMPY_APIS:
+        if re.search(pattern, lowered):
+            return CodeExecutionPlan(
+                decision="blocked_incompatible_api",
+                risk_level="high",
+                reasons=[reason],
+                row_count=row_count,
+                column_count=column_count,
+            )
+
     if re.search(r"\bwhile\b", lowered):
         reasons.append("while loop may run indefinitely")
     if re.search(r"\b(gridsearchcv|randomizedsearchcv|cross_val_score|cross_validate)\b", lowered):
@@ -569,8 +610,17 @@ def _expensive_iteration_reasons(source: str, row_count: int) -> list[str]:
 
 
 class _IterationRiskVisitor(ast.NodeVisitor):
+    """중첩 루프 자체가 아니라, 원본 dataframe 행을 도는 루프가 중첩에 관여할 때만 위험으로 본다.
+
+    groupby 결과·value_counts 같은 이미 축약된 대상을 도는 중첩(예: 배송구간 4개 × 리뷰점수
+    5개처럼 수십 회 수준)까지 "중첩됐다"는 이유만으로 차단하면, 큰 df에서 안전하게 요약표를
+    만드는 정상 코드까지 전부 실행이 막힌다(2026-07-23 실사례로 발견 — 10,520행 데이터에서
+    이 오탐 때문에 완성된 분석 코드가 통째로 스킵됨).
+    """
+
     def __init__(self) -> None:
         self.loop_depth = 0
+        self.risky_loop_depth = 0          # 현재 열려 있는, 원본 df 행을 도는 루프 개수
         self.has_nested_loop = False
         self.has_dataframe_row_iteration = False
 
@@ -593,26 +643,41 @@ class _IterationRiskVisitor(ast.NodeVisitor):
         self._visit_comprehension(node)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
-        if self.loop_depth > 0:
-            self.has_nested_loop = True
+        touches_df = _references_df(node.iter)
         if _iterates_dataframe_rows(node.iter):
             self.has_dataframe_row_iteration = True
+        if self.loop_depth > 0 and (touches_df or self.risky_loop_depth > 0):
+            self.has_nested_loop = True
         self.loop_depth += 1
+        self.risky_loop_depth += 1 if touches_df else 0
         self.generic_visit(node)
         self.loop_depth -= 1
+        self.risky_loop_depth -= 1 if touches_df else 0
 
     def _visit_comprehension(
         self,
         node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
     ) -> None:
-        if self.loop_depth > 0 or len(node.generators) > 1:
+        touches_df = any(_references_df(generator.iter) for generator in node.generators)
+        if any(_iterates_dataframe_rows(generator.iter) for generator in node.generators):
+            self.has_dataframe_row_iteration = True
+        if (self.loop_depth > 0 or len(node.generators) > 1) and (touches_df or self.risky_loop_depth > 0):
             self.has_nested_loop = True
-        for generator in node.generators:
-            if _iterates_dataframe_rows(generator.iter):
-                self.has_dataframe_row_iteration = True
         self.loop_depth += 1
+        self.risky_loop_depth += 1 if touches_df else 0
         self.generic_visit(node)
         self.loop_depth -= 1
+        self.risky_loop_depth -= 1 if touches_df else 0
+
+
+def _references_df(node: ast.AST) -> bool:
+    """이 반복 대상 표현식 어딘가에 원본 `df` 이름이 등장하는지(예: df['x'].head(10)).
+
+    groupby/value_counts 결과를 담은 별도 변수(grp, counts 등)는 그 시점 표현식에 `df`가
+    안 나오므로 여기 걸리지 않는다 — 중첩 루프 위험 판정을 "원본 데이터에 직접 닿아 있는가"
+    기준으로 좁히기 위한 보수적(넓게 잡는) 체크다.
+    """
+    return any(isinstance(sub, ast.Name) and sub.id == "df" for sub in ast.walk(node))
 
 
 def _iterates_dataframe_rows(node: ast.AST) -> bool:

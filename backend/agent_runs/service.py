@@ -432,6 +432,23 @@ def generate_node_report(
     )
 
 
+def list_session_events(
+    *,
+    services: BackendServices,
+    session_id: str,
+) -> list[RunEvent]:
+    """세션에 속한 모든 run(메인 쿼리+그 분기 전부)의 이벤트를 시간순으로 모아 반환한다.
+
+    related-events는 run 하나의 branch root 계보만 돌려주지만, 플레이그라운드 캔버스는
+    새로고침 후에도 세션에서 시작한 모든 메인 쿼리 트리를 한 번에 그려야 해서 별도로 둔다.
+    """
+    events: list[RunEvent] = []
+    for run in services.run_service.list_runs(project_id=session_id):
+        events.extend(services.run_service.list_events(run.run_id))
+    events.sort(key=lambda event: (event.created_at or "", event.event_id))
+    return events
+
+
 def list_session_reports(
     *,
     services: BackendServices,

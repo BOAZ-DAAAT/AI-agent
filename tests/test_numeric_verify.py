@@ -58,3 +58,18 @@ def test_verify_compute_result_becomes_citable():
     numbers, corpus = build_evidence_corpus(_pack(), computes)
     ok, missing = verify_texts(["toys 합계는 900.0입니다."], numbers, corpus)
     assert ok, missing
+
+
+def test_verify_accepts_scientific_notation_pvalue():
+    # 회귀 테스트: "7.76e-315" 같은 지수 표기를 "e"에서 잘라 "7.76"과 "-315"라는
+    # 가짜 숫자 두 개로 오인하던 버그. 실제 리포트 생성 실패의 원인이었다.
+    numbers = {7.76189325e-315, -0.36635318280995627, 4.943713072837881e-06}
+    text = "피어슨 r=-0.366, p=7.76e-315를 확인하였고 판매자 수준에서는 p=4.94e-06였다."
+    ok, missing = verify_texts([text], numbers, "")
+    assert ok, missing
+
+
+def test_verify_rejects_fabricated_scientific_notation():
+    numbers = {7.76189325e-315}
+    ok, missing = verify_texts(["p=1.23e-50이었다."], numbers, "")
+    assert not ok and "1.23e-50" in missing

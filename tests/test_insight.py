@@ -1,7 +1,7 @@
 """Insight Agent 테스트 — 전부 FakeLLM/FakeAdapter (실제 LLM·백엔드 호출 0, 토큰 0).
 
-검증 대상: 증거팩 조립 / 숫자 검증 게이트 / compute·chart 도구(게이트·범위·렌더) /
-bounded ReAct 루프(성공·검증실패 피드백·폴백) / InsightGenerator.run 아티팩트 등록.
+검증 대상: 증거팩 조립 / compute·chart 도구(게이트·범위·렌더) /
+bounded ReAct 루프(성공·빈 answer 피드백·품질심사·폴백) / InsightGenerator.run 아티팩트 등록.
 """
 
 from __future__ import annotations
@@ -293,16 +293,18 @@ def test_loop_happy_path(tmp_path):
     assert [s["tool"] for s in result.steps] == ["compute", "chart", "finish", "validate"]
 
 
-def test_loop_verify_failure_feeds_back_then_recovers(tmp_path):
-    llm = FakeLLM(_COMPUTE, _FINISH_BAD, _FINISH_GOOD)
+def test_loop_accepts_ungrounded_numbers_without_verification(tmp_path):
+    # 숫자 검증 게이트를 없앴다(2026-07-23) — 근거에 없는 숫자를 써도 즉시 finish 로 수용된다.
+    llm = FakeLLM(_COMPUTE, _FINISH_BAD)
     result = run_insight_loop(_pack(), llm=llm, out_dir=str(tmp_path))
-    assert not result.fallback_used and "900.0" in result.answer
-    fails = [s for s in result.steps if s["tool"] == "finish" and not s["ok"]]
-    assert fails and "7777.7" in fails[0]["note"]
+    assert not result.fallback_used and "7777.7" in result.answer
+    finishes = [s for s in result.steps if s["tool"] == "finish"]
+    assert len(finishes) == 1 and finishes[0]["ok"]
 
 
-def test_loop_exhausted_falls_back_to_grounded_summary(tmp_path):
-    llm = FakeLLM(_FINISH_BAD, _FINISH_BAD, _FINISH_BAD)
+def test_loop_repeated_empty_answer_falls_back_to_grounded_summary(tmp_path):
+    empty_finish = json.dumps({"tool": "finish", "reason": "빈 답", "args": {"answer": ""}})
+    llm = FakeLLM(empty_finish, empty_finish, empty_finish)
     result = run_insight_loop(_pack(with_eda=True), llm=llm, out_dir=str(tmp_path))
     assert result.fallback_used
     assert "toys 중심" in result.answer                 # 검증된 상류 요약으로 폴백(지어낸 숫자 없음)

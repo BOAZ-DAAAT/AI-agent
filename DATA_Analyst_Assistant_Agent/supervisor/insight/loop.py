@@ -1,9 +1,10 @@
-"""bounded ReAct 루프 — 판단은 LLM, 실행·검증은 코드.
+"""bounded ReAct 루프 — 판단은 LLM, 실행은 코드.
 
 매 라운드 LLM이 look/compute/chart/finish 중 하나를 JSON으로 제안하고 코드가 실행해
-관찰을 누적한다. finish 는 숫자 검증 게이트(verify.py)를 반드시 통과해야 종료되고,
-실패 사유는 다음 라운드 피드백으로 들어간다. 라운드 캡·검증 실패 캡을 넘으면
-증거 기반 보수 답변으로 폴백한다 — 지어낸 숫자로 끝나는 경우는 없다.
+관찰을 누적한다. finish 의 숫자 검증 게이트는 뺐다(2026-07-23) — 인사이트는 다운스트림
+소비자가 없는 마지막 서술 단계라, 근거에 없는 숫자 표기 하나 때문에 라운드를 태우다
+폴백(EDA/분석 요약 그대로 재탕)으로 떨어지는 게 오히려 답의 품질을 깎았다. answer 가
+비어 있을 때만 재시도시키고, 그 외엔 품질 심사(validate_result)만 거친다.
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.insight.evidence import EvidencePac
 from DATA_Analyst_Assistant_Agent.supervisor.insight.schemas import ChartEntry, InsightResult, ToolCall
 from DATA_Analyst_Assistant_Agent.supervisor.insight.tools import run_chart, run_compute, run_look
 from DATA_Analyst_Assistant_Agent.supervisor.insight.validator import validate_result
-from DATA_Analyst_Assistant_Agent.shared.numeric_verify import build_evidence_corpus, verify_texts
 from DATA_Analyst_Assistant_Agent.shared.llm import get_chat_model
 
 MAX_ROUNDS = 8                                        # LLM 호출 상한 (배회 방지)
-MAX_VERIFY_FAILS = 2                                  # finish 검증 실패 허용 횟수
+MAX_EMPTY_FINISH = 2                                  # 빈 answer 로 finish 시도 허용 횟수
 MAX_FAIL_STREAK = 3                                   # 연속 실패(거부·반복·파싱) 시 조기 폴백 — 토큰 낭비 방지
 _OBS_CHARS = 700                                      # 관찰 1건당 프롬프트 상한
 
@@ -41,7 +41,7 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
     charts: list[ChartEntry] = []
     computes: list[Any] = []                          # 게이트 통과 계산 결과 — 인용 가능 증거로 편입
     seen_calls: set[str] = set()                      # 동일 호출 반복(배회) 감지용
-    verify_fails = 0
+    empty_finish_count = 0
     fail_streak = 0                                   # 연속 실패 카운트 (성공 시 리셋)
     validator_used = False                            # 품질 심사 retry 는 1회만 (배회 방지)
 
@@ -63,7 +63,7 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
         if call.tool == "finish":
             result, missing = _try_finish(pack, call.args, computes, charts, steps, round_idx)
             if result is not None:
-                # 숫자 게이트 통과 → 내부 validator(품질 심사, 팀 컨벤션): 직답성·차트-답변 대응·인과 과장
+                # answer 확보 → 내부 validator(품질 심사, 팀 컨벤션): 직답성·차트-답변 대응·인과 과장
                 if not validator_used:
                     ok_v, feedback = validate_result(llm, pack.user_question, result.answer,
                                                      result.key_insights, charts, result.action_plan)
@@ -76,12 +76,10 @@ def run_insight_loop(pack: EvidencePack, llm: Any = None, out_dir: str = ".") ->
                 result.steps = list(steps)             # pydantic 이 리스트를 복사하므로 validate 스텝 재반영
                 result.rounds = round_idx + 1
                 return result
-            verify_fails += 1
-            if verify_fails > MAX_VERIFY_FAILS:
+            empty_finish_count += 1
+            if empty_finish_count > MAX_EMPTY_FINISH:
                 break
-            observations.append(
-                f"[검증 실패] 다음 숫자가 증거에 없다: {missing} — 증거 요약·look·compute 결과에 있는 "
-                "값만 쓰거나, 필요하면 compute 로 계산한 뒤 다시 finish 하라.")
+            observations.append(f"[제출 거부] {missing[0]} — answer 를 채워서 다시 finish 하라.")
             continue
 
         # 배회 방지: 완전히 같은 호출을 반복하면 실행하지 않고 강하게 넛지한다
@@ -131,7 +129,7 @@ def _dispatch(pack: EvidencePack, call: ToolCall, out_dir: str) -> dict:
 
 def _try_finish(pack: EvidencePack, args: dict, computes: list, charts: list[ChartEntry],
                 steps: list[dict], round_idx: int) -> tuple[InsightResult | None, list[str]]:
-    """finish 제안을 강제 게이트에 통과시킨다. 통과 못 하면 (None, 없는 숫자들)."""
+    """finish 제안을 결과로 변환한다. answer 가 비어 있을 때만 거부한다(숫자 검증 없음)."""
     answer = str(args.get("answer", "")).strip()
     key_insights = [str(s) for s in (args.get("key_insights") or [])]
     action_plan = [str(s) for s in (args.get("action_plan") or [])]
@@ -140,12 +138,7 @@ def _try_finish(pack: EvidencePack, args: dict, computes: list, charts: list[Cha
         steps.append({"round": round_idx, "tool": "finish", "reason": "", "ok": False, "note": "빈 answer"})
         return None, ["(answer가 비어 있음)"]
 
-    numbers, corpus = build_evidence_corpus(pack, computes)
-    ok, missing = verify_texts([answer, *key_insights, *action_plan], numbers, corpus)
-    steps.append({"round": round_idx, "tool": "finish", "reason": "", "ok": ok,
-                  "note": "" if ok else f"unverified: {missing}"})
-    if not ok:
-        return None, missing
+    steps.append({"round": round_idx, "tool": "finish", "reason": "", "ok": True, "note": ""})
 
     if action_plan:                                    # 권고는 사실이 아니다 — caveat 강제 부착
         limitations.append("액션 플랜은 관찰된 데이터 기반 권고이며, 인과 검증은 별도로 필요합니다.")
@@ -202,8 +195,8 @@ def _build_prompt(pack: EvidencePack, observations: list[str], round_idx: int) -
   · 여러 지표의 '특성' 비교면 grouped_bar 또는 table, 시간 컬럼이 있으면 추세 line 도 고려하라
 - finish: 답 제출. args={{"answer":"질문 직답 1~3문장","key_insights":["핵심 인사이트"],"action_plan":["근거 있는 권고(없으면 빈 배열)"],"limitations":["해석 한계"]}}
 
-[정책 — 어기면 finish 가 거부된다]
-- 위 증거 요약·look·compute 결과에 등장한 숫자만 써라. 새 숫자가 필요하면 compute 로 계산하라.
+[정책 — 품질 심사(validate_result)가 이걸 본다]
+- 가급적 위 증거 요약·look·compute 결과에 등장한 숫자를 써라. 새 숫자가 필요하면 compute 로 계산하라.
   (예: df.groupby('범주컬럼')['수치컬럼'].mean().nlargest(10) — look 을 반복하는 대신 계산하라)
 - 상관을 인과로 단정하지 마라("~때문에" 대신 "~와 연관").
 - action_plan 은 증거로 뒷받침될 때만 채워라. 억지로 만들지 마라.

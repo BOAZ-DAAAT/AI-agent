@@ -63,13 +63,44 @@ def read_mart_dataframe(target_table: str) -> pd.DataFrame | None:
         return None
 
 
+def load_eda_derived_frame(state: OrchestrationState, runtime: AgentRuntime) -> CsvArtifactData | None:
+    """EDA 분기가 원본 그레인 그대로 필터링해 남긴 df가 있으면 그것을 돌려준다(2026-07-24).
+
+    EDA가 "이상치 제거" 같은 row_filter 분기를 처리하면 그 결과를 kind=eda_derived_frame
+    CSV 아티팩트로 남긴다(agents/eda/agent.py). 이걸 안 보면 Analysis/Insight가 SQL/DB를
+    처음부터 다시 읽어서 EDA가 걸러낸 조건이 통째로 무시되는 문제가 있었다 — 필터가 성공해도
+    그 결과가 EDA 밖으로 못 나갔다.
+
+    EDA 자신이 load_analysis_inputs를 호출하는 시점(agent.py:81)에는 이 아티팩트가 아직
+    생성 전이라 항상 None이 나온다 — 그래서 이 함수는 EDA '이후' 호출부에만 자연히 영향을 준다.
+    """
+    for artifact_id in state.artifact_ids.get("eda_agent", []):
+        try:
+            artifact = runtime.adapter.get_artifact(artifact_id)
+        except Exception:  # noqa: BLE001 — 조회 실패는 그냥 다음 후보로
+            continue
+        if artifact.metadata.get("kind") != "eda_derived_frame":
+            continue
+        try:
+            text = runtime.adapter.read_artifact_text(artifact_id)
+            df = pd.read_csv(io.StringIO(text))
+        except Exception:  # noqa: BLE001 — 읽기 실패는 호출부가 기존 경로로 폴백하게 None
+            continue
+        return CsvArtifactData(artifact_id=artifact_id, text=text, dataframe=df)
+    return None
+
+
 def load_analysis_inputs(state: OrchestrationState, runtime: AgentRuntime) -> list[CsvArtifactData]:
     """하류(EDA/분석) 공용 데이터 진입점.
 
-    comprehensive(마트) 경로면 plan.target_table 로 DB 에서 마트를 직접 조회하고,
+    EDA 분기가 남긴 row_filter 결과(load_eda_derived_frame)가 있으면 그걸 최우선으로 쓴다.
+    없으면 comprehensive(마트) 경로에서 plan.target_table 로 DB 에서 마트를 직접 조회하고,
     실패하거나 simple 경로면 기존 sql_result CSV 아티팩트로 폴백한다. 반환 형식은
     read_sql_result_csvs 와 동일(list[CsvArtifactData])이라 호출부의 나머지 로직은 불변.
     """
+    derived = load_eda_derived_frame(state, runtime)
+    if derived is not None:
+        return [derived]
     target_table = state.plan.target_table if state.plan else None
     if target_table:
         df = read_mart_dataframe(target_table)

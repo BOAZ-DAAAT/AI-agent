@@ -10,7 +10,7 @@ from data_agent_backend.models.artifacts import ArtifactRef, ArtifactType
 
 from DATA_Analyst_Assistant_Agent.agents.artifact_data import CsvArtifactData, load_analysis_inputs
 from DATA_Analyst_Assistant_Agent.agents.common import AgentRuntime
-from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, reset_context, set_context
+from DATA_Analyst_Assistant_Agent.agents.eda._runtime import EdaContext, get_llm, reset_context, set_context
 from DATA_Analyst_Assistant_Agent.agents.eda.lib.derived_group import (
     build_derived_group_frame,
 )
@@ -62,6 +62,54 @@ def register_key_chart_artifacts(runtime, state, chart_paths, parent_ids, contex
     return entries, refs
 
 
+def _relationship_shift_for_row_filter(
+    original_df: pd.DataFrame, filtered_df: pd.DataFrame, primary_hypothesis: dict[str, Any],
+) -> dict[str, Any] | None:
+    """row_filter 분기 전후로 EDA 주가설(target/feature)의 상관계수가 어떻게 바뀌었는지 계산한다.
+
+    Analysis는 필터링된 df만 받아서 원본과 비교할 방법이 없다(원래 있던 행이 이미 빠져있어
+    되살릴 수 없음, 2026-07-24). EDA는 필터링하는 바로 이 시점에 원본(original_df)과
+    필터본(filtered_df)을 둘 다 메모리에 갖고 있으니, 여기서 딱 한 번 계산해서 넘긴다 —
+    Analysis가 필터링된 df를 "원본"이라 잘못 부르거나 스스로 또 필터링하지 않도록.
+    """
+    def _resolve_column(text: str) -> str | None:
+        # primary_hypothesis의 target/feature가 항상 깔끔한 컬럼명은 아니다 — "A 또는 B"처럼
+        # 서술형 텍스트로 나올 때가 있다(2026-07-24 실측). 정확히 일치가 아니라, 실제 df
+        # 컬럼명이 그 텍스트 안에 부분 문자열로 등장하는지로 느슨하게 찾는다. 숫자 컬럼을
+        # 우선한다(상관계수 계산 대상이라 문자열 컬럼은 못 씀).
+        cf = text.casefold()
+        numeric_cols = set(original_df.select_dtypes(include="number").columns)
+        candidates = [c for c in original_df.columns if c.casefold() in cf]
+        numeric_candidates = [c for c in candidates if c in numeric_cols]
+        return (numeric_candidates or candidates or [None])[0]
+
+    target = _resolve_column(str(primary_hypothesis.get("target") or ""))
+    feature = _resolve_column(str(primary_hypothesis.get("feature") or ""))
+    if not target or not feature or target == feature:
+        return None
+
+    def _corr_pair(frame: pd.DataFrame) -> dict[str, Any] | None:
+        x = pd.to_numeric(frame[target], errors="coerce")
+        y = pd.to_numeric(frame[feature], errors="coerce")
+        valid = x.notna() & y.notna()
+        if int(valid.sum()) < 3:
+            return None
+        xs, ys = x[valid], y[valid]
+        if xs.std() == 0 or ys.std() == 0:
+            return None
+        return {
+            "n": int(valid.sum()),
+            "pearson": round(float(xs.corr(ys, method="pearson")), 4),
+            "spearman": round(float(xs.corr(ys, method="spearman")), 4),
+        }
+
+    before = _corr_pair(original_df)
+    after = _corr_pair(filtered_df)
+    if not before or not after:
+        return None
+    return {"target": target, "feature": feature, "before": before, "after": after}
+
+
 def _extract_branch_instruction(user_query: str) -> str:
     """Return only the follow-up branch instruction, not the original query."""
     markers = ("[추가 지시사항]", "[異붽? 吏?쒖궗??]")
@@ -84,6 +132,8 @@ class EDAAgent:
 
         # 원본 LangGraph EDA 실행 (planner → 분석 노드 → insight/hypothesis → chart_selector)
         eda_result = self._run_eda_graph(csvs, state)
+        # JSON payload에 안 들어가게 여기서 바로 꺼낸다(DataFrame은 json.dumps 대상이 아님).
+        row_filter_frame = eda_result.pop("_row_filter_frame", None)
 
         # key 차트 PNG를 아티팩트로 등록(이상형+가드) → 경로 대신 {filename, artifact_id}로 전달
         key_chart_entries, key_chart_refs = register_key_chart_artifacts(
@@ -142,10 +192,32 @@ class EDAAgent:
                 "quality_status": effective_profile["quality_status"],
             },
         )
+        derived_frame_refs: list[ArtifactRef] = []
+        if row_filter_frame is not None:
+            # Analysis/Insight가 SQL/DB를 처음부터 다시 읽는 대신 이 필터링된 결과를 우선
+            # 쓰도록 남긴다(artifact_data.load_eda_derived_frame이 kind로 찾아 읽는다).
+            # 원본과 스키마·그레인이 동일해서 다운스트림 계약(analysis_data_contract)이
+            # 그대로 유효하다 — 그래서 row_filter만 여기까지 온다(agent.py의 위 필터 참고).
+            derived_ref = runtime.adapter.register_artifact(
+                state.run_id,
+                ArtifactType.sql_result,
+                content_text=row_filter_frame.to_csv(index=False),
+                filename=f"eda_derived_frame_{state.run_id}.csv",
+                created_by_tool="DATA_Analyst_Assistant_Agent.eda.lang_graph",
+                context=context,
+                parent_ids=source_ids,
+                lineage_edge_type="filtered_from",
+                metadata={"kind": "eda_derived_frame", "source": "eda_agent.derived_group.row_filter"},
+                preview={
+                    "row_count": int(len(row_filter_frame)),
+                    "columns": list(row_filter_frame.columns),
+                },
+            )
+            derived_frame_refs.append(derived_ref)
         return AgentEnvelope(
             agent_name=self.name,
             summary=payload["final_summary"] or "EDA LangGraph analysis completed.",
-            artifact_refs=[ref, *key_chart_refs],
+            artifact_refs=[ref, *key_chart_refs, *derived_frame_refs],
             validation=ValidationBlock(
                 local_checks=run_eda_self_check(source_ids, profile, payload["cautions"]),
                 findings=run_eda_validation_findings(payload["cautions"]),
@@ -168,21 +240,37 @@ class EDAAgent:
         same_schema = [f for f in frames if list(f.columns) == list(main.columns)]
         df = pd.concat(same_schema, ignore_index=True) if len(same_schema) > 1 else main
         branch_instruction = _extract_branch_instruction(state.user_query or "")
-        derived_question = f"[異붽? 吏?쒖궗??] {branch_instruction}" if branch_instruction else ""
-        derived_input = build_derived_group_frame(df, derived_question)
+        derived_question = f"[추가 지시사항] {branch_instruction}" if branch_instruction else ""
+        # branch_instruction 이 없으면(일반 실행) build_derived_group_frame 이 곧바로 None을
+        # 리턴하므로, 그 흔한 경로에서까지 LLM 클라이언트를 미리 만들지 않는다(테스트/키 없는
+        # 환경에서 불필요하게 실패하지 않도록 — get_llm() 은 실제 필요할 때만 평가).
+        derived_input = (
+            build_derived_group_frame(df, derived_question, llm=get_llm())
+            if branch_instruction
+            else None
+        )
         graph_df = derived_input["dataframe"] if derived_input else df
         graph_mart_design = derived_input.get("mart_design", {}) if derived_input else {}
         graph_question = state.user_query or ""
         if derived_input:
             meta = derived_input["metadata"]
-            graph_question = (
-                f"{graph_question}\n\n"
-                "[분기 EDA 입력]\n"
-                f"{meta['entity_col']} 기준으로 임시 집계표를 생성한 뒤 "
-                f"{meta['count_col']} >= {meta['min_count']} 조건을 적용했습니다. "
-                f"현재 EDA 그래프 입력은 원본 주문 행이 아니라 "
-                f"{meta['eligible_entities']}개 {meta['entity_col']} 집계 행입니다."
-            )
+            filter_desc = f'"{meta["filter_expression"]}" 조건' if meta.get("filter_expression") else "필터 없이 전체"
+            if meta.get("kind") == "row_filter":
+                graph_question = (
+                    f"{graph_question}\n\n"
+                    "[분기 EDA 입력]\n"
+                    f"개체 집계 없이 원본 행 그레인 그대로 {filter_desc}을 적용했습니다. "
+                    f"현재 EDA 그래프 입력은 전체 {meta['total_rows']}행 중 "
+                    f"{meta['eligible_rows']}행입니다."
+                )
+            else:
+                graph_question = (
+                    f"{graph_question}\n\n"
+                    "[분기 EDA 입력]\n"
+                    f"{meta['entity_col']} 기준으로 임시 집계표를 생성한 뒤 {filter_desc}을 적용했습니다. "
+                    f"현재 EDA 그래프 입력은 원본 주문 행이 아니라 "
+                    f"{meta['eligible_entities']}개 {meta['entity_col']} 집계 행입니다."
+                )
 
         # 원본 모듈 전역(_df 등)을 대체하는 실행 컨텍스트. df 만 채우고
         # key/measure/time 컬럼은 load_mart 노드가 확정한다.
@@ -235,6 +323,15 @@ class EDAAgent:
         finally:
             reset_context()
         if derived_input:
+            # row_filter만 다운스트림(Analysis/Insight)에 CSV로 넘긴다 — 원본과 스키마·그레인이
+            # 동일해서 안전하다. entity_comparison(판매자 집계 등)은 그레인이 바뀌어
+            # analysis_data_contract와 어긋나므로 EDA 내부용으로만 남겨둔다(2026-07-24).
+            if derived_input["metadata"].get("kind") == "row_filter":
+                shift = _relationship_shift_for_row_filter(
+                    df, graph_df, result.get("primary_hypothesis") or {})
+                if shift:
+                    derived_input["metadata"]["relationship_shift"] = shift
+                result["_row_filter_frame"] = graph_df
             statistical_metadata = dict(result.get("statistical_metadata", {}) or {})
             statistical_metadata["derived_group_comparison"] = derived_input["metadata"]
             result["statistical_metadata"] = statistical_metadata
