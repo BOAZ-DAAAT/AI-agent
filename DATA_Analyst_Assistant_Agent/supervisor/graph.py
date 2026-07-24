@@ -76,6 +76,8 @@ from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
     olist_template_routing_enabled,
 )
 
+MAX_ANALYSIS_REVIEW_RESOLUTIONS = 2
+
 
 def _run_id_from_state(state: SupervisorState) -> str:
     return str(state.get("current_run_id") or "")
@@ -864,11 +866,21 @@ def make_resolve_analysis_review_node(backend_adapter: Any | None = None):
         )
         decisions = list(state.get("analysis_review_decisions", []))
         decision_payload = decision.model_dump(mode="json")
-        if not any(
+        already_resolved = any(
             item.get("approval_id") == decision.approval_id
             and item.get("candidate_id") == decision.candidate_id
             for item in decisions
-        ):
+        )
+        if not already_resolved and len(decisions) >= MAX_ANALYSIS_REVIEW_RESOLUTIONS:
+            return _terminal_failure_updates(
+                state,
+                "resolve_analysis_review",
+                (
+                    "analysis review는 최대 "
+                    f"{MAX_ANALYSIS_REVIEW_RESOLUTIONS}회까지 허용됩니다."
+                ),
+            )
+        if not already_resolved:
             decisions.append(decision_payload)
 
         if decision.review_request.requires_followup_analysis:

@@ -484,6 +484,68 @@ def test_resolve_analysis_review_is_idempotent_for_decision_history() -> None:
     assert len(replayed["analysis_review_decisions"]) == 1
 
 
+def test_resolve_analysis_review_allows_second_distinct_decision() -> None:
+    state = commit_candidate(_pending_review_state(requires_followup_analysis=True), None)
+    state["analysis_selection_response"] = {
+        "selected_option_id": "median",
+        "free_text": None,
+    }
+    state["analysis_review_decisions"] = [
+        {
+            "approval_id": "previous_approval",
+            "candidate_id": "previous_candidate",
+        }
+    ]
+
+    resolved = make_resolve_analysis_review_node()(state)
+
+    assert resolved["terminal_state"] == "running"
+    assert resolved["next_action"] == "call_analysis_agent"
+    assert len(resolved["analysis_review_decisions"]) == 2
+
+
+def test_resolve_analysis_review_rejects_third_distinct_decision() -> None:
+    state = commit_candidate(_pending_review_state(requires_followup_analysis=True), None)
+    state["analysis_selection_response"] = {
+        "selected_option_id": "median",
+        "free_text": None,
+    }
+    state["analysis_review_decisions"] = [
+        {"approval_id": "approval_001", "candidate_id": "candidate_001"},
+        {"approval_id": "approval_002", "candidate_id": "candidate_002"},
+    ]
+
+    resolved = make_resolve_analysis_review_node()(state)
+
+    assert resolved["terminal_state"] == "failed_terminal"
+    assert resolved["next_action"] == "finalize"
+    assert resolved["current_step"] == "resolve_analysis_review"
+    assert resolved["final_answer"] == "analysis review는 최대 2회까지 허용됩니다."
+
+
+def test_resolve_analysis_review_replay_is_allowed_at_limit() -> None:
+    state = commit_candidate(_pending_review_state(requires_followup_analysis=True), None)
+    state["analysis_selection_response"] = {
+        "selected_option_id": "median",
+        "free_text": None,
+    }
+    pending_approval = state["pending_approval"]
+    pending_result = state["pending_result"]
+    state["analysis_review_decisions"] = [
+        {
+            "approval_id": pending_approval["approval_id"],
+            "candidate_id": pending_result["candidate_id"],
+        },
+        {"approval_id": "other_approval", "candidate_id": "other_candidate"},
+    ]
+
+    resolved = make_resolve_analysis_review_node()(state)
+
+    assert resolved["terminal_state"] == "running"
+    assert resolved["next_action"] == "call_analysis_agent"
+    assert len(resolved["analysis_review_decisions"]) == 2
+
+
 def test_review_option_ids_are_trimmed_before_resume_matching() -> None:
     payload = _review_request()
     payload["options"][0]["id"] = " mean "
