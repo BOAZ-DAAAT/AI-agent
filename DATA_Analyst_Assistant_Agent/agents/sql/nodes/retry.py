@@ -16,17 +16,21 @@ REPAIR_REASON_CODES = {
 }
 
 
-def _is_repair_retry(retry_hint: dict) -> bool:
+def is_repair_retry(retry_hint: dict) -> bool:
+    """현재 재시도 사유가 SQL 국소 repair 대상인지 반환한다."""
     reason_code = retry_hint.get("reason_code")
     if reason_code in REPAIR_REASON_CODES:
         return True
-    return reason_code == "sql_generation_failed" and (retry_hint.get("details") or {}).get("generation_stage") == "repair"
+    return (
+        reason_code == "sql_generation_failed"
+        and (retry_hint.get("details") or {}).get("generation_stage") == "repair"
+    )
 
 
 def increase_retry(state: AgentState):
     validation = state.get("validation") or {}
     retry_hint = state.get("retry_hint") or validation.get("retry_hint", {})
-    repair_retry = _is_repair_retry(retry_hint)
+    repair_retry = is_repair_retry(retry_hint)
     update = {
         "retry_count": state["retry_count"] + 1,
         # 직전 검증 피드백을 명시적으로 state에 유지.
@@ -36,6 +40,7 @@ def increase_retry(state: AgentState):
         "retry_hint": retry_hint,
     }
     if repair_retry:
+        update["repair_retry_count"] = int(state.get("repair_retry_count") or 0) + 1
         current_draft = state.get("sql_draft") or {}
         previous_draft = state.get("previous_sql_draft") or {}
         if str(current_draft.get("sql") or "").strip():

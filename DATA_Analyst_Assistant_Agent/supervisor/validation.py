@@ -24,6 +24,7 @@ ValidationDisposition = Literal[
     "accept_with_limitations",
     "recover",
     "retry",
+    "clarify",
     "await_approval",
     "reject",
 ]
@@ -63,7 +64,7 @@ class ResultValidationDecision(BaseModel):
     valid: bool
     next_action: PostExecutionNextAction
     reason: str = ""
-    decision: Literal["accept", "accept_with_limitations", "retry", "await_approval", "reject"] = "accept"
+    decision: Literal["accept", "accept_with_limitations", "retry", "clarify", "await_approval", "reject"] = "accept"
     terminal_state: str = "running"
     final_answer: str = ""
     reason_code: str = "none"
@@ -109,6 +110,7 @@ def outcome_from_contract_decision(
         reason=decision.reason,
         reason_code=decision.reason_code,
         retry_target=agent if decision.decision == "retry" else None,
+        recovery_action="clarify" if decision.decision == "clarify" else None,
         terminal_state=decision.terminal_state,
     )
 
@@ -352,6 +354,29 @@ def _route_explicit_failure(
     suggested_action = str(result.retry_hint.suggested_action or "")
     if suggested_action and suggested_action != "continue":
         failure_streak["suggested_action"] = suggested_action
+
+    if result.agent == "sql_agent" and suggested_action == "clarify":
+        clarification_count = int(state.get("sql_clarification_count", 0) or 0)
+        if clarification_count < 1:
+            return ResultValidationDecision(
+                valid=False,
+                next_action="fail",
+                reason="SQL semantic fallback이 최종 검증에 실패해 사용자 입력이 필요합니다.",
+                decision="clarify",
+                reason_code=reason_code,
+                failure_reason=failure_reason,
+                failure_streak=failure_streak,
+            )
+        return ResultValidationDecision(
+            valid=False,
+            next_action="fail",
+            reason="같은 실행에서 SQL fallback 재질문 한도 1회에 도달했습니다.",
+            decision="reject",
+            terminal_state=SupervisorTerminalState.failed_terminal.value,
+            reason_code=reason_code,
+            failure_reason=failure_reason,
+            failure_streak=failure_streak,
+        )
 
     retry_count = int(state.get("retry_counts", {}).get(result.agent, 0))
     max_retry = int(state.get("max_retry_per_agent", 0))

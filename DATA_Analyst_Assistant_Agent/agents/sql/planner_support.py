@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 import re
 from typing import Any, Optional
 
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import ALLOWED_MART_SCHEMA, clean_sql, get_llm
@@ -73,7 +75,7 @@ def retry_feedback_text(state: AgentState) -> str:
     return "\n".join(feedback_parts)
 
 
-def try_llm_json(prompt: str) -> Optional[str]:
+def try_llm_json(prompt: str | Sequence[BaseMessage]) -> Optional[str]:
     try:
         return get_llm().invoke(prompt).content
     except Exception:

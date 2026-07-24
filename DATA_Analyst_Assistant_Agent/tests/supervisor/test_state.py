@@ -5,8 +5,10 @@ import json
 import pytest
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisHeuristic,
     AnalysisPlan,
     ApprovalRequirement,
+    RequiredDerivation,
     SupervisorTerminalState,
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
@@ -442,6 +444,64 @@ def test_analysis_plan_sql_defaults_are_empty() -> None:
     assert plan.generated_sql == ""
     assert plan.source_sql == ""
     assert plan.query_rules == {}
+    assert plan.required_derivations == []
+    assert plan.analysis_heuristics == []
+
+
+def test_analysis_plan_derivation_contracts_normalize_and_preserve_extra_fields() -> None:
+    plan = AnalysisPlan(
+        goal="배송 지연 분석",
+        required_derivations=[
+            {
+                "name": "  배송 지연 일수  ",
+                "source_columns": [
+                    " orders.delivered_at ",
+                    "orders.estimated_at",
+                    "orders.delivered_at",
+                ],
+                "safe_for": ["분포 분석", " 분포 분석 "],
+                "not_for": None,
+                "custom_metadata": {"owner": "ops"},
+            }
+        ],
+        analysis_heuristics=[
+            {
+                "name": "  이상치 민감도 기록 ",
+                "custom_policy_version": 2,
+            }
+        ],
+    )
+
+    derivation = plan.required_derivations[0]
+    heuristic = plan.analysis_heuristics[0]
+    assert isinstance(derivation, RequiredDerivation)
+    assert derivation.name == "배송 지연 일수"
+    assert derivation.preferred_name == "배송 지연 일수"
+    assert derivation.source_columns == [
+        "orders.delivered_at",
+        "orders.estimated_at",
+    ]
+    assert derivation.safe_for == ["분포 분석"]
+    assert derivation.not_for == []
+    assert derivation.model_dump()["custom_metadata"] == {"owner": "ops"}
+    assert isinstance(heuristic, AnalysisHeuristic)
+    assert heuristic.name == "이상치 민감도 기록"
+    assert heuristic.must_record is True
+    assert heuristic.model_dump()["custom_policy_version"] == 2
+
+
+def test_analysis_plan_derivation_contract_rejects_invalid_core_types() -> None:
+    with pytest.raises(ValueError):
+        AnalysisPlan(
+            goal="잘못된 계약",
+            required_derivations=[{"name": 123}],
+        )
+
+    with pytest.raises(ValueError):
+        AnalysisPlan(
+            goal="잘못된 계약",
+            analysis_heuristics=[{"name": "정책", "must_record": "항상"}],
+        )
 
 
 def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> None:
@@ -463,6 +523,16 @@ def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> Non
             "document_id": "customer_value",
             "entity_grain": ["customer_unique_id 기준"],
         },
+        "required_derivations": [
+            {
+                "name": "주문별 배송 지연 일수",
+                "preferred_name": "delivery_delay_days",
+                "source_columns": ["delivered_at", "estimated_at"],
+            }
+        ],
+        "analysis_heuristics": [
+            {"name": "지연 일수 이상치 민감도", "default_policy": "winsorize 금지"}
+        ],
     }
 
     orchestration = to_orchestration_state(state)
@@ -477,6 +547,32 @@ def test_to_orchestration_state_preserves_supervisor_plan_intent_fields() -> Non
         "document_id": "customer_value",
         "entity_grain": ["customer_unique_id 기준"],
     }
+    assert orchestration.plan.required_derivations[0].preferred_name == "delivery_delay_days"
+    assert orchestration.plan.analysis_heuristics[0].must_record is True
+
+
+def test_to_orchestration_state_promotes_checkpoint_with_required_derivation() -> None:
+    state = empty_supervisor_state(
+        thread_id="thread_contract",
+        run_id="run_contract",
+        user_query="배송 지연 분석",
+        datasource_id="ds_001",
+    )
+    state["analysis_plan"] = {
+        "goal": "배송 지연 분석",
+        "route_kind": "simple",
+        "requires_mart_review": False,
+        "required_derivations": [
+            {"name": "배송 지연 일수", "preferred_name": "delivery_delay_days"}
+        ],
+    }
+
+    orchestration = to_orchestration_state(state)
+
+    assert orchestration.route_kind == "comprehensive"
+    assert orchestration.plan is not None
+    assert orchestration.plan.route_kind == "comprehensive"
+    assert orchestration.plan.requires_mart_review is True
 
 
 def test_to_orchestration_state_without_plan_preserves_failure_context() -> None:

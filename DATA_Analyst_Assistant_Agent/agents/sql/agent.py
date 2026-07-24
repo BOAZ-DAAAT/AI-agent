@@ -13,10 +13,16 @@ from DATA_Analyst_Assistant_Agent.shared.contracts import (
     AgentStatus,
     LocalCheck,
     OrchestrationState,
+    OlistTemplateId,
+    OlistTemplateKind,
+    OlistTemplateParameters,
     ValidationBlock,
     ValidationFinding,
 )
 from DATA_Analyst_Assistant_Agent.agents.sql.validation_artifact import build_validation_summary_payload
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    olist_template_routing_enabled,
+)
 
 
 def _looks_temporal_column(name: str) -> bool:
@@ -250,11 +256,47 @@ class SQLAgent:
         )
 
     def _run_main_sql_agent(self, state: OrchestrationState) -> dict[str, Any]:
-        from DATA_Analyst_Assistant_Agent.agents.sql.graph import build_app
+        from DATA_Analyst_Assistant_Agent.agents.sql.graph import (
+            SQL_MAX_REPAIR_RETRIES,
+            SQL_MAX_RETRIES,
+            build_app,
+        )
 
         app = build_app()
+        if (
+            state.plan is not None
+            and state.plan.sql_template_id is not None
+            and not olist_template_routing_enabled()
+        ):
+            state.plan.planner_mode = "llm"
+            state.plan.sql_generation_source = "semantic_llm"
+            state.plan.sql_template_id = None
+            state.plan.sql_template_kind = None
+            state.plan.sql_template_parameters = OlistTemplateParameters()
         catalog_summary = state.catalog_summary or {}
         retry_context = state.plan.retry_context if state.plan else None
+        required_derivations = (
+            [
+                item.model_dump(mode="json")
+                for item in state.plan.required_derivations
+            ]
+            if state.plan is not None
+            else []
+        )
+        analysis_heuristics = (
+            [
+                item.model_dump(mode="json")
+                for item in state.plan.analysis_heuristics
+            ]
+            if state.plan is not None
+            else []
+        )
+        if state.plan is not None and required_derivations:
+            state.plan.route_kind = "comprehensive"
+            state.plan.requires_mart_review = True
+            state.plan.sql_generation_source = "semantic_llm"
+            state.plan.sql_template_id = None
+            state.plan.sql_template_kind = None
         supervisor_plan_context = {}
         if state.plan is not None:
             supervisor_plan_context = {
@@ -264,13 +306,17 @@ class SQLAgent:
                 "dimension": state.plan.dimension,
                 "filters": state.plan.filters,
                 "requires_mart_review": state.plan.requires_mart_review,
+                "sql_generation_source": state.plan.sql_generation_source,
+                "sql_template_id": (
+                    state.plan.sql_template_id.value if state.plan.sql_template_id else None
+                ),
+                "sql_template_kind": (
+                    state.plan.sql_template_kind.value if state.plan.sql_template_kind else None
+                ),
+                "sql_template_parameters": state.plan.sql_template_parameters.model_dump(),
             }
             if state.plan.query_rules:
                 supervisor_plan_context["query_rules"] = state.plan.query_rules
-            if state.plan.required_derivations:
-                supervisor_plan_context["required_derivations"] = state.plan.required_derivations
-            if state.plan.analysis_heuristics:
-                supervisor_plan_context["analysis_heuristics"] = state.plan.analysis_heuristics
         clarification_request = ""
         if retry_context:
             feedback = (retry_context.get("agent_feedback") or {}).get("sql_agent")
@@ -302,6 +348,8 @@ class SQLAgent:
                 "required_db_schema": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "clarification_request": clarification_request,
                 "planner_selection_reason": planner_selection_reason,
+                "required_derivations": required_derivations,
+                "analysis_heuristics": analysis_heuristics,
                 "schema_text": json.dumps(catalog_summary, ensure_ascii=False) if catalog_summary else "",
                 "integrity_text": "",
                 "integrity_dataset_name": state.datasource_id or "default",
@@ -326,9 +374,36 @@ class SQLAgent:
                 "retry_hint": {},
                 "validation_summary": {},
                 "retry_count": 0,
+                "repair_retry_count": 0,
                 "feedback": "",
                 "error": "",
-                "generation_source": "llm",
+                "generation_source": (
+                    "olist_template"
+                    if state.plan is not None and state.plan.sql_template_id is not None
+                    else "semantic_llm"
+                ),
+                "sql_generation_source": (
+                    "olist_template"
+                    if state.plan is not None and state.plan.sql_template_id is not None
+                    else "semantic_llm"
+                ),
+                "sql_template_id": (
+                    state.plan.sql_template_id.value
+                    if state.plan is not None and state.plan.sql_template_id is not None
+                    else None
+                ),
+                "sql_template_kind": (
+                    state.plan.sql_template_kind.value
+                    if state.plan is not None and state.plan.sql_template_kind is not None
+                    else None
+                ),
+                "sql_template_parameters": (
+                    state.plan.sql_template_parameters.model_dump()
+                    if state.plan is not None
+                    else {}
+                ),
+                "max_retries": SQL_MAX_RETRIES,
+                "max_repair_retries": SQL_MAX_REPAIR_RETRIES,
                 "generation_failure_reason": "",
                 "generation_context_diagnostics": [],
                 "failed_statement_index": None,
@@ -356,8 +431,28 @@ class SQLAgent:
         context = runtime.context(state, node_name=self.name, tool_name="sql_agent.lang_graph")
         sql_draft = result.get("sql_draft") or {}
         generated_sql = sql_draft.get("sql") or ""
+        generation_source = self._normalized_generation_source(
+            result.get("sql_generation_source") or result.get("generation_source")
+        )
+        template_id_value = result.get("sql_template_id") or (
+            state.plan.sql_template_id.value
+            if state.plan is not None and state.plan.sql_template_id is not None
+            else None
+        )
+        template_id = OlistTemplateId(template_id_value) if template_id_value else None
+        template_kind_value = result.get("sql_template_kind") or (
+            state.plan.sql_template_kind.value
+            if state.plan is not None and state.plan.sql_template_kind is not None
+            else None
+        )
+        template_kind = OlistTemplateKind(template_kind_value) if template_kind_value else None
+        template_parameters = (
+            state.plan.sql_template_parameters.model_dump(mode="json")
+            if state.plan is not None
+            else {}
+        )
         state.generated_sql = generated_sql
-        state.planner_mode = "llm"
+        state.planner_mode = "deterministic" if template_id is not None else "llm"
         # comprehensive(마트) 경로면 마트 테이블 참조를 plan에 실어 하류로 넘긴다.
         # 하류(EDA/분석)는 이 이름으로 DB에서 마트를 직접 조회한다. simple 경로면 target_table 없음.
         target_table = sql_draft.get("target_table") if sql_draft.get("sql_type") != "select" else None
@@ -367,7 +462,10 @@ class SQLAgent:
         if state.plan is not None:
             state.plan.generated_sql = generated_sql
             state.plan.source_sql = generated_sql
-            state.plan.planner_mode = "llm"
+            state.plan.planner_mode = state.planner_mode
+            state.plan.sql_generation_source = generation_source
+            state.plan.sql_template_id = template_id
+            state.plan.sql_template_kind = template_kind
             state.plan.target_table = target_table or None
             state.plan.source_tables = source_tables
             state.plan.business_grain = business_grain
@@ -376,8 +474,14 @@ class SQLAgent:
                 result.get("mart_design") or {},
                 sql_draft,
                 generated_sql,
-                required_derivations=state.plan.required_derivations,
-                analysis_heuristics=state.plan.analysis_heuristics,
+                required_derivations=[
+                    item.model_dump(mode="json")
+                    for item in state.plan.required_derivations
+                ],
+                analysis_heuristics=[
+                    item.model_dump(mode="json")
+                    for item in state.plan.analysis_heuristics
+                ],
             )
 
         plan_payload = {
@@ -390,7 +494,11 @@ class SQLAgent:
             "sql_draft": sql_draft,
             "statement_results": result.get("statement_results") or [],
             "validation": result.get("validation") or {},
-            "generation_source": result.get("generation_source") or "llm",
+            "generation_source": generation_source,
+            "sql_generation_source": generation_source,
+            "sql_template_id": template_id.value if template_id else None,
+            "sql_template_kind": template_kind.value if template_kind else None,
+            "sql_template_parameters": template_parameters,
             "generation_failure_reason": result.get("generation_failure_reason") or "",
             "failed_statement_index": result.get("failed_statement_index"),
             "failed_statement_sql": result.get("failed_statement_sql") or "",
@@ -414,13 +522,21 @@ class SQLAgent:
                 "kind": "sql_lang_graph_result",
                 "source": "main/sql_agent/lang graph",
                 "sql_type": sql_draft.get("sql_type"),
-                "generation_source": result.get("generation_source") or "llm",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
             },
             preview={
                 "question_type": (result.get("plan") or {}).get("question_type"),
                 "task_type": (result.get("plan") or {}).get("task_type"),
                 "validation": (result.get("validation") or {}).get("result"),
                 "final_answer": result.get("final_answer") or "",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
         sql_plan_ref = runtime.adapter.register_artifact(
@@ -431,8 +547,22 @@ class SQLAgent:
             created_by_tool="sql_agent.lang_graph",
             context=context,
             parent_ids=[plan_ref.artifact_id],
-            metadata={"kind": "sql_plan", "source": "main/sql_agent/lang graph"},
-            preview={"route_kind": (result.get("plan") or {}).get("route_kind")},
+            metadata={
+                "kind": "sql_plan",
+                "source": "main/sql_agent/lang graph",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
+            },
+            preview={
+                "route_kind": (result.get("plan") or {}).get("route_kind"),
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+            },
         )
         sql_ref = runtime.adapter.register_artifact(
             state.run_id,
@@ -442,8 +572,23 @@ class SQLAgent:
             created_by_tool="sql_agent.lang_graph",
             context=context,
             parent_ids=[plan_ref.artifact_id],
-            metadata={"kind": "generated_sql", "source": "main/sql_agent/lang graph"},
-            preview={"sql": generated_sql, "sql_type": sql_draft.get("sql_type")},
+            metadata={
+                "kind": "generated_sql",
+                "source": "main/sql_agent/lang graph",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
+            },
+            preview={
+                "sql": generated_sql,
+                "sql_type": sql_draft.get("sql_type"),
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+            },
         )
 
         result_csv, result_columns, result_row_count = self._main_sql_result_to_csv(result.get("sql_result"))
@@ -456,11 +601,23 @@ class SQLAgent:
             context=context,
             parent_ids=[sql_ref.artifact_id],
             lineage_edge_type="query_result_of",
-            metadata={"kind": "sql_result", "source": "main/sql_agent/lang graph"},
+            metadata={
+                "kind": "sql_result",
+                "source": "main/sql_agent/lang graph",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+                "target_table": target_table,
+            },
             preview={
                 "row_count": result_row_count,
                 "columns": result_columns,
                 "sample_rows": self._sample_rows_for_preview(result.get("sql_result")),
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
         validation_payload = build_validation_summary_payload(result)
@@ -472,15 +629,26 @@ class SQLAgent:
             created_by_tool="sql_agent.lang_graph",
             context=context,
             parent_ids=[plan_ref.artifact_id, sql_ref.artifact_id],
-            metadata={"kind": "ge_table_validation_json", "source": "main/sql_agent/lang graph"},
+            metadata={
+                "kind": "ge_table_validation_json",
+                "source": "main/sql_agent/lang graph",
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
+            },
             preview={
                 "validation_result": (result.get("validation") or {}).get("result"),
                 "reason_code": ((result.get("retry_hint") or {}).get("reason_code")),
+                "generation_source": generation_source,
+                "sql_generation_source": generation_source,
+                "sql_template_id": template_id.value if template_id else None,
+                "sql_template_kind": template_kind.value if template_kind else None,
             },
         )
 
         validation = result.get("validation") or {}
-        retry_hint = result.get("retry_hint") or {}
+        retry_hint = self._final_retry_hint(state, result, generation_source, template_id)
         if validation.get("result") == "invalid":
             state.error_state = {
                 "code": retry_hint.get("reason_code") or "SQL_GENERATION_OR_EXECUTION_FAILED",
@@ -518,7 +686,7 @@ class SQLAgent:
             ),
         ]
         fallback_used = False
-        if result.get("generation_source") == "failed":
+        if generation_source == "failed":
             checks.append(
                 LocalCheck(
                     name="main_sql_agent_generation_source",
@@ -527,13 +695,13 @@ class SQLAgent:
                     detail=f"generation_source=failed reason={result.get('generation_failure_reason') or 'none'}",
                 )
             )
-        elif result.get("generation_source") == "repair":
+        elif result.get("repair_attempted"):
             checks.append(
                 LocalCheck(
                     name="main_sql_agent_generation_source",
                     passed=True,
                     severity="info",
-                    detail="generation_source=repair",
+                    detail="generation_source=semantic_llm repair_attempted=true",
                 )
             )
         if validation.get("result") == "invalid":
@@ -564,6 +732,71 @@ class SQLAgent:
         )
 
     @staticmethod
+    def _normalized_generation_source(value: Any) -> str:
+        if value in {"llm", "repair", "semantic_llm"}:
+            return "semantic_llm"
+        if value in {"olist_template", "failed"}:
+            return str(value)
+        return "semantic_llm"
+
+    @classmethod
+    def _final_retry_hint(
+        cls,
+        state: OrchestrationState,
+        result: dict[str, Any],
+        generation_source: str,
+        template_id: OlistTemplateId | None,
+    ) -> dict[str, Any]:
+        retry_hint = dict(result.get("retry_hint") or {})
+        validation = result.get("validation") or {}
+        if validation.get("result") != "invalid":
+            return retry_hint
+        if template_id is not None:
+            return {
+                **retry_hint,
+                "retryable": False,
+                "suggested_action": "stop_and_surface_error",
+                "reason_code": retry_hint.get("reason_code") or "olist_template_failure",
+            }
+
+        reason_code = str(retry_hint.get("reason_code") or "")
+        technical_codes = {"execution_error", "missing_table", "missing_column", "olist_template_failure"}
+        if reason_code in technical_codes:
+            return {
+                **retry_hint,
+                "retryable": False,
+                "suggested_action": "stop_and_surface_error",
+            }
+        if generation_source in {"semantic_llm", "failed"}:
+            details = dict(retry_hint.get("details") or {})
+            details.update(
+                {
+                    "clarification_question": cls._clarification_question(state),
+                    "failure_reason": validation.get("reason") or result.get("generation_failure_reason") or "SQL 생성 및 검증 실패",
+                }
+            )
+            return {
+                **retry_hint,
+                "retryable": False,
+                "suggested_action": "clarify",
+                "reason_code": reason_code or "semantic_sql_failed",
+                "details": details,
+            }
+        return retry_hint
+
+    @staticmethod
+    def _clarification_question(state: OrchestrationState) -> str:
+        metric = state.plan.metric if state.plan is not None else None
+        dimension = state.plan.dimension if state.plan is not None else None
+        examples = []
+        if not metric:
+            examples.append("핵심 지표")
+        if not dimension:
+            examples.append("집계 단위")
+        examples.append("분석 기간")
+        return f"분석 범위를 다시 정할 수 있도록 {', '.join(examples)}를 구체적으로 알려주세요."
+
+    @staticmethod
     def _validation_finding(item: dict[str, Any]) -> ValidationFinding:
         severity = str(item.get("severity") or "info")
         retryable = bool(item.get("retryable", False))
@@ -592,6 +825,7 @@ class SQLAgent:
         mart_design: dict[str, Any],
         sql_draft: dict[str, Any],
         generated_sql: str,
+        *,
         required_derivations: list[dict[str, Any]] | None = None,
         analysis_heuristics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -625,6 +859,33 @@ class SQLAgent:
             item
             for item in derived_columns
             if str(item.get("aggregation_method") or "none").lower() != "none"
+        ]
+        explicit_unimplemented = {
+            str(item.get("name") or item.get("preferred_name") or "").casefold(): item
+            for item in mart_design.get("unimplemented_derivations") or []
+            if isinstance(item, dict)
+        }
+        implemented_derivations = [
+            {
+                **item,
+                "output_column": str(
+                    item.get("preferred_name") or item.get("name") or ""
+                ).strip(),
+            }
+            for item in implemented_derivations
+        ]
+        unimplemented_derivations = [
+            {
+                **item,
+                **explicit_unimplemented.get(
+                    str(item.get("preferred_name") or item.get("name") or "").casefold(),
+                    {},
+                ),
+                "output_column": str(
+                    item.get("preferred_name") or item.get("name") or ""
+                ).strip(),
+            }
+            for item in unimplemented_derivations
         ]
         return {
             "target_table": sql_draft.get("target_table") or mart_design.get("mart_name"),
@@ -678,8 +939,14 @@ class SQLAgent:
             mart_design,
             sql_draft,
             generated_sql,
-            required_derivations=list(getattr(plan, "required_derivations", []) or []),
-            analysis_heuristics=list(getattr(plan, "analysis_heuristics", []) or []),
+            required_derivations=[
+                item.model_dump(mode="json")
+                for item in getattr(plan, "required_derivations", [])
+            ],
+            analysis_heuristics=[
+                item.model_dump(mode="json")
+                for item in getattr(plan, "analysis_heuristics", [])
+            ],
         )
         inferred_columns = cls._infer_column_lineage_from_sql(generated_sql)
         if inferred_columns and not contract.get("derived_columns"):

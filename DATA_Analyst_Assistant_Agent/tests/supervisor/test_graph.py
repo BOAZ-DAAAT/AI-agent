@@ -790,6 +790,7 @@ def test_supervisor_graph_has_expected_nodes() -> None:
 
     assert set(graph.nodes) == {
         "__start__",
+        "match_olist_template",
         "rewrite_retrieval_query",
         "retrieve_analysis_rules",
         "clarify_query",
@@ -1261,6 +1262,63 @@ def test_plan_node_recovers_missing_goal_with_fallback_plan() -> None:
     assert result["analysis_plan"]["goal"] == "seller delivery and review analysis"
     assert result["analysis_plan"]["planner_mode"] == "fallback"
     assert result["decision_errors"][0]["recovered"] is True
+def test_plan_node_promotes_required_derivations_to_comprehensive() -> None:
+    decision = {
+        **_plan_decision(route_kind="simple"),
+        "required_derivations": [
+            {
+                "name": "배송 지연 일수",
+                "preferred_name": "delivery_delay_days",
+                "source_columns": ["delivered_at", "estimated_at"],
+                "definition": "delivered_at과 estimated_at의 일수 차이",
+            }
+        ],
+        "analysis_heuristics": [
+            {"name": "이상치 민감도 기록", "default_policy": "원자료와 함께 기록"}
+        ],
+    }
+    result = make_create_analysis_plan_node(
+        SequencedDecisionModel([decision])
+    )(_state())
+
+    plan = result["analysis_plan"]
+    assert plan["route_kind"] == "comprehensive"
+    assert plan["requires_mart_review"] is True
+    assert plan["sql_template_id"] is None
+    assert plan["required_derivations"][0]["preferred_name"] == "delivery_delay_days"
+    assert plan["analysis_heuristics"][0]["must_record"] is True
+
+
+def test_plan_node_does_not_promote_heuristic_only_plan() -> None:
+    decision = {
+        **_plan_decision(route_kind="simple"),
+        "analysis_heuristics": [{"name": "결측 민감도 기록"}],
+    }
+    result = make_create_analysis_plan_node(
+        SequencedDecisionModel([decision])
+    )(_state())
+
+    assert result["analysis_plan"]["route_kind"] == "simple"
+    assert result["analysis_plan"]["requires_mart_review"] is False
+
+
+def test_plan_node_preserves_checkpoint_contracts_when_llm_omits_them() -> None:
+    state = _state()
+    state["analysis_plan"] = {
+        "goal": "기존 계획",
+        "required_derivations": [
+            {"name": "배송 지연 일수", "preferred_name": "delivery_delay_days"}
+        ],
+        "analysis_heuristics": [{"name": "이상치 민감도 기록"}],
+    }
+
+    result = make_create_analysis_plan_node(
+        SequencedDecisionModel([_plan_decision(route_kind="simple")])
+    )(state)
+
+    assert result["analysis_plan"]["route_kind"] == "comprehensive"
+    assert result["analysis_plan"]["required_derivations"][0]["preferred_name"] == "delivery_delay_days"
+    assert result["analysis_plan"]["analysis_heuristics"][0]["must_record"] is True
 
 
 def test_execute_subagent_runs_only_the_registered_action() -> None:

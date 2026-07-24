@@ -126,8 +126,8 @@ def test_analysis_plan_decision_recovers_derivation_shaped_payload_without_goal(
     )
 
     assert decision.goal == "delivery days calculation"
-    assert decision.required_derivations[0]["name"] == "delivery_days"
-    assert decision.required_derivations[0]["definition"] == (
+    assert decision.required_derivations[0].name == "delivery_days"
+    assert decision.required_derivations[0].definition == (
         "purchase timestamp to delivered customer date in days"
     )
 

@@ -104,6 +104,7 @@ def _generation_failure(
     return {
         "sql_draft": empty_sql_draft(state, reasoning=detail),
         "generation_source": "failed",
+        "sql_generation_source": "failed",
         "generation_failure_reason": reason_code,
         "validation": {
             "result": "invalid",
@@ -238,7 +239,8 @@ def generate_sql(state: AgentState):
         state,
         {
             "sql_draft": SQLDraft(**normalized).model_dump(),
-            "generation_source": "repair" if state.get("retry_count", 0) > 0 else "llm",
+            "generation_source": "semantic_llm",
+            "sql_generation_source": "semantic_llm",
             "generation_failure_reason": "",
         },
         diagnostics,

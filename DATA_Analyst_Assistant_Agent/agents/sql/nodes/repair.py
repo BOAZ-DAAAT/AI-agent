@@ -199,6 +199,7 @@ def _repair_failure(
     return {
         "sql_draft": {},
         "generation_source": "failed",
+        "sql_generation_source": "failed",
         "generation_failure_reason": reason_code,
         "validation": {
             "result": "invalid",
@@ -285,7 +286,8 @@ def repair_sql(state: AgentState) -> dict[str, Any]:
 
     return {
         "sql_draft": repaired_draft,
-        "generation_source": "repair",
+        "generation_source": "semantic_llm",
+        "sql_generation_source": "semantic_llm",
         "generation_failure_reason": "",
         "validation": {},
         "validation_findings": [],

@@ -105,6 +105,31 @@ class MetricSupport(BaseModel):
         return normalized
 
 
+class UnimplementedDerivation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, description="required_derivations의 preferred_name")
+    reason: str = Field(min_length=1)
+    required_columns: List[str] = Field(default_factory=list)
+
+    @field_validator("name", "reason")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("빈 문자열은 허용되지 않습니다")
+        return value.strip()
+
+    @field_validator("required_columns")
+    @classmethod
+    def normalize_required_columns(cls, value: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for item in value:
+            candidate = item.strip()
+            if candidate and candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+
 class MartDesign(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -115,8 +140,8 @@ class MartDesign(BaseModel):
     source_grains: Dict[str, List[str]] = Field(min_length=1)
     deduplication_keys: List[str] = Field(min_length=1)
     column_plan: List[MartColumnPlan] = Field(min_length=1)
+    unimplemented_derivations: List[UnimplementedDerivation] = Field(default_factory=list)
     metric_support: List[MetricSupport] = Field(min_length=1)
-    unimplemented_derivations: List[Dict[str, Any]] = Field(default_factory=list)
     aggregation_policy: Literal["preserve_common_grain", "aggregate_to_common_grain"]
     source_tables: List[str] = Field(min_length=1)
     incremental_column: Optional[str] = None
@@ -164,6 +189,9 @@ class MartDesign(BaseModel):
         metric_names = [item.metric_name for item in self.metric_support]
         if len(set(metric_names)) != len(metric_names):
             raise ValueError("metric_support의 metric_name은 중복될 수 없습니다")
+        unimplemented_names = [item.name for item in self.unimplemented_derivations]
+        if len(set(unimplemented_names)) != len(unimplemented_names):
+            raise ValueError("unimplemented_derivations의 name은 중복될 수 없습니다")
         for metric in self.metric_support:
             unknown = (set(metric.calculation_grain) | set(metric.required_mart_columns)) - available
             if unknown:
@@ -198,6 +226,8 @@ class AgentState(TypedDict):
     required_db_schema: str
     clarification_request: str
     planner_selection_reason: str
+    required_derivations: List[Dict[str, Any]]
+    analysis_heuristics: List[Dict[str, Any]]
     schema_text: str
     integrity_text: str
     integrity_dataset_name: str
@@ -227,9 +257,15 @@ class AgentState(TypedDict):
     validation_summary: Dict[str, Any]
     retry_count: int
     max_retries: int
+    repair_retry_count: int
+    max_repair_retries: int
     feedback: str
     error: str
     generation_source: str
+    sql_generation_source: str
+    sql_template_id: Optional[str]
+    sql_template_kind: Optional[str]
+    sql_template_parameters: Dict[str, Any]
     generation_failure_reason: str
     generation_context_diagnostics: List[Dict[str, Any]]
     failed_statement_index: Optional[int]

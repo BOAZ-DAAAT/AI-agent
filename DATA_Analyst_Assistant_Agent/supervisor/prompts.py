@@ -144,8 +144,8 @@ planner_mode는 코드가 "llm"으로 기록하므로 응답에 포함하지 않
 - dimension: string 또는 null
 - filters: string 배열
 - requires_mart_review: boolean
-- required_derivations: array of objects. SQL-required structural derivations only. Include name, purpose, entity, grain, source_columns, definition, preferred_name, safe_for, not_for when known.
-- analysis_heuristics: array of objects. Analyst-side thresholds, bins, labels, or method choices. Include name, purpose, default_policy, rationale, must_record=true.
+- required_derivations: 구조적 파생변수 계약 배열. 각 항목은 name 필수이며 purpose, entity, grain, source_columns, definition, preferred_name, safe_for, not_for, source를 선택적으로 포함
+- analysis_heuristics: 하류 분석 정책 배열. 각 항목은 name 필수이며 purpose, default_policy, rationale, source, must_record를 선택적으로 포함
 - reason: string
 
 예시:

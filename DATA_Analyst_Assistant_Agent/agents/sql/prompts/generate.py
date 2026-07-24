@@ -24,12 +24,11 @@ def _integrity_rule(context: SimpleSQLGenerationContext | ComprehensiveSQLGenera
     )
 
 
-_MYSQL_COMPATIBILITY_RULES = """MySQL 호환성 규칙
-- MySQL 8.x 문법만 사용한다.
-- MySQL 지원 여부가 애매한 고급 SQL 문법은 피하고, 보수적인 CTE / 서브쿼리 / GROUP BY 패턴을 우선 사용한다.
-- row-level 결과에 주문 단위·고객 단위·상품 단위 집계값을 함께 붙여야 할 때는 윈도우 함수에 의존하지 말고, 먼저 CTE에서 해당 grain으로 집계한 뒤 원본 grain에 JOIN한다.
-- MySQL이 지원하지 않을 수 있는 윈도우 집계, FILTER 절, PostgreSQL/SQLite 전용 함수, 비표준 날짜 함수는 사용하지 않는다.
-- 집계 함수는 항상 명시적 인자를 사용한다. 전체 행 수는 COUNT(*)로 계산한다."""
+_MYSQL_COMPATIBILITY_RULES = """MySQL 8.x 호환 규칙
+- 애매한 고급 문법 대신 보수적인 CTE/서브쿼리/GROUP BY를 쓴다.
+- grain별 집계는 먼저 CTE에서 계산한 뒤 JOIN한다.
+- 미지원 윈도우 집계, FILTER, 타 DB 전용 함수는 금지한다.
+- 전체 행 수는 COUNT(*)로 계산한다."""
 
 
 def generate_mart_prompt(context: ComprehensiveSQLGenerationContext) -> str:
@@ -84,28 +83,23 @@ def generate_query_prompt(context: SimpleSQLGenerationContext) -> str:
     if not isinstance(context, SimpleSQLGenerationContext):
         raise TypeError("조회 프롬프트에는 SimpleSQLGenerationContext가 필요합니다")
 
-    return f"""역할
-MySQL 조회 SQL을 작성한다.
-
-계약 우선순위
+    return f"""MySQL 조회 SQL.
+우선순위
 1. schema와 selected_tables + integrity_failures
 2. user_question
 3. previous_feedback
 
-생성 컨텍스트
+컨텍스트
 {_context_json(context)}
 
 {_MYSQL_COMPATIBILITY_RULES}
 
-핵심 불변 조건
-- simple route이며 SELECT 또는 WITH statement만 생성한다. 여러 statement는 세미콜론으로 구분할 수 있다.
-- source는 selected_tables에 있고 schema에 존재하는 bare table/column만 사용한다.
-- required_columns는 출력, business_keys는 조인·식별의 우선 근거로 사용한다.
+계약
+- simple route이며 SELECT 또는 WITH만 생성한다.
+- source는 selected_tables와 schema의 bare table/column만 사용한다.
+- required_columns는 출력, business_keys는 조인·식별 근거다.
 - 질문에 없는 컬럼·집계·필터를 임의로 추가하지 않는다.
-- INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE를 사용하지 않는다.
-- source_column_refs는 실제 source table.column, derived_columns는 계산 alias, output_columns는 최종 컬럼만 기록한다.{_integrity_rule(context)}
-
-조건부 규칙
-- previous_feedback이 있으면 실패 statement를 우선 수정한다.
-
-SQLDraft 스키마에 맞춰 응답한다."""
+- 쓰기와 DDL은 금지한다.
+- SQLDraft에 source_column_refs, derived_columns, output_columns를 기록한다.{_integrity_rule(context)}
+- previous_feedback이 있으면 실패문을 수정한다.
+SQLDraft 스키마로 응답한다."""

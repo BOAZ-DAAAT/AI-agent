@@ -1,13 +1,21 @@
-"""검증(validate_sql_and_result) 프롬프트."""
+"""Deprecated: 미사용 검증 프롬프트의 직접 import 호환 모듈."""
 
 from __future__ import annotations
 
 import json
+import warnings
 
 from DATA_Analyst_Assistant_Agent.agents.sql._runtime import format_result_rows
 
 
 def validate_prompt(state) -> str:
+    """Deprecated: 결정론적 ``validate_sql_and_result``를 사용한다."""
+    warnings.warn(
+        "validate_prompt는 더 이상 런타임에서 사용되지 않습니다. "
+        "결정론적 validate_sql_and_result 경로를 사용하세요.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return f"""
 너는 SQL/데이터마트 검증기다.
 

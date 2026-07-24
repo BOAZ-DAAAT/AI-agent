@@ -8,6 +8,8 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, ValidationError
 
 from DATA_Analyst_Assistant_Agent.shared.contracts import (
+    AnalysisHeuristic,
+    RequiredDerivation,
     SupervisorInterruptPayload,
     SupervisorTerminalState,
     ValidationFinding,
@@ -68,6 +70,10 @@ from DATA_Analyst_Assistant_Agent.supervisor.validation import (
 from DATA_Analyst_Assistant_Agent.supervisor.candidate import (
     commit_candidate,
     validate_candidate,
+)
+from DATA_Analyst_Assistant_Agent.agents.sql.olist_templates import (
+    match_olist_template,
+    olist_template_routing_enabled,
 )
 
 
@@ -160,6 +166,89 @@ ANALYSIS_RULE_RETRIEVAL_GROUPS = (
     "analysis_foundation",
     "analysis_integrity_caution",
 )
+
+
+def make_match_olist_template_node():
+    def match_olist_template_node(state: SupervisorState) -> SupervisorState:
+        query = str(state.get("clarified_query") or state.get("latest_user_query") or "").strip()
+        existing_plan = dict(state.get("analysis_plan") or {})
+        if not olist_template_routing_enabled():
+            return {
+                "olist_template_match": {
+                    "status": "disabled",
+                    "supported": False,
+                    "reason": "OLIST_TEMPLATE_ROUTING_ENABLED 설정으로 고정 템플릿 라우팅이 비활성화되었습니다.",
+                },
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
+        if existing_plan.get("required_derivations"):
+            return {
+                "olist_template_match": {
+                    "status": "skipped_structured_derivations",
+                    "supported": False,
+                    "reason": "구조적 파생계약은 semantic 마트 설계가 필요합니다.",
+                },
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
+        match = match_olist_template(
+            query,
+            state.get("catalog_summary"),
+            metric=existing_plan.get("metric"),
+            dimension=existing_plan.get("dimension"),
+            filters=list(existing_plan.get("filters") or []),
+            query_rules=(
+                dict(state.get("analysis_rule_context") or {})
+                or dict(existing_plan.get("query_rules") or {})
+            ),
+        )
+        match_payload = {"status": "matched" if match.supported else "not_matched", **match.model_dump(mode="json")}
+        if not match.supported or match.template_id is None:
+            return {
+                "olist_template_match": match_payload,
+                "current_step": "match_olist_template",
+                "next_action": "create_plan",
+                "terminal_state": "running",
+            }
+
+        template_id = match.template_id.value
+        template_kind = match.template_kind.value if match.template_kind is not None else "query"
+        route_kind = "comprehensive" if template_kind == "mart" else "simple"
+        return {
+            "olist_template_match": match_payload,
+            "clarified_query": query,
+            "analysis_plan": {
+                "goal": query,
+                "route_kind": route_kind,
+                "planner_mode": "deterministic",
+                "steps": ["build_olist_sql", "prevalidate_sql", "execute_sql", "validate_sql_and_result"],
+                "metric": existing_plan.get("metric"),
+                "dimension": existing_plan.get("dimension"),
+                "filters": [],
+                "requires_mart_review": template_kind == "mart",
+                "required_derivations": [],
+                "analysis_heuristics": [
+                    AnalysisHeuristic.model_validate(item).model_dump(mode="json")
+                    for item in existing_plan.get("analysis_heuristics") or []
+                ],
+                "query_rules": dict(existing_plan.get("query_rules") or {}),
+                "sql_generation_source": "olist_template",
+                "sql_template_id": template_id,
+                "sql_template_kind": template_kind,
+                "sql_template_parameters": match.parameters.model_dump(mode="json"),
+                "datasource_id": state.get("datasource_id"),
+                "catalog_summary": state.get("catalog_summary"),
+            },
+            "current_step": "match_olist_template",
+            "next_action": "call_sql_agent",
+            "terminal_state": "running",
+            "error_state": {},
+        }
+
+    return match_olist_template_node
 
 
 def make_rewrite_retrieval_query_node(model: Any | None):
@@ -918,18 +1007,47 @@ def make_create_analysis_plan_node(model: Any | None):
                 }
             return _decision_failure_updates(state, "create_analysis_plan", exc)
 
+        try:
+            required_derivations = [
+                item.model_dump(mode="json") for item in decision.required_derivations
+            ]
+            if not required_derivations:
+                required_derivations = [
+                    RequiredDerivation.model_validate(item).model_dump(mode="json")
+                    for item in (state.get("analysis_plan") or {}).get(
+                        "required_derivations", []
+                    )
+                ]
+            analysis_heuristics = [
+                item.model_dump(mode="json") for item in decision.analysis_heuristics
+            ]
+            if not analysis_heuristics:
+                analysis_heuristics = [
+                    AnalysisHeuristic.model_validate(item).model_dump(mode="json")
+                    for item in (state.get("analysis_plan") or {}).get(
+                        "analysis_heuristics", []
+                    )
+                ]
+        except Exception as exc:
+            return _decision_failure_updates(state, "create_analysis_plan", exc)
+        route_kind = "comprehensive" if required_derivations else decision.route_kind
         plan: dict[str, Any] = {
             "goal": decision.goal,
-            "route_kind": decision.route_kind,
+            "route_kind": route_kind,
             "planner_mode": "llm",
+            "sql_generation_source": "semantic_llm",
+            "sql_template_id": None,
+            "sql_template_kind": None,
             "steps": list(decision.steps),
             "metric": decision.metric,
             "dimension": decision.dimension,
             "filters": list(decision.filters),
-            "requires_mart_review": decision.requires_mart_review,
+            "requires_mart_review": bool(
+                required_derivations or decision.requires_mart_review
+            ),
+            "required_derivations": required_derivations,
+            "analysis_heuristics": analysis_heuristics,
             "query_rules": dict(state.get("analysis_rule_context") or {}),
-            "required_derivations": list(decision.required_derivations),
-            "analysis_heuristics": list(decision.analysis_heuristics),
         }
         if state.get("datasource_id") is not None:
             plan["datasource_id"] = state.get("datasource_id")
@@ -1559,6 +1677,7 @@ def build_graph(
     def add_node(name: str, node: Any) -> None:
         graph.add_node(name, _with_cancellation_guard(node, backend_adapter))
 
+    add_node("match_olist_template", make_match_olist_template_node())
     add_node(
         "rewrite_retrieval_query",
         make_rewrite_retrieval_query_node(model),
@@ -1584,7 +1703,12 @@ def build_graph(
     add_node("resolve_analysis_review", make_resolve_analysis_review_node(backend_adapter))
     add_node("finalize", make_finalize_node(model, backend_adapter))
 
-    graph.add_edge(START, "rewrite_retrieval_query")
+    graph.add_edge(START, "match_olist_template")
+    graph.add_conditional_edges(
+        "match_olist_template",
+        _route_after_olist_template_match,
+        {"execute_subagent": "execute_subagent", "semantic_fallback": "rewrite_retrieval_query"},
+    )
     graph.add_edge("rewrite_retrieval_query", "retrieve_analysis_rules")
     graph.add_edge("retrieve_analysis_rules", "clarify_query")
     graph.add_conditional_edges(
@@ -1596,7 +1720,7 @@ def build_graph(
             "finalize": "finalize",
         },
     )
-    graph.add_edge("collect_clarification", "rewrite_retrieval_query")
+    graph.add_edge("collect_clarification", "match_olist_template")
     graph.add_edge("create_analysis_plan", "decide_next_action")
     graph.add_conditional_edges(
         "decide_next_action",
@@ -1618,6 +1742,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
+            "collect_clarification": "collect_clarification",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
@@ -1641,6 +1766,7 @@ def build_graph(
             "execute_subagent": "execute_subagent",
             "generate_insight": "generate_insight",
             "completion_guard": "completion_guard",
+            "collect_clarification": "collect_clarification",
             "collect_analysis_review": "collect_analysis_review",
             "finalize": "finalize",
         },
@@ -1767,6 +1893,13 @@ def _route_after_clarify(state: SupervisorState) -> str:
     return "create_analysis_plan"
 
 
+def _route_after_olist_template_match(state: SupervisorState) -> str:
+    match = state.get("olist_template_match") or {}
+    if match.get("status") == "matched" and state.get("next_action") == "call_sql_agent":
+        return "execute_subagent"
+    return "semantic_fallback"
+
+
 def _route_after_decide(state: SupervisorState) -> str:
     if state.get("terminal_state") in TERMINAL_STATES:
         return "finalize"
@@ -1800,6 +1933,8 @@ def _route_after_commit_candidate(state: SupervisorState) -> str:
     next_action = state.get("next_action")
     if next_action == "collect_analysis_review":
         return "collect_analysis_review"
+    if next_action == "clarify":
+        return "collect_clarification"
     if next_action == "decide_next_action":
         return "decide_next_action"
     if next_action == "call_insight":

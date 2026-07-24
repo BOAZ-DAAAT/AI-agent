@@ -3,7 +3,7 @@ from __future__ import annotations
 from data_agent_backend.models.common import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from data_agent_backend.models.artifacts import ArtifactRef
 
@@ -21,6 +21,70 @@ class SupervisorTerminalState(StrEnum):
     needs_clarification = "needs_clarification"
     failed_with_recoverable_context = "failed_with_recoverable_context"
     failed_terminal = "failed_terminal"
+
+
+class OlistTemplateId(StrEnum):
+    monthly_sales_orders = "monthly_sales_orders"
+    daily_sales_orders = "daily_sales_orders"
+    order_status_distribution = "order_status_distribution"
+    category_sales = "category_sales"
+    review_score_distribution = "review_score_distribution"
+    payment_method_summary = "payment_method_summary"
+    customer_state_sales = "customer_state_sales"
+    seller_state_sales = "seller_state_sales"
+    seller_performance = "seller_performance"
+    delivery_delay_summary = "delivery_delay_summary"
+    category_review_summary = "category_review_summary"
+    payment_installment_summary = "payment_installment_summary"
+    freight_cost_summary = "freight_cost_summary"
+    basket_size_summary = "basket_size_summary"
+    repeat_customer_summary = "repeat_customer_summary"
+    customer_rfm = "customer_rfm"
+    monthly_customer_cohort = "monthly_customer_cohort"
+    customer_repeat_behavior = "customer_repeat_behavior"
+    order_delivery_performance = "order_delivery_performance"
+    monthly_category_performance = "monthly_category_performance"
+    monthly_seller_performance = "monthly_seller_performance"
+    customer_seller_geo = "customer_seller_geo"
+    category_review_delivery = "category_review_delivery"
+    payment_behavior = "payment_behavior"
+    product_logistics = "product_logistics"
+
+
+class OlistTemplateKind(StrEnum):
+    query = "query"
+    mart = "mart"
+
+
+class OlistTemplateParameters(BaseModel):
+    """질문에서 안전하게 정규화한 결정론적 SQL 파라미터."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_date: str | None = None
+    end_date: str | None = None
+    order_statuses: list[str] = Field(default_factory=list)
+    customer_states: list[str] = Field(default_factory=list)
+    seller_states: list[str] = Field(default_factory=list)
+    top_n: int | None = Field(default=None, ge=1, le=100)
+
+
+class OlistTemplateDefinition(BaseModel):
+    """결정론적 템플릿의 매칭·스키마·출력 계약."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: OlistTemplateId
+    template_kind: OlistTemplateKind
+    route_kind: Literal["simple", "comprehensive"]
+    sql_type: Literal["select", "create_table_as"]
+    intent: str
+    metrics: list[str]
+    dimensions: list[str]
+    required_schema: dict[str, set[str]]
+    allowed_parameters: set[str] = Field(default_factory=set)
+    output_columns: list[str]
+    business_grain: str
 
 
 class LocalCheck(BaseModel):
@@ -148,19 +212,116 @@ class AgentEnvelope(BaseModel):
         return [ref.artifact_id for ref in self.artifact_refs]
 
 
+class RequiredDerivation(BaseModel):
+    """Supervisor가 SQL 마트에 요구하는 구조적 파생변수 계약."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1)
+    purpose: str | None = None
+    entity: str | None = None
+    grain: str | None = None
+    source_columns: list[str] = Field(default_factory=list)
+    definition: str | None = None
+    preferred_name: str | None = None
+    safe_for: list[str] = Field(default_factory=list)
+    not_for: list[str] = Field(default_factory=list)
+    source: str | None = None
+
+    @field_validator(
+        "name",
+        "purpose",
+        "entity",
+        "grain",
+        "definition",
+        "preferred_name",
+        "source",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("source_columns", "safe_for", "not_for", mode="before")
+    @classmethod
+    def normalize_optional_string_list(cls, value: Any) -> Any:
+        return [] if value is None else value
+
+    @field_validator("source_columns", "safe_for", "not_for")
+    @classmethod
+    def normalize_string_list(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            candidate = item.strip()
+            if candidate and candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_preferred_name(self) -> "RequiredDerivation":
+        if not self.name:
+            raise ValueError("name은 비어 있을 수 없습니다.")
+        if not self.preferred_name:
+            self.preferred_name = self.name
+        return self
+
+
+class AnalysisHeuristic(BaseModel):
+    """SQL 컬럼 계약과 분리해 하류 분석에 전달하는 분석 정책."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1)
+    purpose: str | None = None
+    default_policy: str | None = None
+    rationale: str | None = None
+    source: str | None = None
+    must_record: bool = True
+
+    @field_validator(
+        "name",
+        "purpose",
+        "default_policy",
+        "rationale",
+        "source",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def reject_blank_name(self) -> "AnalysisHeuristic":
+        if not self.name:
+            raise ValueError("name은 비어 있을 수 없습니다.")
+        return self
+
+
 class AnalysisPlan(BaseModel):
     goal: str
     datasource_id: str | None = None
     catalog_summary: dict[str, Any] | None = None
     retry_context: dict[str, Any] | None = None
     planner_mode: Literal["llm", "deterministic"] = "deterministic"
+    sql_generation_source: Literal["olist_template", "semantic_llm", "failed"] | None = None
+    sql_template_id: OlistTemplateId | None = None
+    sql_template_kind: OlistTemplateKind | None = None
+    sql_template_parameters: OlistTemplateParameters = Field(default_factory=OlistTemplateParameters)
     metric: str | None = None
     dimension: str | None = None
     filters: list[str] = Field(default_factory=list)
     requires_mart_review: bool = False
     query_rules: dict[str, Any] = Field(default_factory=dict)
-    required_derivations: list[dict[str, Any]] = Field(default_factory=list)
-    analysis_heuristics: list[dict[str, Any]] = Field(default_factory=list)
     route_kind: Literal["simple", "eda", "trend", "mart", "comprehensive"] = "simple"
     generated_sql: str = ""
     source_sql: str = ""
@@ -175,6 +336,16 @@ class AnalysisPlan(BaseModel):
     business_grain: str | None = None
     mart_design: dict[str, Any] = Field(default_factory=dict)
     analysis_data_contract: dict[str, Any] = Field(default_factory=dict)
+    required_derivations: list[RequiredDerivation] = Field(default_factory=list)
+    analysis_heuristics: list[AnalysisHeuristic] = Field(default_factory=list)
+
+    @field_validator("sql_generation_source", mode="before")
+    @classmethod
+    def normalize_legacy_sql_generation_source(cls, value: Any) -> Any:
+        """이전 체크포인트의 llm/repair 값을 새 출처 이름으로 읽는다."""
+        if value in {"llm", "repair"}:
+            return "semantic_llm"
+        return value
 
 
 class OrchestrationState(BaseModel):
