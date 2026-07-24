@@ -10,6 +10,7 @@ from DATA_Analyst_Assistant_Agent.supervisor.graph import (
 )
 from DATA_Analyst_Assistant_Agent.supervisor.state import (
     AgentCompactResult,
+    begin_or_retry_agent_node,
     empty_supervisor_state,
     stage_candidate_result,
 )
@@ -391,6 +392,114 @@ def test_analysis_semantic_error_is_accepted_with_limitations() -> None:
     committed = commit_candidate({**state, **updates}, None)
     assert len(committed["agent_results"]) == 1
     assert committed["rejected_results"] == []
+
+
+def test_same_analysis_recommendation_retries_on_the_existing_node() -> None:
+    first_result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="검정 근거가 부족한 분석",
+        artifact_ids=["analysis_attempt_1"],
+    )
+    state, first_node, activation = begin_or_retry_agent_node(
+        empty_supervisor_state(
+            thread_id="thread_001",
+            run_id="run_001",
+            user_query="배송 지연과 리뷰 평점 관계를 분석해줘",
+            datasource_id="ds_001",
+        ),
+        "analysis_agent",
+    )
+    assert activation == "agent.started"
+
+    first_staged = stage_candidate_result(state, first_result, {})
+    first_updates = make_validate_candidate_node(
+        SemanticModel(
+            {
+                **_semantic_success("call_analysis_agent"),
+                "semantic_valid": False,
+                "severity": "error",
+                "reason": "가설 검정 결과가 부족합니다.",
+            }
+        )
+    )(first_staged)
+
+    first_record = first_updates["pending_validation"]
+    assert first_record["outcome"]["disposition"] == "retry"
+    assert first_record["outcome"]["reason_code"] == "semantic_same_agent_retry"
+    assert first_record["checks"][-1]["passed"] is False
+
+    retry_state = commit_candidate({**first_staged, **first_updates}, None)
+    assert retry_state["agent_results"] == []
+    assert retry_state["completed_agents"] == []
+    assert retry_state["retry_counts"] == {"analysis_agent": 1}
+    assert retry_state["active_node"]["node_id"] == first_node.node_id
+
+    retry_state, retried_node, retry_activation = begin_or_retry_agent_node(
+        retry_state,
+        "analysis_agent",
+    )
+    assert retry_activation == "agent.retrying"
+    assert retried_node.node_id == first_node.node_id
+    assert retried_node.node_sequence == first_node.node_sequence
+    assert retried_node.attempt == 2
+
+    final_result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="검정 근거를 보완한 분석",
+        artifact_ids=["analysis_attempt_2"],
+    )
+    final_staged = stage_candidate_result(retry_state, final_result, {})
+    final_updates = make_validate_candidate_node(
+        SemanticModel(_semantic_success())
+    )(final_staged)
+    completed = commit_candidate({**final_staged, **final_updates}, None)
+
+    assert completed["active_node"] is None
+    assert completed["last_completed_node_id"] == first_node.node_id
+    assert completed["node_sequence"] == first_node.node_sequence
+    assert completed["completed_agents"] == ["analysis_agent"]
+    assert len(completed["agent_results"]) == 1
+    assert completed["agent_results"][0]["summary"] == "검정 근거를 보완한 분석"
+
+
+def test_same_analysis_recommendation_does_not_loop_after_retry_budget() -> None:
+    result = AgentCompactResult(
+        agent="analysis_agent",
+        status="success",
+        summary="재시도 한도에 도달한 분석",
+        artifact_ids=["analysis_final_attempt"],
+    )
+    state, node, _ = begin_or_retry_agent_node(
+        empty_supervisor_state(
+            thread_id="thread_001",
+            run_id="run_001",
+            user_query="배송 지연과 리뷰 평점 관계를 분석해줘",
+            datasource_id="ds_001",
+        ),
+        "analysis_agent",
+    )
+    state["retry_counts"] = {"analysis_agent": state["max_retry_per_agent"]}
+    staged = stage_candidate_result(state, result, {})
+    updates = make_validate_candidate_node(
+        SemanticModel(
+            {
+                **_semantic_success("call_analysis_agent"),
+                "semantic_valid": False,
+                "severity": "error",
+                "reason": "추가 검정 근거가 필요합니다.",
+            }
+        )
+    )(staged)
+
+    assert updates["pending_validation"]["outcome"]["disposition"] == "accept_with_limitations"
+    completed = commit_candidate({**staged, **updates}, None)
+
+    assert completed["next_action"] == "decide_next_action"
+    assert completed["last_completed_node_id"] == node.node_id
+    assert completed["completed_agents"] == ["analysis_agent"]
+    assert len(completed["agent_results"]) == 1
 
 
 def test_analysis_semantic_model_failure_retries_once_then_accepts_with_limitations() -> None:
