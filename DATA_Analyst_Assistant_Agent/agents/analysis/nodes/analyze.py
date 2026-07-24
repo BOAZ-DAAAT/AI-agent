@@ -147,6 +147,27 @@ def run_analysis(
                 )
             previous_failure_signature = signature
             continue
+        if execution_plan.decision == "blocked_incompatible_api":
+            # SQL 에이전트의 MySQL 방언 검사와 같은 목적: 실행해서 예외로 알아내는 대신
+            # preflight에서 미리 잡아 구체적인 대안까지 피드백한다(막연한 traceback보다
+            # 재시도 성공률이 높다).
+            _notify_progress(progress_callback, "execute", "failed", attempt, execution_plan.model_dump())
+            error = "; ".join(execution_plan.reasons) or "generated code uses an API removed from the installed library version"
+            feedback = f"The previous code used an API that does not exist in the installed library versions: {error}. Regenerate without it."
+            history.append({"stage": "execute", "code": code.code, "error": error})
+            signature = _failure_signature("execute", error)
+            if signature == previous_failure_signature:
+                return AnalysisOutcome(
+                    status="failed",
+                    attempts=attempt,
+                    code=last_code,
+                    result=last_result,
+                    critique=last_critique,
+                    error_history=history,
+                    early_stop_reason="same execution preflight failure repeated after regeneration",
+                )
+            previous_failure_signature = signature
+            continue
         if execution_plan.decision == "manual_run_recommended":
             _notify_progress(progress_callback, "execute", "skipped_manual_run", attempt, execution_plan.model_dump())
             result = _manual_run_result(code, execution_plan)

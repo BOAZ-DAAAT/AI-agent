@@ -348,6 +348,15 @@ def _build_prompt(intent: AnalysisIntent, context: AnalysisContext) -> str:
             "before-state yourself. Summarize it as a single reflect-the-condition sentence in "
             "Korean, e.g. \"이상치를 제거한 상태를 반영하여 분석한 결과 상관관계가 -0.32에서 "
             "-0.24로 약해지는 경향이 나타났습니다.\", not as a fabricated two-state comparison.\n"
+            "If there is no 'relationship_shift' field, you still computed real statistics on the "
+            "row-filtered `df` you received — state that applied-condition result as a direct, "
+            "confident Korean sentence (e.g. \"이상치를 제거한 조건을 적용한 결과, 상관관계는 "
+            "-0.24로 나타나 음의 관계가 유지되는 경향을 보였습니다\"). Do not phrase it as a "
+            "limitation or say things like '증거가 제공되지 않았습니다'/'비교를 수행하지 않았습니다' "
+            "when you actually have real computed numbers to report — lead with the finding, not "
+            "with what you could not do. Reserve 'cannot be computed' language strictly for columns "
+            "that are genuinely absent from `df` (never invent a number for a column that does not "
+            "exist).\n"
         )
     if context.known_data_quality_issues:
         # Known upstream SQL source-table integrity issues (#130); reflect them in guards and limitations.

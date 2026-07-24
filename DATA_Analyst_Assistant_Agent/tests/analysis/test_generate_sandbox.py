@@ -227,6 +227,37 @@ def test_preflight_flags_large_fit() -> None:
     assert any("large" in reason for reason in plan.reasons)
 
 
+def test_preflight_flags_removed_numpy_math() -> None:
+    """실사례(2026-07-23): np.math는 설치된 numpy(2.4.6)에서 제거되어 실행 중 AttributeError로
+
+    죽는다. SQL 에이전트의 MySQL 방언 검사와 같은 목적으로, 실행해서 알아내는 대신 preflight
+    에서 미리 잡아 구체적인 대안(math 모듈/scipy)까지 피드백한다.
+    """
+    code = _code(
+        "p = np.math.erf(1.0)\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'p': p}, 'limitations': []}"
+    )
+
+    plan = inspect_generated_code(code, _frame())
+
+    assert plan.decision == "blocked_incompatible_api"
+    assert any("np.math" in reason for reason in plan.reasons)
+
+
+def test_preflight_allows_valid_numpy_dtype_suffixes() -> None:
+    """np.float64/np.int64처럼 접미사가 붙은 유효한 이름은 제거 대상이 아니므로 통과해야 한다."""
+    code = _code(
+        "value = np.float64(df['x'].mean())\n"
+        "count = np.int64(len(df))\n"
+        "result = {'summary': 'ok', 'findings': ['ok'], 'statistics': {'value': float(value), 'count': int(count)}, 'limitations': []}"
+    )
+    frame = pd.DataFrame({"x": range(50)})
+
+    plan = inspect_generated_code(code, frame)
+
+    assert plan.decision == "auto_run"
+
+
 def test_preflight_flags_while_loop() -> None:
     code = _code(
         "while True:\n"

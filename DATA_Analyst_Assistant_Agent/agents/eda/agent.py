@@ -72,11 +72,20 @@ def _relationship_shift_for_row_filter(
     필터본(filtered_df)을 둘 다 메모리에 갖고 있으니, 여기서 딱 한 번 계산해서 넘긴다 —
     Analysis가 필터링된 df를 "원본"이라 잘못 부르거나 스스로 또 필터링하지 않도록.
     """
-    target = str(primary_hypothesis.get("target") or "").strip()
-    feature = str(primary_hypothesis.get("feature") or "").strip()
+    def _resolve_column(text: str) -> str | None:
+        # primary_hypothesis의 target/feature가 항상 깔끔한 컬럼명은 아니다 — "A 또는 B"처럼
+        # 서술형 텍스트로 나올 때가 있다(2026-07-24 실측). 정확히 일치가 아니라, 실제 df
+        # 컬럼명이 그 텍스트 안에 부분 문자열로 등장하는지로 느슨하게 찾는다. 숫자 컬럼을
+        # 우선한다(상관계수 계산 대상이라 문자열 컬럼은 못 씀).
+        cf = text.casefold()
+        numeric_cols = set(original_df.select_dtypes(include="number").columns)
+        candidates = [c for c in original_df.columns if c.casefold() in cf]
+        numeric_candidates = [c for c in candidates if c in numeric_cols]
+        return (numeric_candidates or candidates or [None])[0]
+
+    target = _resolve_column(str(primary_hypothesis.get("target") or ""))
+    feature = _resolve_column(str(primary_hypothesis.get("feature") or ""))
     if not target or not feature or target == feature:
-        return None
-    if target not in original_df.columns or feature not in original_df.columns:
         return None
 
     def _corr_pair(frame: pd.DataFrame) -> dict[str, Any] | None:
