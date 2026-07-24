@@ -37,6 +37,10 @@ Supervisor 분석 휴리스틱 JSON:
 - 원천 최저 grain을 무조건 보존하지 말고, 더 세밀한 원천은 공통 grain으로 집계하거나 선행 중복 제거
 - deduplication_keys는 grain_columns와 순서까지 완전히 동일해야 함
 - column_plan은 최종 출력 순서이며 output_column 중복 금지
+- 데이터마트의 최종 컬럼은 문자열·숫자·날짜·불리언 등 분석 가능한 스칼라 타입으로만 구성
+- JSON 객체·배열 또는 원천 JSON 전체를 최종 컬럼으로 생성하거나 그대로 전달하지 않음
+- JSON_OBJECT, JSON_ARRAY, JSON_ARRAYAGG, JSON_OBJECTAGG를 사용한 최종 컬럼 생성을 금지
+- 원천 JSON 컬럼이 필요한 경우 필요한 필드만 추출하고 문자열·숫자·날짜·불리언 중 적절한 스칼라 타입으로 명시적으로 변환
 - calculation_rule은 SQL 조각이 아니라 컬럼의 자연어 의미와 계산 계약으로 작성
 - role은 dimension / measure / attribute 중 하나만 사용
 - aggregation_method는 none / SUM / COUNT / COUNT_DISTINCT / MIN / MAX / AVG / DEDUPLICATE 중 하나만 사용

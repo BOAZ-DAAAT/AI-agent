@@ -63,6 +63,9 @@ MySQL 재사용 데이터마트 SQL을 작성한다.
 - target은 {ALLOWED_MART_SCHEMA}.*만, source는 selected_tables의 bare table name만 사용한다.
 - final_grain을 보존하고 grain_columns가 행을 식별하게 한다.
 - 최종 컬럼은 column_plan.output_column의 순서·alias·계산 계약과 정확히 일치시킨다.
+- 최종 SELECT에는 JSON 객체·배열 또는 원천 JSON 전체 컬럼을 출력하지 않는다.
+- JSON_OBJECT, JSON_ARRAY, JSON_ARRAYAGG, JSON_OBJECTAGG를 사용한 최종 컬럼 생성을 금지한다.
+- 원천 JSON은 필요한 스칼라 필드를 추출할 때만 참조하고, JSON_UNQUOTE와 CAST 등을 사용해 문자열·숫자·날짜·불리언 중 적절한 타입으로 명시적으로 변환한다.
 - column_plan에 선언된 분석 필수 파생변수는 비율이어도 calculation_rule의 분자·분모·연산 순서와 0/NULL 처리 규칙대로 SQL에서 생성한다.
 - Supervisor가 required_derivations로 지시한 구조적 파생변수는 mart_design.column_plan의 alias와 정의를 그대로 구현한다. 분석 heuristic(threshold, bin, low-n cutoff, label)은 column_plan에 명시된 경우가 아니면 SQL 컬럼으로 새로 만들지 않는다.
 - metric_support.required_mart_columns를 보존하며 임의 컬럼·집계·필터를 추가하지 않는다.
