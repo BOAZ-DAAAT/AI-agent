@@ -71,6 +71,7 @@ class FakeBackendAdapter:
                 "message": message,
                 "event_key": event_key,
                 "node_name": node_name,
+                "approval_id": approval_id,
                 "metadata": metadata,
             }
         )
@@ -243,6 +244,15 @@ def test_supervisor_agent_run_preserves_approval_final_answer(monkeypatch) -> No
             "pending_approval": {
                 "approval_id": "run_001:sql_agent:approval",
                 "agent": "sql_agent",
+                "reason": "SQL 실행 승인이 필요합니다.",
+            },
+            "active_node": {
+                "node_id": "run_001:node:1",
+                "agent_name": "sql_agent",
+                "parent_node_id": None,
+                "node_sequence": 1,
+                "attempt": 1,
+                "status": "waiting",
             },
         }
 
@@ -254,6 +264,15 @@ def test_supervisor_agent_run_preserves_approval_final_answer(monkeypatch) -> No
     assert result.state is not None
     assert result.state.final_answer == "SQL 실행 승인이 필요합니다."
     assert result.state.approval_ids == ["run_001:sql_agent:approval"]
+    assert adapter.status_updates[-1][1] == RunStatus.waiting_approval
+    assert adapter.status_updates[-1][2]["interrupt_type"] == "approval"
+    assert adapter.status_updates[-1][2]["node_id"] == "run_001:node:1"
+    required_event = adapter.events[-1]
+    assert required_event["event_type"] == "human_input.required"
+    assert required_event["event_key"] == "human-input:run_001:sql_agent:approval:required"
+    assert required_event["node_name"] == "sql_agent"
+    assert required_event["approval_id"] == "run_001:sql_agent:approval"
+    assert required_event["metadata"]["node_id"] == "run_001:node:1"
 
 
 def test_supervisor_agent_run_keeps_generated_and_source_sql_consistent(monkeypatch) -> None:

@@ -1056,6 +1056,38 @@ def test_decide_next_action_fail_sets_terminal_failure_immediately() -> None:
     assert "fail" in result["final_answer"]
 
 
+def test_decide_next_action_emits_selection_for_the_reserved_next_node() -> None:
+    backend = RecordingBackendAdapter()
+    state = _state()
+    state["node_sequence"] = 1
+    state["last_completed_node_id"] = "run_001:node:1"
+    node = make_decide_next_action_node(
+        SequencedDecisionModel([_next_action_decision("call_eda_agent")]),
+        backend,
+    )
+
+    result = node(state)
+
+    assert result["next_action"] == "call_eda_agent"
+    assert backend.events == [
+        {
+            "run_id": "run_001",
+            "event_type": "supervisor.selection.started",
+            "message": "다음 Agent를 선택하고 있습니다.",
+            "event_key": "agent-selection:run_001:node:2:started",
+            "node_name": "supervisor",
+            "metadata": {
+                "node_id": "run_001:node:2",
+                "parent_node_id": "run_001:node:1",
+                "node_sequence": 2,
+                "agent_name": "supervisor",
+                "status": "selecting",
+                "selection_reason": "next_action",
+            },
+        }
+    ]
+
+
 @pytest.mark.parametrize("next_action", ["clarify", "create_plan"])
 def test_decide_next_action_rejects_initial_only_llm_response_as_decision_error(
     next_action: str,
