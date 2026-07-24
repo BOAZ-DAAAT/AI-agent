@@ -12,11 +12,13 @@ from __future__ import annotations
 import ast
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import matplotlib
 
 matplotlib.use("Agg")                                  # 헤드리스 렌더 (창 없이 PNG 저장)
+import matplotlib.font_manager as fm                   # noqa: E402
 import matplotlib.pyplot as plt                        # noqa: E402
 import numpy as np                                     # noqa: E402
 import pandas as pd                                    # noqa: E402
@@ -32,11 +34,61 @@ _FABRICATION_DENY = {"Series", "DataFrame", "array", "random"}
 _MAX_RESULT_CELLS = 120                                # 관찰/corpus 에 실을 결과 상한
 _VALID_KINDS = {"line", "bar", "grouped_bar", "table"}
 
+
+def _apply_font_file(path: os.PathLike[str] | str) -> str | None:
+    fm.fontManager.addfont(str(path))
+    font_name = fm.FontProperties(fname=str(path)).get_name()
+    if not font_name:
+        return None
+    plt.rcParams["font.family"] = [font_name, "DejaVu Sans"]
+    return font_name
+
+
+def _candidate_font_paths() -> list[Path]:
+    paths: list[Path] = []
+    env_path = os.getenv("DAAAT_CHART_FONT_PATH")
+    if env_path:
+        paths.append(Path(env_path))
+
+    windir = os.getenv("WINDIR", r"C:\Windows")
+    windows_fonts = Path(windir) / "Fonts"
+    paths.extend([
+        windows_fonts / "malgun.ttf",
+        windows_fonts / "malgunbd.ttf",
+        windows_fonts / "malgunsl.ttf",
+    ])
+    return paths
+
+
+def _configure_chart_font() -> str | None:
+    plt.rcParams["axes.unicode_minus"] = False
+
+    for path in _candidate_font_paths():
+        if not path.exists():
+            continue
+        try:
+            font_name = _apply_font_file(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if font_name:
+            return font_name
+
+    for family in ("Malgun Gothic", "AppleGothic", "NanumGothic", "Noto Sans CJK KR", "Noto Sans KR"):
+        try:
+            fm.findfont(family, fallback_to_default=False)
+        except Exception:  # noqa: BLE001
+            continue
+        plt.rcParams["font.family"] = [family, "DejaVu Sans"]
+        return family
+    return None
+
 try:                                                   # 한글 라벨 (Windows) — 없으면 무시
     plt.rcParams["font.family"] = "Malgun Gothic"
     plt.rcParams["axes.unicode_minus"] = False
 except Exception:  # noqa: BLE001
     pass
+
+_configure_chart_font()
 
 
 # ─────────────────────────────

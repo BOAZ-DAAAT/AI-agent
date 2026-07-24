@@ -224,6 +224,29 @@ def test_chart_table_renders_png(tmp_path):
     assert os.path.exists(out["local_path"])
 
 
+def test_chart_font_file_sets_matplotlib_family(monkeypatch, tmp_path):
+    import DATA_Analyst_Assistant_Agent.supervisor.insight.tools as tools
+
+    font_path = tmp_path / "korean.ttf"
+    font_path.write_bytes(b"fake-font")
+    captured = {}
+    original_family = tools.plt.rcParams["font.family"]
+
+    monkeypatch.setattr(tools.fm.fontManager, "addfont", lambda path: captured.setdefault("path", path))
+    monkeypatch.setattr(
+        tools.fm,
+        "FontProperties",
+        lambda fname: SimpleNamespace(get_name=lambda: "Fake Korean Font"),
+    )
+
+    try:
+        assert tools._apply_font_file(font_path) == "Fake Korean Font"
+        assert captured["path"] == str(font_path)
+        assert tools.plt.rcParams["font.family"][0] == "Fake Korean Font"
+    finally:
+        tools.plt.rcParams["font.family"] = original_family
+
+
 def test_chart_y_column_selects_metric(tmp_path):
     # 제목-축 불일치 방지: LLM이 y로 지정한 컬럼을 그린다. 없는 컬럼이면 명확히 거부.
     expr = "df.groupby('category')['total_sales'].agg(['count','sum'])"
