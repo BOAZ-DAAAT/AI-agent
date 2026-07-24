@@ -18,21 +18,28 @@ def compute_derived_group_comparison(df: pd.DataFrame, user_question: str, llm: 
 
 
 def build_derived_group_frame(df: pd.DataFrame, user_question: str, llm: Any = None) -> dict[str, Any] | None:
-    """Build a temporary entity-level summary for branch questions.
+    """Build a temporary frame for branch questions — entity-level summary, or a row filter.
 
-    엔티티(판매자 등)/관측/지표/타겟 컬럼은 기존처럼 컬럼명·질문 문구 기반 휴리스틱으로
-    고른다(그대로 유지 — 이번 일반화 대상이 아님). 다만 "어떤 조건으로 부분집합만
-    남길지"는 더 이상 정규식으로 미리 정해둔 패턴("N건 이상" 등)만 잡지 않는다(2026-07-23) —
-    LLM에게 이 지시사항이 필터 요청인지부터 판단시키고, 맞으면 pandas 불리언 표현식을
-    직접 쓰게 한 뒤 shared/expression_gate.py로 검증해서 실행한다. 표현이 뭐든("30건
-    이상", "평균 이상", "상위 10% 제외" 등) 같은 경로 하나로 처리되고, 필터 요청이
-    아니면(차트 요청 등) None을 돌려줘 이 메커니즘 자체가 개입하지 않는다.
+    분기 지시사항은 먼저 (a) 개체(판매자 등) 단위 비교 (b) 개체 집계 없는 단순 행 필터
+    (c) 무관, 세 가지로 분류된다(2026-07-24 — 그전까지는 무조건 (a) 경로로만 처리되어
+    "이상치인 행만 제외" 같은 (b) 요청이 개체 집계로 잘못 우회되거나, 이 마트처럼 개체
+    ID 컬럼이 아예 없으면 조용히 무시되는 문제가 있었다). (b)면 개체 집계를 거치지 않고
+    원본 df 그레인 그대로 조건에 맞는 행만 남긴다. (a)일 때만 엔티티/관측/지표/타겟
+    컬럼을 컬럼명·질문 문구 기반 휴리스틱으로 고르고, 필터 표현식은 집계된 요약 컬럼
+    기준으로 LLM이 다시 판단한다. 표현이 뭐든 shared/expression_gate.py로 검증 후
+    실행하고, (c)면 이 메커니즘 자체가 개입하지 않는다.
     """
     question = (user_question or "").casefold()
     if "[추가 지시사항]" not in user_question:
         return None
     if llm is None:
         return None
+
+    classification = _classify_branch_request(llm, user_question, list(df.columns))
+    if classification["request_type"] == "unrelated":
+        return None
+    if classification["request_type"] == "row_filter":
+        return _build_row_filter_frame(df, classification.get("filter_expression"))
 
     entity_col = _pick_entity_col(df, question)
     observation_col = _pick_observation_col(df, entity_col)
@@ -106,6 +113,81 @@ def build_derived_group_frame(df: pd.DataFrame, user_question: str, llm: Any = N
         "key_col": entity_col,
         "measure_cols": [count_name, metric_avg, target_avg],
         "target_col": target_avg,
+    }
+
+
+def _classify_branch_request(llm: Any, user_question: str, raw_columns: list[str]) -> dict[str, Any]:
+    """분기 지시사항을 (a) 개체 단위 비교 (b) 개체 집계 없는 단순 행 필터 (c) 무관으로 분류한다.
+
+    (b)로 판단되면 원본 df 컬럼만 사용하는 pandas 불리언 표현식까지 함께 받는다 — 이후
+    개체 집계를 거치지 않고 그 표현식을 원본 df에 바로 적용한다.
+    """
+    prompt = f"""아래는 데이터 분석 파이프라인의 분기(재분석) 지시사항이다. 이 지시사항의 성격을 판단하라.
+
+[지시사항] {user_question}
+
+세 가지 중 하나로 분류하라:
+- "entity_comparison": 개체(예: 판매자, 고객)를 단위로 그 개체들을 조건으로 걸러내고 개체
+  단위 집계로 비교하고 싶다는 요청(예: "주문 10건 이상인 판매자만", "구매액 상위 고객군").
+- "row_filter": 개체 집계 없이 지금 있는 행(주문 등) 중 조건을 만족하는 행만 남기거나
+  제외하고 싶다는 요청(예: "이상치를 제거", "상위 1%를 제외", "특정 구간만") — 집계 단위를
+  바꾸지 않는다.
+- "unrelated": 위 둘 다 아님(차트 종류 변경, 다른 지표로 전환 등).
+
+row_filter로 판단되면, 아래 원본 컬럼만 사용해서 pandas 불리언 표현식 하나를 함께 써라
+(새 컬럼을 만들지 말고 이 컬럼들만 사용하라):
+{raw_columns}
+
+이상치 제외처럼 구체적 기준이 지시사항에 없으면 1.5 IQR을 보편적 기준으로 사용하라.
+표현식 예시: df["col"].between(df["col"].quantile(0.25) - 1.5 * (df["col"].quantile(0.75) -
+df["col"].quantile(0.25)), df["col"].quantile(0.75) + 1.5 * (df["col"].quantile(0.75) -
+df["col"].quantile(0.25)))
+
+반드시 JSON만 출력하라(코드블록 없이):
+{{"request_type": "entity_comparison 또는 row_filter 또는 unrelated 중 하나",
+  "filter_expression": "row_filter일 때만 표현식 문자열, 아니면 null"}}"""
+    try:
+        raw = llm.invoke(prompt).content
+    except Exception:  # noqa: BLE001 — LLM 호출 실패는 "무관"과 동일하게 처리
+        return {"request_type": "unrelated", "filter_expression": None}
+    parsed = _parse_json(raw) or {}
+    request_type = parsed.get("request_type")
+    if request_type not in {"entity_comparison", "row_filter", "unrelated"}:
+        return {"request_type": "unrelated", "filter_expression": None}
+    return {"request_type": request_type, "filter_expression": parsed.get("filter_expression")}
+
+
+def _build_row_filter_frame(df: pd.DataFrame, expression: str | None) -> dict[str, Any] | None:
+    """개체 집계 없이, 원본 행 그레인을 유지한 채 조건에 맞는 행만 남긴다."""
+    if not expression:
+        return None
+    gate = validate_expression(expression, list(df.columns))
+    if not gate.ok:
+        return None
+    eligible = _apply_filter_expression(df, expression)
+    if eligible is None or eligible.empty:
+        # 표현식이 게이트를 통과했어도 실행 오류·전량 제외면 지어낸 결과를 내느니 개입 안 한다.
+        return None
+
+    result: dict[str, Any] = {
+        "status": "success",
+        "kind": "row_filter",
+        "filter_expression": expression,
+        "total_rows": int(len(df)),
+        "eligible_rows": int(len(eligible)),
+        "excluded_rows": int(len(df) - len(eligible)),
+        "findings": [
+            f'"{expression}" 조건으로 원본 행을 필터링했습니다.',
+            f"전체 {len(df)}행 중 {len(eligible)}행이 조건을 통과했습니다.",
+        ],
+    }
+    return {
+        "dataframe": eligible.reset_index(drop=True),
+        "metadata": result,
+        "mart_design": {},
+        "key_col": None,
+        "measure_cols": None,
+        "target_col": None,
     }
 
 
